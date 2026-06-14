@@ -10,43 +10,67 @@ Turning a Dreame robot vacuum into an AI platform — Valetudo integration, ROS 
 
 ## Architecture
 
-```
-Dreame D10s Pro                          Radxa Dragon Q6A
-─────────────────────────────            ────────────────────────────
-AVA daemon (hardware control)            ALL ROS 2 nodes:
-Valetudo (REST + MQTT) ──MQTT──────────► valetudo_bridge → /scan /odom /map
-                       ◄─REST──────────── nav commands ← nav2 / behavior
-/dev/video0 ──gstreamer/UDP────────────► camera_node → /image_raw
-/dev/snd (ALSA speaker) ◄──socket──────── tts_node + audio_client
-Ubuntu 24.04 chroot                      inference_node (YOLOv8 on NPU)
-  └─ gstreamer daemon                    nav2_stack
-  └─ audio_server.py                     behavior_node
+```mermaid
+flowchart LR
+    subgraph robot["Dreame D10s Pro (r2250)"]
+        ava["AVA daemon\nhardware control"]
+        valetudo["Valetudo\nREST :80 · MQTT :1883"]
+        cam["/dev/video0\nOV8856 camera"]
+        spk["/dev/snd\nALSA speaker"]
+        gst["camera_stream.sh\nGStreamer H.264"]
+        audio["audio_server.py\nTCP :9999"]
+        ava <--> valetudo
+        cam --> gst
+        audio --> spk
+    end
+
+    subgraph companion["Radxa Dragon Q6A (12 TOPS NPU)"]
+        bridge["valetudo_bridge\nMQTT → ROS 2"]
+        camera_node["camera_node\n/camera/image_raw"]
+        infer["inference_node\nYOLOv8 · NPU"]
+        nav2["Nav2 stack"]
+        behavior["behavior_node"]
+        tts["tts_node\nPiper TTS"]
+        bridge --> nav2
+        camera_node --> infer
+        infer --> behavior
+        nav2 --> behavior
+        behavior --> tts
+    end
+
+    valetudo -- "MQTT" --> bridge
+    behavior -- "REST API" --> valetudo
+    gst -- "UDP/H.264\n192.168.10.x" --> camera_node
+    tts -- "WAV · TCP" --> audio
 ```
 
-Connection: robot USB 2.0 → USB-Ethernet adapter → Dragon Q6A GbE (dedicated link)  
-Power: robot battery (14.8V) → 12V buck converter → Dragon Q6A USB-C
+**Link:** Robot USB 2.0 → USB-Ethernet adapter → Dragon Q6A GbE (dedicated `192.168.10.0/24`)  
+**Power:** Robot battery 14.8V → 12V buck converter → Dragon Q6A USB-C
 
 ## Repository structure
 
 ```
+scripts/
+  robot/
+    _root.sh              early boot hook — WiFi bind-mount (deploy to /data/)
+    _root_postboot.sh     late boot hook — DHCP, chroot mounts, Valetudo
+    chroot.sh             enter Ubuntu 24.04 chroot on the robot
+    camera_stream.sh      GStreamer pipeline: /dev/video0 → UDP H.264
+    audio_server.py       TCP server: receives WAV from companion, plays via aplay
+  companion/
+    install_ros2.sh       install ROS 2 Jazzy on Dragon Q6A
 robot/
-  boot/           boot hooks that run on the Dreame at startup
-  valetudo/       Valetudo configuration
-  daemons/        lightweight daemons (camera stream, audio server)
+  boot/README.md          deployment instructions for boot hooks
+  valetudo/valetudo.json  Valetudo configuration
 companion/
-  ros2/           ROS 2 nodes running on the Dragon Q6A
-    valetudo_bridge/   MQTT→ROS + ROS→Valetudo REST
-    camera_node/       receives GStreamer stream, publishes /image_raw
-    audio_server/      TTS and audio playback client
-  setup/          setup scripts for Debian 12 + ROS 2 Jazzy on Dragon Q6A
+  ros2/                   ROS 2 node packages (valetudo_bridge, camera_node, …)
 docs/
-  hardware.md     wiring, power, physical mounting
-  wifi-hack.md    why the bind-mount trick is needed for WiFi
-  valetudo.md     Valetudo setup and API notes
+  hardware.md             wiring, power, physical mounting
+  wifi-hack.md            why the bind-mount trick is needed for WiFi
 ```
 
 ## Quick start
 
 See [docs/hardware.md](docs/hardware.md) for wiring and physical setup.  
 See [robot/boot/README.md](robot/boot/README.md) for deploying boot hooks to the robot.  
-See [companion/setup/](companion/setup/) for Dragon Q6A OS and ROS 2 setup.
+See [scripts/companion/install_ros2.sh](scripts/companion/install_ros2.sh) for Dragon Q6A ROS 2 setup.
