@@ -56,6 +56,15 @@ Robot USB 2.0 host → USB-Ethernet adapter → Cat5e → Dragon Q6A GbE
 | `_root_postboot.sh` | Late — after all services | DHCP, chroot mounts, start Valetudo |
 
 ### WiFi (critical — read before touching)
+
+**Home network topology:**
+- Laptop connects to `5K` (5GHz, 802.11ac) — Claude/SSH sessions run from here
+- Robot connects to `4K` (2.4GHz) — robot WiFi is 2.4GHz only
+- These are the same router, same password, different bands/SSIDs
+- SSH to robot at home: `root@192.168.1.213` (via 4K DHCP)
+- SSH to robot in AP mode: `root@192.168.5.1`
+
+**wpa_supplicant config bind-mount:**
 The init script `wpa_supplicant.sh` checks for `/usr/bin/wifi_manager`. When it exists (it does on r2250), it reads from `/etc/wifi/wpa_supplicant.conf` — a **read-only squashfs file with no network entries** — instead of `/data/config/wifi/wpa_supplicant.conf`.
 
 Fix: `_root.sh` writes our config to `/data/config/wifi/wpa_supplicant.conf` then does:
@@ -63,6 +72,16 @@ Fix: `_root.sh` writes our config to `/data/config/wifi/wpa_supplicant.conf` the
 mount --bind /data/config/wifi/wpa_supplicant.conf /etc/wifi/wpa_supplicant.conf
 ```
 This must run **before** `wpa_supplicant.sh`. See `docs/wifi-hack.md` for full explanation.
+
+**CRITICAL — `/etc/miio` is a symlink:**
+`/etc/miio` in squashfs is a **symlink → `/data/config/miio/`**. This means:
+- Files created in `/data/config/miio/` are immediately visible at `/etc/miio/`
+- No bind-mount of `/etc/miio/` is needed or useful — the symlink already provides write access
+- `mount --bind /data/config/miio /etc/miio` resolves the symlink and mounts `/data/config/miio` over itself (no-op in practice)
+- `miio_client_helper_nomqtt.sh` checks `[ -f /etc/miio/wifi.conf ]` (via `WIFI_CONF_FILE=/etc/miio/wifi.conf`) to decide if the device is provisioned
+
+**Deployment — e2e script requirement:**
+Connecting the laptop to the robot AP (`dreame-vacuum-r2250_miap8E6A`) drops the internet connection. All deploy scripts must be completely self-contained background scripts that: connect to AP → do work → reconnect to home WiFi (`5K`). Never try to SSH interactively while switching networks. See `/tmp/robot-deploy.sh` for the pattern.
 
 ### Ubuntu 24.04 chroot (`/data/chroot/`)
 - Full Ubuntu 24.04.4 arm64 base rootfs
@@ -116,14 +135,17 @@ Ubuntu chroot (idle, available)             inference_node (YOLOv8, NPU)
 
 ## Key constraints and gotchas
 
-1. **WiFi is 2.4GHz only** — 5GHz networks won't be seen by the robot
+1. **WiFi is 2.4GHz only** — robot connects to `4K` SSID (2.4GHz). The `5K` SSID (5GHz) won't be seen by the robot.
 2. **Single radio** — robot AP (hostapd on wlan0) and STA mode (wpa_supplicant) cannot run simultaneously on different channels. Our fix: kill hostapd at boot, use wlan0 as STA only.
 3. **BusyBox wget cannot follow HTTPS redirects** — always use `curl -L` on the robot, or download on laptop and `scp`
 4. **Kernel 4.9.191** — Ubuntu 24.04 glibc 2.39 mostly works, but apt's sandbox user (`_apt`) cannot do DNS — requires `APT::Sandbox::User "root"` workaround
 5. **AVA owns `/dev/ttyS4`** — LiDAR cannot be read directly without conflicting with AVA. Use Valetudo MQTT for map/scan data instead.
-6. **squashfs root** — any change to system files requires either a bind mount from `/data/` or a chroot. Never attempt `mount -o remount,rw /`.
+6. **squashfs root** — any change to system files requires either a bind mount from `/data/` or a chroot. Never attempt `mount -o remount,rw /`. `/etc/miio` is a SYMLINK to `/data/config/miio/` (so it's already writable via /data/).
 7. **exec_monitor.sh** watches only the `ava` process — it does NOT restart hostapd if killed. Safe to kill hostapd permanently.
 8. **firmware 1413 IoT flag** — AVA does NOT connect to `miio_agent` (TCP 54320) at boot unless `/data/config/ava/iot.flag` contains `miiot`. This flag is normally written during cloud provisioning (which we bypass via Valetudo). Without it, ALL Valetudo MIIO property/action commands time out. Fix: `_root_postboot.sh` writes `miiot` to the flag and calls `avacmd iot '{"type":"iot","notify":"open_server"}'` at boot.
+9. **work_mode 17 persists at boot** — AVA enters work_mode 17 (RemoteCtrlMode) on every boot via the MIIO provisioning flow. Most Valetudo capabilities return HTTP 400 in this state. See `### work_mode 17 — root cause and investigation` below.
+10. **_root.sh has hardcoded WiFi credentials** — the `4K` SSID PSK is hardcoded. Deploying from repo (which may have placeholder `YOUR_SSID`/`YOUR_HEX_PSK`) will break WiFi. Always verify credentials before deploy.
+11. **Bind-mount a FILE over a non-existent squashfs path = boot failure** — if you try `mount --bind /data/file /etc/miio/nonexistent` where `nonexistent` doesn't exist in squashfs, the bind-mount silently fails but breaks init. Always bind-mount directories, or ensure the target file exists in squashfs first.
 
 ---
 
@@ -190,18 +212,80 @@ Valetudo (UDP 8053) ↔ miio_client (UDP 54321, TCP 54322/54323) ↔ miio_agent 
 | MIIO property | siid | piid | Values |
 |---------------|------|------|--------|
 | work_mode | 2 | 4 | see work mode table below |
-| fan_speed | 4 | 4 | 0=off, low/medium/high/max |
+| fan_speed | 4 | 4 | 0=off, 1=low, 2=medium, 3=high, 4=max (Valetudo "low"→0, "medium"→1, "high"→2, "max"→3) |
 | clean_mode | 4 | 7 | 0=sweep (fan ON), 1=mop-only (fan OFF), 2=sweep+mop |
 | water_grade | ? | ? | low/medium/high |
+
+**Work modes (`work_mode` from avacmd):** — see `### work_mode 17` section for full table and investigation
+
+### work_mode 17 — root cause and investigation
+
+**Symptom**: On every boot, AVA immediately enters work_mode 17 (RemoteCtrlMode). Most Valetudo REST capabilities return HTTP 400 in this state. `{"operation":"disable"}` on HighResolutionManualControlCapability also returns 400.
+
+**MIIO provisioning flow (root cause):**
+```
+miio_client starts
+  → sends "_internal.request_dinfo" to miio_client_helper_nomqtt.sh
+  → helper reads /etc/miio/wifi.conf (which is /data/config/miio/wifi.conf via symlink)
+  → if file MISSING: sends params:0 (not provisioned)
+     → miio_client: STATE_OT_CONFIG_DONE → STATE_WIFI_AP_MODE
+     → opens WiFi AP for provisioning (30 min countdown)
+     → triggers work_mode 17 in AVA ("app can drive robot to dock")
+  → if file EXISTS: sends params:1 (provisioned) → STA mode → no work_mode 17
+```
+
+**Key files:**
+- `WIFI_CONF_FILE=/etc/miio/wifi.conf` (symlink → `/data/config/miio/wifi.conf`)
+- `/usr/bin/config`: defines WIFI_CONF_FILE (falls back to /etc/miio/wifi.conf if unset)
+- `/usr/bin/miio_client_helper_nomqtt.sh`: `get_bind_status()` checks `[ -f $WIFI_CONF_FILE ]`
+
+**Current fix in `_root.sh`:**
+```sh
+[ ! -f /data/config/miio/wifi.conf ] && printf 'ssid="configured"\nkey_mgmt=WPA\n' > /data/config/miio/wifi.conf
+```
+This creates wifi.conf before miio_client starts (at t=3s; miio_client starts at t=9s).
+
+**Current status (UNRESOLVED):** Even with wifi.conf created and confirmed accessible (`test -f /etc/miio/wifi.conf` returns YES), the MIIO helper still sends params:0 and miio_client enters AP mode → work_mode 17. User.log shows this at t=9-11s boot time:
+```
+STATE: [STATE_OT_CONFIG_DONE] -> [STATE_WIFI_AP_MODE]
+wifi enter AP mode
+ap will close in 1799s  (←30 min countdown)
+```
+
+**Investigation attempts (all failed to prevent work_mode 17):**
+- Created `/data/config/miio/wifi.conf` with dummy content → file exists but params:0 still sent
+- Directory bind-mount `/data/config/miio` → `/etc/miio` → no-op (symlink resolves to same path)
+- `avacmd msg_cvt '{"type":"msgCvt","cmd":"status_idle"}'` → `{"ret":"fail"}` in work_mode 17
+- `curl PUT /api/v2/robot/capabilities/HighResolutionManualControlCapability {"operation":"disable"}` → HTTP 400
+- `avacmd clb {"cmd":"report_network_connect_mode","mode":0}` → `{}` (not recognized)
+- Valetudo `{"command":"home"}` → HTTP 400 (Bad Request) in work_mode 17
+
+**WRONG approach that broke the robot:**
+The first fix attempt tried to bind-mount a FILE over a non-existent path:
+```sh
+mount --bind /data/config/miio/wifi.conf /etc/miio/wifi.conf  # WRONG!
+```
+`/etc/miio/wifi.conf` doesn't exist in squashfs. Bind-mounting a file over a non-existent target caused the robot to fail to boot (couldn't connect to home WiFi). Recovery: connect to robot AP mode at 192.168.5.1, deploy fixed script.
+
+**Correct bind-mount rule:** Only bind-mount OVER PATHS THAT EXIST in squashfs. For files, the target must already exist. For directories, the target must exist. Never create new squashfs paths via bind-mount.
+
+**Open questions:**
+- Why does the helper return params:0 even when wifi.conf exists? May be a shell environment issue, timing, or the `source /usr/bin/config` command failing silently.
+- Does the Dreame firmware have a state machine that ALWAYS starts in work_mode 17 and transitions to 6 only after cloud confirm? If so, with Valetudo (no cloud), it stays at 17 forever.
+
+**Work-around while unresolved:**
+`FanSpeedControlCapability "low"` (MIIO siid:4 piid:4=0) set at boot via Valetudo. AVA uses stored fan_speed=0 when entering work_mode 17, keeping fan off. See `### Permanent vacuum fan disable` below.
 
 **Work modes (`work_mode` from avacmd):**
 | Value | Meaning |
 |-------|---------|
-| 6 | Docked, idle |
+| 6 | Docked, idle (target state) |
+| 9 | Intermediate provisioning state (seen during AP mode before work_mode 17 kicks in) |
+| 13 | Intermediate state during HighResolutionManualControlCapability enable transition (17→13→17) |
 | 14 | Dock activity (auto-empty, self-cleaning, etc.) |
-| 17 | Manual remote control (HighResolutionManualControlCapability) |
+| 17 | Remote control / provisioning mode — entered during Dreame WiFi provisioning flow OR HighResolutionManualControlCapability enable |
 
-### Persistent cleaning configuration — `clean_parameter.json`
+
 
 `/data/config/ava/clean_parameter.json` — AVA's porphyrion (clb) node reads this at boot to initialize the behavior tree blackboard. AVA continuously overwrites this file during operation (mirroring its in-memory state).
 
@@ -226,32 +310,106 @@ Valetudo (UDP 8053) ↔ miio_client (UDP 54321, TCP 54322/54323) ↔ miio_agent 
 {"CleanMode":1,"CleanMop":1,"CleanBreakPonitStart":0,"CleanCarPetPress":0,"CleanWashMopTime":0,"StreamerSwitch":3,"MopSwitch":0,"CustomeSwitch":0,"ChildLock":0,"CarpetPressState":2,"MopMode":0,"UploadMap":1,"YmodeSwitch":0,"MultiMapReloc":0,"SwitchSet":[{"k":"AutoDry","v":1},{"k":"CleanType","v":1},{"k":"FillinLight","v":1},{"k":"LessColl","v":1},{"k":"MopScalable","v":1},{"k":"StainIdentify","v":1}]}
 ```
 
+### AVA debug logs
+
+Key log files that are NOT user.log (which is from previous boots and goes silent on current boot because miio_client logs to /dev/null):
+
+| Log file | Updated | Contents |
+|----------|---------|----------|
+| `/tmp/log/log_0` | Current boot | AVA's WritePropInt/WritePropString internal property writes, camera AI, LiDAR |
+| `/tmp/log/ava_cmd.log` | Current boot | All avacmd invocations and responses |
+| `/tmp/log/trace_sync.log` | Current boot | AVA behavior tree pub/cond trace (low-level) |
+| `/data/log/msg_cvt.log` | Persistent | All `msg_cvt.sh` invocations (set_device_time, poweroff, iot_state) |
+| `/data/log/wifi.log` | Current boot | WiFi connection events |
+| `/data/log/fds.log` | Current boot | FDS (firmware download) events |
+| `/tmp/postboot.log` | Current boot | Our `_root_postboot.sh` run log |
+| `/tmp/valetudo.log` | Current boot | Valetudo process log |
+
+**`miio_client` (PID ~1601) logs to `/dev/null`** on current firmware — all stdout/stderr discarded. user.log from previous boots persists but is stale.
+
+**`/tmp/log/log_0` — WritePropInt/WritePropString format:**
+```
+[WritePropInt|140] type=N, value=V, from=0, sync=0  ← sets integer property type=N to value V
+[WritePropString:161] type=0, len=L, value:P,{json}  ← sets property piid=P (string) to json
+```
+
+**Boot sequence (from log_0):**
+1. AVA reads `clean_parameter.json` → WritePropInt loads: `type=0 value=1` (CleanMode=1 mop-only), `type=1 value=1` (CleanMop), `type=17 value=2` (CarpetPressState), `type=23 value=3` (StreamerSwitch) etc.
+2. Camera AI + LiDAR init → hundreds of `[CL2] Kernel` lines (OpenCL GPU kernels)
+3. Valetudo connects (dummycloud at t≈22s after boot) → AVA receives piid:13 enable:
+   - `WritePropInt type=0 value=0` → **CleanMode RESET to 0 (sweep)** ← fan activates here
+   - `WritePropString piid:13 {"spdv":0,"spdw":0,"audio":"true","random":N}` → RemoteCtrlMode entered
+4. Periodic keepalive piid:13 writes with `audio:false`
+
+**Critical: AVA resets CleanMode to 0 (sweep mode = fan ON) every time piid:13 is written** — i.e., every time Valetudo sends a remote control command. This overrides our boot-time `clean_parameter.json` CleanMode:1 patch, and also overrides `set_only_mop.py`'s `only_mop=1` (which is a separate blackboard key from CleanMode type=0).
+
+---
+
 ### Permanent vacuum fan disable
 
 **Goal**: Use `HighResolutionManualControlCapability` (manual driving) without the vacuum fan running.
 
-**Mechanism**: Setting `CleanMode:1` (mop-only) activates the `only_mop` blackboard variable in AVA's behavior tree, which causes `mop_mode_fan_handle` to set fan=0 for all operations including manual control.
+**Root cause — UPDATED after debugging:**
 
-**Method** (implemented in `_root.sh`):
+When Valetudo starts and connects to dummycloud (t≈22s after boot), it sends `WritePropString piid:13 {"spdv":0,"spdw":0,"audio":"true","random":N}` — the initial RemoteCtrlMode enable. AVA processes this and:
+1. Executes `WritePropInt type=0 value=0` → resets CleanMode to 0 (sweep mode = fan enabled)
+2. Enters RemoteCtrlMode (work_mode 17)
+3. Fan activates via MCU
 
-`_root.sh` runs **before AVA starts**, so its writes to `clean_parameter.json` are read by AVA at initialization — no race condition:
+This happens BEFORE our postboot fan_speed=0 set (t≈90s). Setting `FanSpeedControlCapability "low"` after this point:
+- Returns "OK" from Valetudo
+- Valetudo updates its internal cache to rawValue=0
+- But the state REVERTS to rawValue=3 (max) after some time, suggesting AVA overrides it or the command doesn't affect the running fan in RemoteCtrlMode
+- **Fan continues running** — confirmed by user
 
-```sh
-if [ -f /data/config/ava/clean_parameter.json ]; then
-    sed -i 's/"CleanMode":[0-9]/"CleanMode":1/' /data/config/ava/clean_parameter.json
-    logger -t root_sh "clean_parameter.json patched to CleanMode:1 (mop-only)"
-fi
-```
+**`HighResolutionManualControlCapability enable` returns HTTP 400** — because robot is ALREADY in RemoteCtrlMode from Valetudo's automatic startup init. This is NOT a blocking error; the robot IS in remote control mode.
 
-This runs on every boot, so even if AVA writes CleanMode:0 back before shutdown, the next boot patches it again before AVA reads it.
+**piid:13 vs piid:15**: CLAUDE.md previously said piid:15 for remote control. Actual internal AVA log shows piid:13. These may be different numbering systems (MIIO siid/piid vs AVA internal property index).
+
+**Valetudo fan speed preset mapping** (D10s Pro — offset by 1 from MIIO):
+| Valetudo preset | MIIO siid:4 piid:4 | Fan behavior |
+|---|---|---|
+| `low` | 0 | Fan off (stored preset) |
+| `medium` | 1 | Low speed |
+| `high` | 2 | Medium speed |
+| `max` | 3 | High speed |
+
+**Method 1 — FanSpeedControlCapability at boot (PARTIALLY WORKING, unreliable)**:
+Set `FanSpeedControlCapability` preset to `"low"` (= MIIO 0 = off) after Valetudo starts. This sets the stored fan_speed preset in AVA's MIIO property store. However:
+- Fan is already running from t=22s (Valetudo's piid:13 init), set doesn't run until t≈90s
+- State may revert to rawValue=3 (max) — suggesting the command doesn't affect the currently running fan in RemoteCtrlMode
+- Still implemented in `_root_postboot.sh` (30×3s retry loop) as a safety measure
+
+**Method 2 — `set_only_mop.py` daemon (does NOT suppress fan in work_mode 17)**:
+`set_only_mop.py` holds AVA BT blackboard `only_mop=1` via heap patch. Does NOT prevent the fan. Root cause confirmed: `only_mop` is a SEPARATE blackboard key from `CleanMode` (WritePropInt type=0). The daemon holds `only_mop=1` but AVA still resets `CleanMode=0` (sweep) on every piid:13 write. Daemon kept running — prevents fan in non-RemoteCtrlMode sweep mode.
+
+**Method 3 — `clean_parameter.json` CleanMode:1 (partial)**:
+Loads at boot, sets CleanMode=1. But AVA actively RESETS CleanMode to 0 when it processes piid:13 commands. Does NOT prevent fan in work_mode 17.
+
+**Note on CleanMode:1**: Kept in `_root.sh` as a safety net, but it does NOT control the fan in work_mode 17.
 
 **Note on manual control speed**: CleanMode:1 (mop-only) does NOT reduce manual driving speed. Manual control wheel speed is governed by `spdv`/`spdw` MIIO parameters (`remote_params` blackboard), not by mop speed limits.
+
+**Test result (under investigation):**
+Live monitoring captured the HighResolutionManualControlCapability enable sequence:
+- work_mode: 17 (provisioning) → 13 (intermediate) → 17 (RemoteCtrlMode proper)
+- log_0: `WritePropInt type=0 value=0` (CleanMode=0/sweep reset) then piid:13 `{"spdv":0,"spdw":0,"audio":"true","random":554}`
+- `fan_speed` Valetudo state: stayed "low" (rawValue=0) throughout enable sequence
+- Conclusion pending user confirmation: if fan was silent, `FanSpeedControlCapability "low"` DOES suppress the fan even with CleanMode=0 in RemoteCtrlMode. If fan still ran, the MIIO fan_speed preset doesn't affect the motor in RemoteCtrlMode.
+
+**If still failing — next approaches to investigate:**
+1. **Heap-patch CleanMode (WritePropInt type=0)**: Extend `set_only_mop.py` to also hold the integer property type=0 (CleanMode) at value=1 (mop-only) continuously. Different from `only_mop` — need to find the integer property array address in AVA's heap/data segment.
+2. **Block piid:13 fan activation**: Intercept the miio_agent→AVA TCP 54320 channel and filter/modify piid:13 messages to prevent the CleanMode reset.
+3. **MCU CLEANSET intercept**: Intercept `/dev/ttyS3` writes (fd 26 of AVA) to suppress fan motor commands. Risk: conflicts with AVA.
 
 **What doesn't work**:
 - `avacmd msg_cvt '{"type":"msgCvt","cmd":"set_prop","prop":"clean_mode","value":"1"}'` → `{}` (not supported)
 - `avacmd clb '{"type":"clb","cmd":"set_clean_mode","value":1}'` → `{}` (not exposed)
 - `miio_send_line '{"method":"set_properties","params":[{"siid":4,"piid":7,"value":1}]}'` → only sends to provisioning helper port (54323), not device command channel
 - `chattr +i clean_parameter.json` → ext4 on `/data/` does not support immutable flag on kernel 4.9.191
+- `CleanMode:1` in `clean_parameter.json` → AVA resets to CleanMode=0 on every piid:13 write
+- `only_mop=1` heap patch (set_only_mop.py) → patches different key, CleanMode still reset to 0
+- `FanSpeedControlCapability "low"` at boot (t≈90s) → fan already running since t≈22s; command may not affect running fan in RemoteCtrlMode
 
 ### Valetudo REST API capabilities
 
@@ -328,7 +486,7 @@ Direct MCU serial access would conflict with AVA. Use avacmd/Valetudo API instea
 
 ```bash
 # SSH to robot
-ssh dreame-home          # home network (192.168.1.213)
+ssh dreame-home          # home network (192.168.1.213) via 4K (2.4GHz)
 ssh dreame               # robot AP mode (192.168.5.1)
 
 # Enter Ubuntu chroot on robot
@@ -340,14 +498,33 @@ ssh dreame-home 'cat /tmp/valetudo.log | tail -20'
 # Check WiFi connection
 ssh dreame-home 'wpa_cli -iwlan0 status'
 
-# View boot logs
-ssh dreame-home 'logread | grep -E "(postboot|root_sh)"'
+# View boot logs (structured now)
+ssh dreame-home 'cat /tmp/root_sh.log'      # early boot log
+ssh dreame-home 'cat /tmp/postboot.log'     # postboot sequence log
+ssh dreame-home 'cat /tmp/only_mop.log'     # fan suppress daemon log
+
+# Check work_mode and fan speed
+ssh dreame-home 'avacmd msg_cvt '"'"'{"type":"msgCvt","cmd":"get_prop","prop":"work_mode"}'"'"''
+ssh dreame-home 'curl -s http://localhost/api/v2/robot/capabilities/FanSpeedControlCapability/preset'
+
+# Set fan to off (Valetudo "low" = MIIO 0 = off)
+ssh dreame-home 'curl -s -X PUT http://localhost/api/v2/robot/capabilities/FanSpeedControlCapability/preset \
+  -H "Content-Type: application/json" -d '"'"'{"name":"low"}'"'"''
+
+# Deploy scripts to robot (e2e: AP connect → deploy → reboot → reconnect 5K)
+bash /tmp/robot-deploy.sh     # see scripts/robot/deploy.sh for the template
 
 # Test camera
 ssh dreame-home 'v4l2-ctl --device=/dev/video0 --info'
 
 # Play test audio on robot
 ssh dreame-home 'aplay -D hw:0,0 /usr/share/sounds/alsa/Front_Left.wav'
+
+# Check miio state transitions at boot
+ssh dreame-home 'grep -E "(STATE|AP_mode|wifi_conf)" /data/log/user.log | tail -20'
+
+# Check if robot is in provisioning/AP mode
+ssh dreame-home 'grep "ap will close" /data/log/user.log | tail -3'
 ```
 
 ---
@@ -357,19 +534,30 @@ ssh dreame-home 'aplay -D hw:0,0 /usr/share/sounds/alsa/Front_Left.wav'
 ```
 scripts/
   robot/
-    _root.sh               deploy to /data/_root.sh on robot
+    _root.sh               deploy to /data/_root.sh on robot (CONTAINS WIFI CREDENTIALS)
     _root_postboot.sh      deploy to /data/_root_postboot.sh on robot
     chroot.sh              deploy to /data/chroot.sh on robot
     camera_stream.sh       run in robot chroot to stream /dev/video0
     audio_server.py        run in robot chroot to serve audio playback
+    dreame-wifi-setup.sh   e2e script: connect AP → deploy → reconnect 5K
   companion/
     install_ros2.sh        run on Dragon Q6A to install ROS 2 Jazzy
 robot/
   boot/README.md           deployment instructions for boot hooks
   valetudo/valetudo.json   Valetudo configuration
+  config/
+    ava/
+      clean_parameter.json versioned snapshot of /data/config/ava/clean_parameter.json
+      iot_conf.json        versioned snapshot of /data/config/ava/iot_conf.json
+    miio/
+      wifi.conf            versioned snapshot of /data/config/miio/wifi.conf (dummy content)
 companion/
   ros2/                    ROS 2 node packages (valetudo_bridge, camera_node, etc.)
 docs/
   hardware.md              wiring, power, physical setup
   wifi-hack.md             detailed explanation of the wpa_supplicant fix
 ```
+
+**Important**: `scripts/robot/_root.sh` contains the WiFi PSK for the 4K network (2.4GHz home). Do not replace with placeholder values when deploying — this breaks WiFi connectivity.
+
+**Robot config versioning**: Key config files from `/data/config/` are copied to `robot/config/` so changes can be tracked and rolled back. To update: `scp dreame-home:/data/config/ava/clean_parameter.json robot/config/ava/`.
