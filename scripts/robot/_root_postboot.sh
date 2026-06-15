@@ -70,31 +70,6 @@ logger -t postboot "starting Valetudo"
     sleep 5
 done) &
 
-# Wait for Valetudo to be ready, then set fan speed to off.
-# FanSpeedControlCapability "low" = MIIO siid:4 piid:4=0 = fan completely off.
-# AVA uses stored fan_speed preset when entering work_mode 17 (manual control).
-# Retry for up to 90 seconds — Valetudo needs dummycloud connection to accept commands.
-echo "waiting for Valetudo to be ready..."
-FAN_SET=0
-for i in $(seq 1 30); do
-    sleep 3
-    VALETUDO_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost/api/v2/robot/state 2>/dev/null)
-    echo "Valetudo check $i/30: HTTP $VALETUDO_STATUS"
-    if [ "$VALETUDO_STATUS" = "200" ]; then
-        FAN_RESULT=$(curl -s -X PUT http://localhost/api/v2/robot/capabilities/FanSpeedControlCapability/preset \
-            -H 'Content-Type: application/json' -d '{"name":"low"}')
-        echo "Fan speed set to low (off): $FAN_RESULT"
-        logger -t postboot "fan speed set to low (off): $FAN_RESULT"
-        FAN_SET=1
-        break
-    fi
-done
-[ "$FAN_SET" = "0" ] && echo "WARNING: Valetudo never ready — fan speed not set" && logger -t postboot "WARNING: fan speed NOT set (Valetudo timeout)"
-
-# --- Fan suppress daemon ---
-echo "starting only_mop daemon..."
-logger -t postboot "starting only_mop daemon"
-(chroot /data/chroot python3 /usr/local/bin/set_only_mop.py >> /tmp/only_mop.log 2>&1) &
-echo "only_mop daemon started"
-logger -t postboot "only_mop daemon started"
+# Vacuum fan is suppressed at the MCU level by the LD_PRELOAD SetCleaning filter
+# (preloaded onto AVA in _root.sh). No fan_speed/only_mop workarounds needed here.
 echo "=== _root_postboot.sh complete $(date) ==="

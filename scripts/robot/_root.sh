@@ -21,13 +21,6 @@ if [ -f "$FANOFF" ]; then
     logger -t root_sh "fanoff shim preload bind-mounted"
 fi
 
-# Patch CleanMode before anything else (AVA may start fast).
-if [ -f /data/config/ava/clean_parameter.json ]; then
-    sed -i 's/"CleanMode":[0-9]/"CleanMode":1/' /data/config/ava/clean_parameter.json
-    sed -i 's/{"k":"CleanType","v":[0-9]}/{"k":"CleanType","v":1}/' /data/config/ava/clean_parameter.json
-    echo "clean_parameter.json patched to CleanMode=1"
-fi
-
 # Prevent miio_client from entering WiFi AP (provisioning) mode on every boot.
 # Without /etc/miio/wifi.conf, miio_client_helper_nomqtt.sh sends params:0
 # (not configured) → miio_client → STATE_WIFI_AP_MODE → work_mode 17 (RemoteCtrlMode).

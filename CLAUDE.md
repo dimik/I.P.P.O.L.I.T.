@@ -364,7 +364,7 @@ Note: `CleanMode` (`WritePropInt type=0`) is a property-store/behavior-tree valu
 
 **Implementation kit** (`scripts/robot/`): `fanoff_shim.c` (filter), `build_fanoff.sh`, `deploy_fanoff.sh`, `capture_cleanset.sh`.
 
-**Dead ends — do NOT retry** (none gate the fan in manual/remote mode): `clean_parameter.json` `CleanMode`, the `only_mop` heap patch (`set_only_mop.py`), `patch_cleanmode.py`, the `FanSpeedControlCapability` boot loop. This machinery should be stripped from the boot path.
+**Dead ends — do NOT retry** (none gate the fan in manual/remote mode): `clean_parameter.json` `CleanMode`, an `only_mop` heap patch, ptrace-patching `node_porphyrion.so`, or the `FanSpeedControlCapability` boot loop. This machinery has been removed from the boot path and the repo.
 
 ### Valetudo REST API capabilities
 
@@ -458,7 +458,6 @@ ssh dreame-home 'wpa_cli -iwlan0 status'
 # View boot logs (structured now)
 ssh dreame-home 'cat /tmp/root_sh.log'      # early boot log
 ssh dreame-home 'cat /tmp/postboot.log'     # postboot sequence log
-ssh dreame-home 'cat /tmp/only_mop.log'     # fan suppress daemon log
 
 # Check work_mode and fan speed
 ssh dreame-home 'avacmd msg_cvt '"'"'{"type":"msgCvt","cmd":"get_prop","prop":"work_mode"}'"'"''
@@ -501,8 +500,6 @@ scripts/
     build_fanoff.sh        compile shim in chroot (log + filter .so), glibc-2.23-safe
     capture_cleanset.sh    capture MCU 3c..3e frames across fan states
     deploy_fanoff.sh       bind-mount patched ava.sh exporting LD_PRELOAD, restart + verify
-    set_only_mop.py        DEAD — holds wrong heap address (no-op); see fan-disable section
-    patch_cleanmode.py     UNUSED — never wired into boot; superseded by MCU filter
   companion/
     install_ros2.sh        run on Dragon Q6A to install ROS 2 Jazzy
 robot/
