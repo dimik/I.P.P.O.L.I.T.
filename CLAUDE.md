@@ -564,6 +564,26 @@ curl -X PUT http://192.168.1.213/api/v2/robot/capabilities/HighResolutionManualC
 
 AVA communicates with the MCU (motor controller) via `/dev/ttyS3` at 230400 baud. Protocol: binary, `55 AA`-prefixed framing. AVA holds fd 26 open to this device.
 
+> **CORRECTION (2026-06-15, from live strace of AVA writes) — the above was WRONG:**
+> - The active MCU command/telemetry channel is **fd 24 → `/dev/ttyS4`**, NOT fd 26/ttyS3.
+>   In every capture (idle docked, and attempted manual control), **fd 26/ttyS3 had ZERO
+>   writes**; all traffic was on fd 24/ttyS4.
+> - The framing is **`3c … 3e`** (`<` … `>`), **NOT `55 AA`**. Layout looks like
+>   `3c <cmd> <payload...> <crc16-2bytes> 3e`. Observed frame types (cmd = 2nd byte):
+>   - `3c 09 00 01 00 00 00 00 00 00 00 00 e8 25 3e` (15B) — high-rate heartbeat/keepalive,
+>     constant regardless of fan speed
+>   - `3c 04 0f <…> <ts> <crc> 3e` (10–11B) — periodic status w/ rising timestamp byte
+>   - `3c 02 14 04 00 58 43 3e` (8B), `3c 01 02 21 78 e1 3e` (7B), `3c 05 01 01 01 00 00 00 ed 73 3e` (11B) — occasional
+> - The two bytes before the trailing `3e` are a **CRC16** (not a 1-byte sum) — the shim's
+>   checksum routine must implement the real CRC (algorithm TBD from fan-on capture).
+> - **The fan-command frame has NOT been identified yet** — manual control `enable` returns
+>   HTTP 400 while the robot is docked / in work_mode 14, so we have never captured a genuine
+>   fan-ON state. All captures so far are idle dock housekeeping. NEXT: capture fd 24 (AND
+>   fd 26, in case motors light it up only when moving) during real motion — requires the
+>   robot undocked/idle (work_mode 6) and a human to confirm the fan audibly.
+> - **`fanoff_shim.c` `MAGIC`/`CLEANSET_CMD`/`FAN_OFFSET`/`cksum` are all still placeholders**
+>   and must be rebuilt around the `3c…3e` protocol once the fan frame is captured.
+
 **MCU pub/sub message types** (internal to AVA, not directly accessible externally):
 - `CLEANSET` — sets motor speeds (fan, brush, pump)
 - `MOVE_CTRL` — sets wheel velocity

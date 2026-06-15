@@ -67,16 +67,21 @@ static void mcpy(unsigned char *d, const unsigned char *s, unsigned long n) {
 }
 
 /* =================== FRAME SPEC — FILL FROM CAPTURE (Phase 2) =================== */
-/* MCU frame assumed layout: 55 AA <len> <cmd> <payload...> <cksum>
- *   - LEN_INCLUDES: define how <len> relates to total frame size (verify from capture). */
-#define MAGIC0        0x55
-#define MAGIC1        0xAA
-#define CLEANSET_CMD  0xFF   /* TODO: real CLEANSET command id (byte at offset 3)        */
-#define FAN_OFFSET    0xFF   /* TODO: absolute byte offset of fan-power field in frame   */
-#define HDR_LEN_OFF   2      /* offset of the length byte (verify)                       */
+/* !!! 2026-06-15 CORRECTION: live strace proved the MCU protocol is NOT `55 AA`. !!!
+ * The real channel is fd 24 / /dev/ttyS4 (ttyS3/fd26 is silent), and frames are
+ * `3c <cmd> <payload...> <crc16> 3e`  ( '<' ... '>' ).  The constants below are STILL
+ * the old 55 AA placeholders — they must be reworked for the 3c..3e protocol, and the
+ * checksum is a 2-byte CRC16 (not a 1-byte sum). This cannot be finalized until we
+ * capture a genuine fan-ON frame (blocked: manual control returns HTTP 400 while docked).
+ * Until then MODE_FILTER is a safe no-op (no buffer starts with 0x55 0xAA on the bot). */
+#define MAGIC0        0x55   /* TODO -> frame start 0x3c ('<')                           */
+#define MAGIC1        0xAA   /* TODO -> (no fixed 2nd magic byte in 3c..3e; rework scan) */
+#define CLEANSET_CMD  0xFF   /* TODO: fan-command id (2nd byte after 0x3c)               */
+#define FAN_OFFSET    0xFF   /* TODO: byte offset of fan-power field within the frame    */
+#define HDR_LEN_OFF   2      /* TODO: 3c..3e frames are end-delimited by 0x3e, not len   */
 
-/* Recompute checksum over the frame. TODO: confirm algorithm + range from capture.
- * Initial guess: 8-bit sum of bytes [2 .. framelen-2], stored at [framelen-1]. */
+/* Recompute checksum over the frame. TODO: real protocol uses a 2-byte CRC16 trailer
+ * before 0x3e — implement the actual CRC16 variant (poly TBD from capture), not this sum. */
 static unsigned char cksum(const unsigned char *f, unsigned long framelen) {
     unsigned int s = 0;
     for (unsigned long i = 2; i + 1 < framelen; i++) s += f[i];
