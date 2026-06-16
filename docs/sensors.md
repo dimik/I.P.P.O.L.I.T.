@@ -93,6 +93,27 @@ yields no idle frames; the videomonitor relay is cloud/Agora-oriented and crashe
 
 (`scripts/robot/vmread.c` = nanomsg-PAIR socket probe used for this RE.)
 
+### Live video stream — why it can't be "mimicked from the cloud"
+The live video is **not** carried over the control cloud Valetudo replaces (dummycloud/MIIO). It's a
+*separate cloud RTC service*: `node_camera_streamer` HW-encodes H.264 (`/dev/cedar_dev` +
+`libvencoder`/`libawh264`/`libOmxVenc`) and publishes via **`libagora-rtc-sdk.so`** to **Agora / Alibaba
+Cloud Link Visual**, authenticated with the device triple in
+`/mnt/private/ULI/factory/video_{device_name,device_secret,product_key}.txt` (+ `AliLicOps.sh` license).
+The binary has **no local output** (no rtsp/udp/sdp/file targets — Agora only), and the feature is dormant
+(libagora not loaded, 0 `videomonitor.socket` clients) until a cloud session starts.
+
+So the cloud never *consumed* the stream — it brokered an Agora channel and the app subscribed via Agora's
+servers. "Mimicking" it means becoming the Agora subscriber: provision AVA with your own Agora app-id/token
+and consume with the Agora SDK over the internet — still cloud, heavy (credential reversal + Agora account).
+Valetudo never implemented video and can't without re-brokering Agora.
+
+**Only true LOCAL video path:** our own pipeline — camera → `/dev/cedar_dev` HW H.264 → local RTSP/UDP. The
+libs (`libvencoder`, `libawh264`, `libsunxicamera`) and the encoder device are present. Blocker: the single
+OV8856 is AVA-held (`/dev/video2`); freeing it (e.g. LD_PRELOAD-intercepting AVA's camera `open`) breaks
+AVA's obstacle AI and risks crash/reboot loops. **Recommendation: dedicated Q6A camera** for the rover's
+real-time video; the robot's camera stays with AVA. The own-`cedar`-pipeline (sensor wrested from AVA) is
+the only robot-camera local option — high effort, real risk.
+
 `scripts/robot/camera_stream.sh` (GStreamer off `/dev/video0`) and `scripts/robot/v4l2grab.c` remain
 for if we ever set up an independent `/dev/video0` pipeline (`media-ctl` + `v4l-utils`/`gst`, sensor
 freed) — but that contends with AVA for the sensor and risks the same instability.
