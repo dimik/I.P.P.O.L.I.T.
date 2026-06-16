@@ -1,7 +1,7 @@
 #!/bin/sh
 # cam_grab.sh — grab one camera frame via camsiphon (run ON the robot).
 #
-# Requires libcamsiphon.so preloaded into AVA (see _root.sh / build_fanoff.sh). camsiphon
+# Requires libcamsiphon.so preloaded into AVA (see _root.sh / build_ava_shims.sh). camsiphon
 # watches /tmp/cam_grab and, on the next VIDIOC_DQBUF, writes the frame AVA just captured to
 # /tmp/cam_frame.raw (+ /tmp/cam_fmt.txt with "WxH pf=XXXX sz=N"). Read-only; AVA is untouched.
 #

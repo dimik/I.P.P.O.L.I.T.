@@ -6,21 +6,25 @@ LOG=/tmp/root_sh.log
 exec >> "$LOG" 2>&1
 echo "=== _root.sh start $(date) ==="
 
-# Vacuum fan disable — preload the MCU SetCleaning filter into AVA so the vacuum fan
-# never spins in manual nav / cleaning. The shim zeros the SetCleaning f3 byte on the
-# wire to /dev/ttyS4 and recomputes the CRC. See CLAUDE.md "Vacuum fan disable".
+# AVA LD_PRELOAD shims — inject our shims into AVA by bind-mounting a patched ava.sh that
+# exports LD_PRELOAD before exec'ing ava. This is the shared MECHANISM; each shim is an
+# independent feature, loaded only if its .so is present:
+#   libfanoff_filter.so — fan/LiDAR quieting (rewrites MCU SetCleaning to idle on /dev/ttyS4,
+#                         gates the LiDAR motor). See CLAUDE.md "Vacuum fan disable".
+#   libcamsiphon.so     — read-only camera frame siphon (taps AVA's V4L2 DQBUF).
 # Must be established before app start runs /etc/rc.d/ava.sh (this is the early hook).
-FANOFF=/data/lib/libfanoff_filter.so
-if [ -f "$FANOFF" ]; then
-    # Preload the fanoff filter, and camsiphon (read-only camera frame siphon) if present.
-    PRELOAD="$FANOFF"
-    [ -f /data/lib/libcamsiphon.so ] && PRELOAD="$FANOFF /data/lib/libcamsiphon.so"
+# Keep this list in sync with deploy_ava_shims.sh.
+PRELOAD=""
+for so in /data/lib/libfanoff_filter.so /data/lib/libcamsiphon.so; do
+    [ -f "$so" ] && PRELOAD="${PRELOAD:+$PRELOAD }$so"
+done
+if [ -n "$PRELOAD" ]; then
     head -1 /etc/rc.d/ava.sh > /data/ava.sh.preload
     echo "export LD_PRELOAD=\"$PRELOAD\"" >> /data/ava.sh.preload
     tail -n +2 /etc/rc.d/ava.sh >> /data/ava.sh.preload
     chmod +x /data/ava.sh.preload
     mount --bind /data/ava.sh.preload /etc/rc.d/ava.sh
-    echo "LD_PRELOAD shim(s) bind-mounted onto ava.sh: $PRELOAD"
+    echo "AVA LD_PRELOAD shims bind-mounted onto ava.sh: $PRELOAD"
     logger -t root_sh "ava preload bind-mounted: $PRELOAD"
 fi
 

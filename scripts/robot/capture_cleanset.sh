@@ -6,8 +6,8 @@
 # constants in fanoff_shim.c (CLEANSET_CMD, FAN_OFFSET, checksum). See CLAUDE.md.
 #
 # PREREQUISITES (run first):
-#   1. scp scripts/robot/fanoff_shim.c build_fanoff.sh   dreame-home:/data/
-#   2. ssh dreame-home 'sh /data/build_fanoff.sh'        # builds /data/lib/libfanoff_log.so
+#   1. scp scripts/robot/fanoff_shim.c build_ava_shims.sh   dreame-home:/data/
+#   2. ssh dreame-home 'sh /data/build_ava_shims.sh'        # builds /data/lib/libfanoff_log.so
 #   3. Patched ava.sh in place exporting LD_PRELOAD=/data/lib/libfanoff_log.so (see NOTE).
 #
 # NOTE on injection: AVA is launched by /etc/rc.d/ava.sh (squashfs). To preload the LOG shim
@@ -15,7 +15,7 @@
 #     killall -9 ava
 #     cd /data && LD_PRELOAD=/data/lib/libfanoff_log.so ava -f /ava/conf/r2250.conf force &
 # (For the production FILTER shim we instead bind-mount a patched ava.sh at boot — see
-#  deploy_fanoff.sh — so the watchdog's restarts also get the preload.)
+#  deploy_ava_shims.sh — so the watchdog's restarts also get the preload.)
 #
 # !! REQUIRES A HUMAN: you must listen and confirm fan ON/OFF at each step, and ideally set
 #    each fan-speed preset so each speed maps to a distinct byte value. Robot stays docked

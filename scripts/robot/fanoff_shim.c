@@ -35,7 +35,7 @@
  * FREESTANDING BUILD
  *   AVA links glibc 2.23 but we compile in a glibc-2.39 chroot, so the shim uses NO libc:
  *   raw `svc #0` syscalls + hand-rolled helpers (-nostdlib -ffreestanding). It exports only
- *   write()/writev(). See build_fanoff.sh.  Build modes: MODE_FILTER (apply rules) and
+ *   write()/writev(). See build_ava_shims.sh.  Build modes: MODE_FILTER (apply rules) and
  *   MODE_LOG (passthrough + dump every frame to /tmp/mcu_tx.log).
  * ============================================================================================
  */

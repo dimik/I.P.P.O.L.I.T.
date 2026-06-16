@@ -1,15 +1,18 @@
 #!/bin/sh
-# build_fanoff.sh — compile the LD_PRELOAD fan-off shim inside the robot's Ubuntu chroot.
+# build_ava_shims.sh — compile the LD_PRELOAD shims injected into AVA, inside the robot's
+# Ubuntu chroot. These are independent features that happen to share one mechanism (preload
+# into AVA via the ava.sh bind-mount) and one build path (chroot gcc, freestanding):
+#
+#   libfanoff_log.so / libfanoff_filter.so  — fan/LiDAR quieting (src: fanoff_shim.c)
+#       log    = Phase-1 capture (passthrough + dump MCU TX frames to /tmp/mcu_tx.log)
+#       filter = production (rewrite MCU SetCleaning to idle; gate LiDAR motor)
+#   libcamsiphon.so                          — read-only camera frame siphon (src: camsiphon.c)
 #
 # Must build in the chroot (native aarch64 gcc-13), but FREESTANDING so the result has no
 # glibc symbol deps — AVA runs glibc 2.23, the chroot is glibc 2.39. See fanoff_shim.c.
 #
-# Produces (in /data/lib/ on the robot):
-#   libfanoff_log.so     — Phase-1 capture (passthrough + dump 55 AA frames to /tmp/mcu_tx.log)
-#   libfanoff_filter.so  — production (rewrite CLEANSET fan byte -> 0)
-#
-# Run ON the robot:  sh /data/build_fanoff.sh
-# (deploy this script + fanoff_shim.c to /data/ first; see deploy_fanoff.sh)
+# Run ON the robot:  sh /data/build_ava_shims.sh
+# (deploy this script + fanoff_shim.c + camsiphon.c to /data/ first; see deploy_ava_shims.sh)
 
 set -e
 

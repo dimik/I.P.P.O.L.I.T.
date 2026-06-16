@@ -14,7 +14,7 @@
  *
  * Freestanding (-nostdlib): AVA links glibc 2.23 but we build in a glibc-2.39 chroot, so no
  * libc — raw svc syscalls + kernel uapi struct defs only. Exports open/openat/mmap/ioctl.
- * Built/loaded alongside libfanoff_filter.so (LD_PRELOAD list). See build_fanoff.sh.
+ * Built/loaded alongside libfanoff_filter.so (LD_PRELOAD list). See build_ava_shims.sh.
  * ============================================================================================
  */
 #include <linux/videodev2.h>

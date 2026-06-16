@@ -366,15 +366,15 @@ Note: `CleanMode` (`WritePropInt type=0`) is a property-store/behavior-tree valu
 **Verified on the wire.** Manual nav → `SetCleaning` `00 01 00 00 00` (fan off) + ttyS3 LDS reads ~0 (turret parked) + `_CtrlMcuCMD 04 00`, with no fan/LiDAR start-up blip. With `/tmp/lidar_allow` present the LiDAR spins (~1700 reads/3s) while `SetCleaning` stays `00 01` — proving the fan is unconditional and the LiDAR is gated. MotorCtrl (driving) flows throughout; AVA healthy.
 
 **Deploy / persistence.**
-- `deploy_fanoff.sh` builds a patched `ava.sh` (`export LD_PRELOAD=/data/lib/libfanoff_filter.so`), bind-mounts it over `/etc/rc.d/ava.sh`, restarts AVA.
+- `deploy_ava_shims.sh` builds a patched `ava.sh` (`export LD_PRELOAD="<shim list>"`), bind-mounts it over `/etc/rc.d/ava.sh`, restarts AVA. The LD_PRELOAD list (fanoff filter + camsiphon if present) is the shared injection MECHANISM; each shim is an independent feature.
 - `_root.sh` re-establishes that bind-mount early at boot; `_root_postboot.sh` launches the SSE gate daemon after Valetudo starts. Both persist across reboot.
-- Build with `build_fanoff.sh` (freestanding, glibc-2.23-safe). RE artifacts: `~/dreame-re/{mcu.bin,node_signal.so}`; protocol ref `~/dreame_mcu_protocol` (alufers).
+- Build with `build_ava_shims.sh` (freestanding, glibc-2.23-safe; builds fanoff + camsiphon). RE artifacts: `~/dreame-re/{mcu.bin,node_signal.so}`; protocol ref `~/dreame_mcu_protocol` (alufers).
 
 **Architecture (table-driven).** `fanoff_shim.c` is layered: raw syscalls → Modbus CRC16 → frame codec (3c..3e + `?` escaping) → **policy `RULES[]` table** → write/writev hooks. Each subsystem is ONE declarative rule — match `type` (+ optional first payload byte), a rewrite `action` (`REWRITE_SETCLEANING_IDLE` / `REWRITE_ZERO_BYTE`), and a `gate` (`GATE_ALWAYS` or `GATE_UNLESS_FLAG <path>`). To disable another subsystem later, add a rule — nothing else changes. (Do NOT gate the IMU — AVA needs it to drive.) The const table relocates correctly under the `-nostdlib` build (verified: AVA loads + runs).
 
 **Language choice (decided 2026-06-15).** The shim must be a native C-ABI `.so` LD_PRELOAD-ed into AVA (hooks libc `write`/`writev`, runs in AVA's glibc-2.23 address space on every MCU write) — so **C is the only practical fit**, and freestanding C neatly dodges the 2.23-vs-2.39 glibc mismatch with zero deps. **Python** can't be interposed in-process (would require an external pty proxy we rejected; no host Python anyway). **Nim→C** could emit a `.so` but you'd have to strip its runtime/GC to go freestanding and add a cross-toolchain — more complexity for a ~200-line file. The **`dreame_mcu_protocol` repo is Python for *offline* sniffing/decoding** (parses strace over SSH) — it can't run inside AVA; we already ported its CRC16 + packet defs into the shim and keep it as a decode/reference tool. The **gate** stays POSIX `sh` (no deps, runs on BusyBox host). Reserve Python/Rust for **Q6A companion** software (ROS/nav/vision), which isn't bound by AVA's runtime.
 
-**Implementation kit** (`scripts/robot/`): `fanoff_shim.c` (table-driven filter), `fanoff_flag.sh` (SSE LiDAR gate), `build_fanoff.sh`, `deploy_fanoff.sh`, `capture_cleanset.sh`.
+**Implementation kit** (`scripts/robot/`): `fanoff_shim.c` (table-driven filter), `fanoff_flag.sh` (SSE LiDAR gate), `build_ava_shims.sh` (builds all AVA preload shims), `deploy_ava_shims.sh` (live install of the shim list), `capture_cleanset.sh`.
 
 **Dead ends — do NOT retry** (none gate the fan in manual/remote mode): `clean_parameter.json` `CleanMode`, an `only_mop` heap patch, ptrace-patching `node_porphyrion.so`, the `FanSpeedControlCapability` boot loop. Removed from the boot path and repo.
 
@@ -521,7 +521,7 @@ ssh dreame-home 'ls /tmp/lidar_allow 2>/dev/null && echo allowed || echo "blocke
 # Verify on the wire during manual nav (expect SetCleaning 00 01 = fan off, CtrlMcu 14 04 00 = LiDAR off):
 ssh dreame-home 'A=$(pidof ava); timeout 3 chroot /data/chroot strace -f -e trace=write -xx -s64 -p $A -o /tmp/x 2>/dev/null; grep -aoE "x3c.x05.x01.x..\x..|x3c.x02.x14.x04.x.." /data/chroot/tmp/x | sort | uniq -c'
 # Rebuild + reload shim after editing scripts/robot/fanoff_shim.c (scp it to /data first):
-ssh dreame-home 'sh /data/build_fanoff.sh && killall -9 ava'   # ava.sh relaunches with the new shim
+ssh dreame-home 'sh /data/build_ava_shims.sh && killall -9 ava'   # ava.sh relaunches with the new shim
 # Restart the LiDAR gate daemon (without reboot):
 ssh dreame-home 'pkill -f fanoff_flag; setsid sh /data/fanoff_flag.sh </dev/null >/dev/null 2>&1 &'
 # Mute voice prompts (e.g. manual-nav "Start remote controlled cleaning"):
@@ -563,9 +563,9 @@ scripts/
     dreame-wifi-setup.sh   e2e script: connect AP → deploy → reconnect 5K
     fanoff_shim.c          LD_PRELOAD shim: fan off always + LiDAR off when blocked (freestanding)
     fanoff_flag.sh         event-driven (Valetudo SSE) LiDAR gate: /tmp/lidar_allow in non-manual modes
-    build_fanoff.sh        compile fanoff + camsiphon .so in chroot, glibc-2.23-safe
+    build_ava_shims.sh     compile fanoff + camsiphon .so in chroot, glibc-2.23-safe
     capture_cleanset.sh    capture MCU 3c..3e frames across fan states
-    deploy_fanoff.sh       bind-mount patched ava.sh exporting LD_PRELOAD, restart + verify
+    deploy_ava_shims.sh    bind-mount patched ava.sh exporting the LD_PRELOAD shim list, restart + verify
   companion/
     install_ros2.sh        run on Dragon Q6A to install ROS 2 Jazzy
 robot/
