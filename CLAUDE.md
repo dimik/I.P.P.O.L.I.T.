@@ -109,7 +109,10 @@ Valetudo REST (port 80)  ◄────────── REST ─────�
 Valetudo MQTT (port 1883) ──── MQTT ──────────►  valetudo_bridge node
                                                     └─► /scan /odom /map
 
-AVA /dev/video2 ──► camsiphon.so (LD_PRELOAD, read-only DQBUF tap) ──► NV21 frames ──► (encode) ──► camera_node
+AVA /dev/video2 ──► camsiphon.so (LD_PRELOAD, read-only DQBUF tap) ──► NV21 frames
+   ├─► one-shot:  /tmp/cam_grab  → /tmp/cam_frame.raw  (PNG via nv21_to_png.py)
+   └─► stream:    /tmp/cam_stream → RAM ring /tmp/cam_stream.buf ──► camstream (cedar HW-JPEG)
+                                                              ──► MJPEG over HTTP :8090  ✅
    (the robot's OV8856 is AVA-owned; we siphon the raw frames AVA already captures — see docs/sensors.md)
 
 /dev/snd (ALSA) ◄──────────────── TCP socket ───── audio_server.py
@@ -378,6 +381,18 @@ Note: `CleanMode` (`WritePropInt type=0`) is a property-store/behavior-tree valu
 
 **Dead ends — do NOT retry** (none gate the fan in manual/remote mode): `clean_parameter.json` `CleanMode`, an `only_mop` heap patch, ptrace-patching `node_porphyrion.so`, the `FanSpeedControlCapability` boot loop. Removed from the boot path and repo.
 
+### Camera video stream (cedar HW encoder) ✅ MJPEG live
+
+Local, cloud-free live video from the AVA-owned OV8856. Pipeline:
+`AVA /dev/video2 → camsiphon (read-only DQBUF tap) → RAM ring /tmp/cam_stream.buf (double-buffered, tmpfs) → camstream (cedar HW-JPEG) → multipart/x-mixed-replace HTTP :8090`.
+
+- **Start/stop** (on robot): `sh /data/camstream.sh start|stop|status`. View at `http://<robot-ip>:8090/` in any browser / VLC / `ffplay`. Verified ~14 fps, NV21 672×504 → JPEG ~28 KB/frame. Read-only — AVA/camera/ISP untouched (no video0 reconfig, the only thing that ever deadlocked the kernel).
+- **camsiphon stream egress**: gated by `/tmp/cam_stream`; copies every frame into a RAM ring (no flash writes, no AVA stall — writes the inactive slot then flips `latest`). Zero overhead when the flag is absent. (One-shot grab via `/tmp/cam_grab` still works independently.)
+- **camstream** (`/opt/camstream` in chroot): mmaps the ring, inits the **CedarX HW encoder** once, JPEG-encodes the latest frame per HTTP part. Runs INSIDE the chroot (glibc 2.39) linking the host's **vendor encoder libs** (glibc 2.23, backward-compatible) at `/data/chroot/opt/venc/` — `libvencoder/libvenc_codec/libawh264/libVE/libMemAdapter/libcdc_base` — via `/dev/cedar_dev`+`/dev/ion` (visible in the chroot). The launcher bind-mounts host `/tmp` into the chroot so both sides see the ring.
+- **CedarX VideoEncoder ABI** (reverse-engineered, see `cedar_enc.c`): `VideoEncCreate(codec) → VideoEncSetParameter → VideoEncInit(&VencBaseConfig) → AllocInputBuffer → {GetOneAllocInputBuffer; memcpy Y@0,C@W*H; FlushCache; AddOneInputBuffer; VideoEncodeOneFrame; GetOneBitstreamFrame → Annex-B/JPEG bytes; Free…} → loop`. `VencBaseConfig`: `eInputFormat@24` (NV21=`VENC_PIXEL_YVU420SP`=1), `memops@32`(=`MemAdapterGetOpsS()`), `veOpsS@40`(NULL — lib inits VE itself) — offsets confirmed by disassembling `VideoEncInit`.
+- **H.264 status (in progress)**: the HW encoder produces valid IDR/P slices, but this CedarX build (CedarC v1.2.0) never materializes the SPS/PPS header bytes — the `H264GetParameter` SPS/PPS index `0x501` exists but its context buffer is NULL (generation gated inside `H264InitVer2`), and header synthesis (`h264_headers.py`) doesn't match the encoder's internal SPS (decoder → gray frame). MJPEG ships now; H.264/RTSP needs that gate cracked (likely `VENC_IndexParamH264Param` profile-set to trigger generation). Vendor libs pulled to `~/dreame-re/venc/` for offline RE.
+- **Build**: `build_ava_shims.sh` compiles `camstream` (needs `/data/chroot/opt/venc/` populated). JPEG encoder currently emits 672×**672** (height padding) — valid scene is the top 504 rows; cosmetic.
+
 ### Valetudo REST API capabilities
 
 Base URL: `http://192.168.1.213` (or `http://localhost` from on-robot)
@@ -553,9 +568,14 @@ scripts/
     _root.sh               deploy to /data/_root.sh on robot (CONTAINS WIFI CREDENTIALS)
     _root_postboot.sh      deploy to /data/_root_postboot.sh on robot
     chroot.sh              deploy to /data/chroot.sh on robot
-    camsiphon.c            LD_PRELOAD camera siphon: copies AVA's live NV21 frames at VIDIOC_DQBUF (read-only) ✅
+    camsiphon.c            LD_PRELOAD camera siphon: AVA's live NV21 frames at VIDIOC_DQBUF (read-only) ✅
+                           one-shot grab (/tmp/cam_grab) + continuous RAM-ring stream (/tmp/cam_stream)
     cam_grab.sh            robot-side: touch /tmp/cam_grab -> camsiphon writes /tmp/cam_frame.raw (NV21)
     nv21_to_png.py         workstation: convert a siphoned NV21 frame -> PNG (PIL)
+    camstream.c            cedar HW-JPEG MJPEG-over-HTTP server (chroot-native; reads the RAM ring) ✅
+    camstream.sh           robot-side launcher: start/stop/status the MJPEG stream on :8090
+    cedar_enc.c            cedar HW encoder test/tool (NV21 -> JPEG works; H.264 IDR encodes, SPS/PPS TBD)
+    h264_headers.py        workstation: synthesize H.264 SPS/PPS (for the in-progress H.264 path)
     camera_stream.sh       (unused) GStreamer stub — gst not installed; video0 deadlocks while AVA streams
     v4l2grab.c             multi-plane V4L2 grabber -> PPM (dead end: video0 reconfigure deadlocks the ISP)
     vmread.c               nanomsg-PAIR probe for /tmp/videomonitor.socket (RE of the cloud video relay)
@@ -563,7 +583,7 @@ scripts/
     dreame-wifi-setup.sh   e2e script: connect AP → deploy → reconnect 5K
     fanoff_shim.c          LD_PRELOAD shim: fan off always + LiDAR off when blocked (freestanding)
     fanoff_flag.sh         event-driven (Valetudo SSE) LiDAR gate: /tmp/lidar_allow in non-manual modes
-    build_ava_shims.sh     compile fanoff + camsiphon .so in chroot, glibc-2.23-safe
+    build_ava_shims.sh     compile fanoff + camsiphon .so + camstream in chroot, glibc-2.23-safe
     capture_cleanset.sh    capture MCU 3c..3e frames across fan states
     deploy_ava_shims.sh    bind-mount patched ava.sh exporting the LD_PRELOAD shim list, restart + verify
   companion/

@@ -7,10 +7,12 @@
  * AVA's flow at all (we call the real syscalls and only *read* the buffer AVA already owns). So
  * AVA keeps working; we just observe. No ISP seizure, no cloud, no encoder needed.
  *
- * On-demand: a frame is only copied when /tmp/cam_grab exists (then the flag is removed —
- * one-shot per touch), so there's zero overhead in normal operation. Output:
- *   /tmp/cam_frame.raw  — the raw plane bytes of one frame
- *   /tmp/cam_fmt.txt    — "WxH pixfmt=XXXX planesize=N" (from AVA's VIDIOC_S_FMT/G_FMT)
+ * Two egress paths, both zero-overhead unless their flag file exists:
+ *   1. One-shot grab — when /tmp/cam_grab exists, copy ONE frame to /tmp/cam_frame.raw (+ remove
+ *      the flag) and write /tmp/cam_fmt.txt ("WxH pixfmt=XXXX planesize=N").
+ *   2. Continuous stream — when /tmp/cam_stream exists, copy EVERY frame into a RAM-backed shared
+ *      ring (/tmp/cam_stream.buf, double-buffered) for the cedar MJPEG server to read. No flash
+ *      writes, no AVA stall (we memcpy into the inactive slot, then flip the latest index).
  *
  * Freestanding (-nostdlib): AVA links glibc 2.23 but we build in a glibc-2.39 chroot, so no
  * libc — raw svc syscalls + kernel uapi struct defs only. Exports open/openat/mmap/ioctl.
@@ -29,6 +31,7 @@
 #define SYS_close  57
 #define SYS_unlinkat 35
 #define SYS_renameat 38
+#define SYS_ftruncate 46
 #define AT_FDCWD   (-100)
 
 static long sys1(long n,long a){register long x8 asm("x8")=n,x0 asm("x0")=a;asm volatile("svc #0":"+r"(x0):"r"(x8):"memory","cc");return x0;}
@@ -71,6 +74,37 @@ static void dump_frame(unsigned long addr, unsigned long len) {
 static int grab_requested(void){ return sys3(SYS_faccessat,AT_FDCWD,(long)"/tmp/cam_grab",0)==0; }
 static void clear_grab(void){ sys3(SYS_unlinkat,AT_FDCWD,(long)"/tmp/cam_grab",0); }
 
+/* ---- continuous stream egress: RAM-backed double-buffer shared with the cedar MJPEG server ---- */
+#define SHM_SLOT  (1UL<<20)            /* 1 MiB per slot (cam frame ~0.5 MiB) */
+#define SHM_HDR   4096UL              /* header page: [0]=latest [1]=seq [2]=w [3]=h [4]=size */
+#define SHM_TOTAL (SHM_HDR + 2*SHM_SLOT)
+static unsigned long g_shm = 0;        /* mapped base, 0 if not yet mapped */
+
+static void fast_copy(unsigned char *d, const unsigned char *s, unsigned long n) {
+    unsigned long i = 0;
+    for (; i + 8 <= n; i += 8) *(unsigned long*)(d+i) = *(const unsigned long*)(s+i);
+    for (; i < n; i++) d[i] = s[i];
+}
+static int stream_requested(void){ return sys3(SYS_faccessat,AT_FDCWD,(long)"/tmp/cam_stream",0)==0; }
+static void stream_map(void) {
+    int fd=(int)sys4(SYS_openat,AT_FDCWD,(long)"/tmp/cam_stream.buf",0x42/*O_RDWR|O_CREAT*/,0644);
+    if(fd<0) return;
+    sys3(SYS_ftruncate,fd,SHM_TOTAL,0);
+    long r=sys6(SYS_mmap,0,SHM_TOTAL,3/*RW*/,1/*MAP_SHARED*/,fd,0);
+    sys1(SYS_close,fd);
+    if(r>0) g_shm=(unsigned long)r;
+}
+static void stream_frame(unsigned long addr, unsigned long n, unsigned w, unsigned h) {
+    if(!g_shm){ stream_map(); if(!g_shm) return; }
+    if(n > SHM_SLOT) n = SHM_SLOT;
+    volatile unsigned int *hdr=(volatile unsigned int*)g_shm;
+    unsigned cur = hdr[0] ? 0 : 1;                          /* write the inactive slot */
+    fast_copy((unsigned char*)(g_shm+SHM_HDR+cur*SHM_SLOT), (const unsigned char*)addr, n);
+    hdr[2]=w; hdr[3]=h; hdr[4]=(unsigned)n;
+    hdr[0]=cur;                                             /* publish: flip latest */
+    hdr[1]++;                                               /* seq bump */
+}
+
 /* ---- interposed entry points ---- */
 long openat(int dirfd, const char *path, int flags, unsigned mode) {
     long fd = sys4(SYS_openat, dirfd, (long)path, flags, mode);
@@ -104,10 +138,10 @@ int ioctl(int fd, unsigned long req, void *arg) {
         }
     } else if (req == VIDIOC_DQBUF) {
         struct v4l2_buffer *b = arg;
-        if (grab_requested() && b->index < NB && g_addr[b->index] && b->m.planes) {
+        if (b->index < NB && g_addr[b->index] && b->m.planes) {
             unsigned long n = b->m.planes[0].bytesused; if (!n) n = g_len[b->index];
-            dump_frame(g_addr[b->index], n);
-            clear_grab();
+            if (grab_requested()) { dump_frame(g_addr[b->index], n); clear_grab(); }
+            if (stream_requested()) stream_frame(g_addr[b->index], n, g_w, g_h);
         }
     }
     return (int)r;

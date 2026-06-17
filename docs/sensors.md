@@ -107,10 +107,11 @@ servers. "Mimicking" it means becoming the Agora subscriber: provision AVA with 
 and consume with the Agora SDK over the internet — still cloud, heavy (credential reversal + Agora account).
 Valetudo never implemented video and can't without re-brokering Agora.
 
-**Only true LOCAL video path:** our own pipeline — camera → `/dev/cedar_dev` HW H.264 → local RTSP/UDP. The
-libs (`libvencoder`, `libawh264`, `libsunxicamera`) and the encoder device are present. Blocker: the single
-OV8856 is AVA-held (`/dev/video2`). Reconfiguring the pipeline while AVA streams **deadlocks the kernel**
-(uninterruptible D-state, needs reboot) — verified. So *taking* the camera is not viable. **But we don't need to take it — see below.**
+**Only true LOCAL video path:** our own pipeline — siphon AVA's frames → `/dev/cedar_dev` HW encode → local
+HTTP/RTSP. The libs (`libvencoder`, `libawh264`, …) and the encoder device are present. We must NOT *take* the
+camera: reconfiguring the pipeline while AVA streams **deadlocks the kernel** (uninterruptible D-state, needs
+reboot) — verified. The solution is to feed the encoder from the read-only siphon instead. **✅ DONE — see the
+cedar MJPEG stream below.**
 
 ### ✅ WORKING: read-only frame siphon (`camsiphon.so`)
 AVA continuously dequeues raw frames from `/dev/video2` (V4L2 mmap streaming, multi-plane, ~14 fps) for its
@@ -125,13 +126,29 @@ AVA's buffer). **AVA is completely unaffected** (verified: Valetudo 200, capturi
 - Loaded via the same `ava.sh` `LD_PRELOAD` bind-mount: `LD_PRELOAD="…/libfanoff_filter.so …/libcamsiphon.so"`.
 - **Verified 2026-06-16**: produced a correct, current color frame of the room, zero AVA disruption.
 
-**This is the recommended way to get the robot's camera locally** — no cloud, no ISP fight, no risk. For a
-continuous stream/recording, extend camsiphon to a streaming mode (write frames to a fifo/socket) feeding a
-chroot-side encoder (cedar/`x264`/`ffmpeg`) → RTSP/MP4. A **dedicated Q6A camera** is still the better choice
-for high-rate/high-res rover vision, but the onboard feed is now extractable safely.
+**This is the recommended way to get the robot's camera locally** — no cloud, no ISP fight, no risk.
+
+### ✅ WORKING: live MJPEG stream via the cedar HW encoder (`camstream`)
+camsiphon also has a **continuous stream mode**: when `/tmp/cam_stream` exists it copies every frame into a
+RAM-backed double-buffered ring (`/tmp/cam_stream.buf`, tmpfs — no flash writes, no AVA stall). `scripts/robot/
+camstream.c` runs inside the Ubuntu chroot, mmaps the ring, and HW-JPEG-encodes each frame with the **Allwinner
+CedarX encoder** (`/dev/cedar_dev`+`/dev/ion`, vendor libs at `/data/chroot/opt/venc/`), serving
+`multipart/x-mixed-replace` over HTTP.
+
+- **Run**: `sh /data/camstream.sh start` → `http://<robot-ip>:8090/` (browser / VLC / ffplay). `stop`/`status` too.
+- **Verified 2026-06-17**: ~14 fps, NV21 672×504 → JPEG ~28 KB/frame, AVA undisturbed.
+- Chroot is glibc 2.39, vendor libs are glibc 2.23 — they load fine (glibc is backward-compatible); the encoder
+  binary just has to *run* inside the chroot. Launcher bind-mounts host `/tmp` into the chroot to share the ring.
+- **CedarX encoder ABI** reverse-engineered in `scripts/robot/cedar_enc.c` (the standalone encode test/tool).
+- **H.264/RTSP**: encoder produces valid IDR/P slices, but this CedarX build doesn't materialize SPS/PPS headers
+  (getter index `0x501` has a NULL context buffer; generation is gated in `H264InitVer2`). Synthesized headers
+  (`h264_headers.py`) don't match the encoder's internal SPS → decoder shows gray. MJPEG ships now; H.264 needs
+  that gate cracked (likely a `VENC_IndexParamH264Param` profile-set). Vendor libs saved to `~/dreame-re/venc/`.
+
+A **dedicated Q6A camera** is still better for high-rate/high-res rover vision, but the onboard feed now streams.
 
 (Earlier "the onboard camera can't be tapped safely" conclusion is SUPERSEDED by camsiphon — the read-only
-DQBUF tap is the safe path; the cloud/Agora live-feed and the ISP-seizure routes remain dead ends.)
+DQBUF tap + cedar HW-JPEG is the safe path; the cloud/Agora live-feed and the ISP-seizure routes remain dead ends.)
 
 `scripts/robot/camera_stream.sh` (GStreamer off `/dev/video0`) and `scripts/robot/v4l2grab.c` remain
 for if we ever set up an independent `/dev/video0` pipeline (`media-ctl` + `v4l-utils`/`gst`, sensor

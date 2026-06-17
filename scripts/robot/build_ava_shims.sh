@@ -56,3 +56,15 @@ if [ -f /data/camsiphon.c ]; then
     echo "--- camsiphon exports (expect: open, openat, mmap, ioctl) ---"
     chroot "$CHROOT" /usr/bin/readelf --dyn-syms /tmp/libcamsiphon.so 2>/dev/null | grep -iE " (open|openat|mmap|ioctl)$" || true
 fi
+
+# --- camstream: cedar HW-JPEG MJPEG-over-HTTP server (chroot-native, links vendor encoder) ---
+# NOT a shim — a standalone server that runs inside the chroot (glibc 2.39 + vendor libs at
+# /opt/venc). Needs /opt/venc populated (the vendor encoder libs) — see docs/sensors.md.
+if [ -f /data/camstream.c ] && [ -d "$CHROOT/opt/venc" ]; then
+    echo "Building camstream (cedar MJPEG server) -> /opt/camstream ..."
+    cp /data/camstream.c "$CHROOT/tmp/camstream.c"
+    chroot "$CHROOT" /usr/bin/gcc-13 -O2 -w /tmp/camstream.c -L/opt/venc \
+        -lvencoder -lvenc_codec -lvenc_base -lMemAdapter -lVE -lcdc_base \
+        -Wl,-rpath,/opt/venc -o /opt/camstream \
+        && ls -la "$CHROOT/opt/camstream" || echo "  camstream build FAILED"
+fi
