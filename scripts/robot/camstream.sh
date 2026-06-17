@@ -20,7 +20,7 @@ case "${1:-start}" in
     touch /tmp/cam_stream                                   # tell camsiphon to fill the ring
     mountpoint -q "$CH/tmp" || mount --bind /tmp "$CH/tmp"  # share the ring into the chroot
     pkill -9 -f camstream 2>/dev/null; sleep 1
-    chroot "$CH" sh -c "LD_LIBRARY_PATH=/opt/venc /opt/camstream $PORT" > /tmp/camstream.log 2>&1 &
+    setsid chroot "$CH" sh -c "LD_LIBRARY_PATH=/opt/venc /opt/camstream $PORT" > /tmp/camstream.log 2>&1 </dev/null &
     sleep 3
     echo "camstream started on :$PORT (log: /tmp/camstream.log)"
     tail -3 /tmp/camstream.log 2>/dev/null
