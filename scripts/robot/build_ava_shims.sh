@@ -59,8 +59,16 @@ fi
 
 # --- camstream: cedar HW-JPEG MJPEG-over-HTTP server (chroot-native, links vendor encoder) ---
 # NOT a shim — a standalone server that runs inside the chroot (glibc 2.39 + vendor libs at
-# /opt/venc). Needs /opt/venc populated (the vendor encoder libs) — see docs/sensors.md.
-if [ -f /data/camstream.c ] && [ -d "$CHROOT/opt/venc" ]; then
+# /opt/venc). Stage the vendor CedarX encoder libs into the chroot (reproducible) then build.
+if [ -f /data/camstream.c ]; then
+    if [ ! -f "$CHROOT/opt/venc/libvencoder.so" ]; then
+        echo "Staging vendor CedarX encoder libs -> $CHROOT/opt/venc ..."
+        mkdir -p "$CHROOT/opt/venc"
+        for l in libvencoder libvenc_codec libvenc_base libawh264 libVE libMemAdapter \
+                 libcdc_base libcdx_base libcdx_common libOmxVenc; do
+            cp -f /usr/lib/$l.so "$CHROOT/opt/venc/" 2>/dev/null
+        done
+    fi
     echo "Building camstream (cedar MJPEG server) -> /opt/camstream ..."
     cp /data/camstream.c "$CHROOT/tmp/camstream.c"
     chroot "$CHROOT" /usr/bin/gcc-13 -O2 -w /tmp/camstream.c -L/opt/venc \

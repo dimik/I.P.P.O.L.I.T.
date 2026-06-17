@@ -54,6 +54,18 @@ cp /etc/resolv.conf $CHROOT/etc/resolv.conf 2>/dev/null || true
 echo "chroot mounts done"
 logger -t postboot "chroot mounts done"
 
+# --- camera MJPEG stream (cedar HW-JPEG, client-gated) ---
+# Always-listening on :8090; camstream sets /tmp/cam_stream (camsiphon ring fill) only while a
+# viewer is connected, so it's zero AVA overhead when idle. View: http://<robot-ip>:8090/
+# Needs the stream-capable libcamsiphon preloaded (via _root.sh) + /opt/venc + /opt/camstream
+# in the chroot (built by build_ava_shims.sh). See docs/sensors.md.
+mount --bind /tmp $CHROOT/tmp 2>/dev/null || true        # share the camsiphon ring into the chroot
+if [ -x $CHROOT/opt/camstream ]; then
+    setsid chroot $CHROOT sh -c "LD_LIBRARY_PATH=/opt/venc /opt/camstream 8090" > /tmp/camstream.log 2>&1 </dev/null &
+    echo "camstream MJPEG server started on :8090"
+    logger -t postboot "camstream MJPEG server started on :8090"
+fi
+
 # --- work_mode check ---
 WMODE=$(avacmd msg_cvt '{"type":"msgCvt","cmd":"get_prop","prop":"work_mode"}' 2>/dev/null)
 echo "work_mode at postboot start: $WMODE"

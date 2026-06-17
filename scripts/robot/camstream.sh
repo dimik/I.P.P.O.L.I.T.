@@ -17,16 +17,17 @@ PORT="${2:-8090}"
 case "${1:-start}" in
   start)
     [ -x "$CH/opt/camstream" ] || { echo "ERROR: $CH/opt/camstream missing (run build_ava_shims.sh)"; exit 1; }
-    touch /tmp/cam_stream                                   # tell camsiphon to fill the ring
     mountpoint -q "$CH/tmp" || mount --bind /tmp "$CH/tmp"  # share the ring into the chroot
-    pkill -9 -f camstream 2>/dev/null; sleep 1
+    # NOTE: client-gated — camstream sets/clears /tmp/cam_stream itself per connection, so the
+    # ring only fills (and AVA only does extra work) while a viewer is actually connected.
+    pkill -9 -f /opt/camstream 2>/dev/null; sleep 1
     setsid chroot "$CH" sh -c "LD_LIBRARY_PATH=/opt/venc /opt/camstream $PORT" > /tmp/camstream.log 2>&1 </dev/null &
     sleep 3
     echo "camstream started on :$PORT (log: /tmp/camstream.log)"
     tail -3 /tmp/camstream.log 2>/dev/null
     ;;
   stop)
-    pkill -9 -f camstream 2>/dev/null                       # matches the chroot'd /opt/camstream
+    pkill -9 -f /opt/camstream 2>/dev/null                       # matches the chroot'd /opt/camstream
     rm -f /tmp/cam_stream                                   # camsiphon stops filling the ring
     echo "camstream stopped, stream flag cleared"
     ;;

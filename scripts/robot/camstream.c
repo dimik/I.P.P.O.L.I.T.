@@ -7,9 +7,11 @@
  *   AVA --(V4L2 DQBUF)--> camsiphon --(RAM ring /tmp/cam_stream.buf)--> camstream --(cedar JPEG)
  *        --> multipart/x-mixed-replace over HTTP :8090
  *
- * camsiphon copies every captured NV21 frame into a double-buffered shared ring (gated by the
- * /tmp/cam_stream flag). We mmap that ring, JPEG-encode the latest frame with the HW video engine,
- * and push it to any connected browser. Read-only w.r.t. AVA; the camera/ISP are never touched.
+ * camsiphon copies every captured NV21 frame into a double-buffered shared ring, but ONLY while
+ * the /tmp/cam_stream flag exists. This server is CLIENT-GATED: it idles in accept() with the flag
+ * cleared (zero AVA overhead), and only sets the flag — making camsiphon start filling the ring —
+ * for the duration of a connected HTTP client, clearing it on disconnect. So an always-running
+ * service costs nothing when nobody is watching. Read-only w.r.t. AVA; camera/ISP never touched.
  *
  * Build (chroot): gcc-13 camstream.c -L/opt/venc -lvencoder -lvenc_codec -lvenc_base \
  *                   -lMemAdapter -lVE -lcdc_base -Wl,-rpath,/opt/venc -o camstream
@@ -102,33 +104,40 @@ static int send_all(int fd, const void *buf, int len) {
     return 0;
 }
 
-int main(int argc, char **argv) {
-    int port = (argc > 1) ? atoi(argv[1]) : 8090;
-    signal(SIGPIPE, SIG_IGN);
+/* the /tmp/cam_stream flag gates camsiphon's ring fill: set it only while a client is connected */
+static void flag_set(void)   { int fd = open("/tmp/cam_stream", O_WRONLY | O_CREAT, 0644); if (fd >= 0) close(fd); }
+static void flag_clear(void) { unlink("/tmp/cam_stream"); }
 
-    int sfd = open(SHM_PATH, O_RDWR);
-    if (sfd < 0) { LOG("open %s failed (is /tmp/cam_stream set + camsiphon streaming?)", SHM_PATH); return 1; }
-    g_base = mmap(0, SHM_TOTAL, PROT_READ | PROT_WRITE, MAP_SHARED, sfd, 0);
-    if (g_base == MAP_FAILED) { LOG("mmap failed"); return 1; }
-    g_hdr = (volatile unsigned int *)g_base;
-
-    LOG("waiting for first frame...");
-    for (int i = 0; i < 100 && g_hdr[4] == 0; i++) msleep(100);
-    int W = g_hdr[2] ? (int)g_hdr[2] : 672, H = g_hdr[3] ? (int)g_hdr[3] : 504;
-    LOG("frames flowing: %dx%d size=%u seq=%u", W, H, g_hdr[4], g_hdr[1]);
-
-    /* init cedar JPEG encoder once */
+/* init the cedar JPEG encoder once, lazily (needs frame dimensions from the ring) */
+static int init_encoder(int W, int H) {
+    if (g_enc) return 0;
     g_enc = VideoEncCreate(VENC_CODEC_JPEG);
-    if (!g_enc) { LOG("VideoEncCreate failed"); return 1; }
+    if (!g_enc) { LOG("VideoEncCreate failed"); return -1; }
     VencBaseConfig cfg; memset(&cfg, 0, sizeof(cfg));
     cfg.nInputWidth = W; cfg.nInputHeight = H; cfg.nStride = W;
     cfg.nDstWidth = W;  cfg.nDstHeight = H;
     cfg.eInputFormat = VENC_PIXEL_YVU420SP;
     cfg.memops = MemAdapterGetOpsS();
-    if (VideoEncInit(g_enc, &cfg) != 0) { LOG("VideoEncInit failed"); return 1; }
+    if (VideoEncInit(g_enc, &cfg) != 0) { LOG("VideoEncInit failed"); return -1; }
     VencAllocateBufferParam bp = { 4, (unsigned)W * H, (unsigned)W * H / 2 };
-    if (AllocInputBuffer(g_enc, &bp) != 0) { LOG("AllocInputBuffer failed"); return 1; }
-    LOG("cedar JPEG encoder ready");
+    if (AllocInputBuffer(g_enc, &bp) != 0) { LOG("AllocInputBuffer failed"); return -1; }
+    LOG("cedar JPEG encoder ready (%dx%d)", W, H);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    int port = (argc > 1) ? atoi(argv[1]) : 8090;
+    signal(SIGPIPE, SIG_IGN);
+    signal(SIGHUP, SIG_IGN);   /* survive the launching ssh session / boot shell closing */
+    flag_clear();   /* start idle: no ring fill until a client connects */
+
+    /* create + size the ring so we can listen before any frame exists (camsiphon shares it) */
+    int sfd = open(SHM_PATH, O_RDWR | O_CREAT, 0644);
+    if (sfd < 0) { LOG("open %s failed", SHM_PATH); return 1; }
+    if (ftruncate(sfd, SHM_TOTAL) != 0) { LOG("ftruncate failed"); return 1; }
+    g_base = mmap(0, SHM_TOTAL, PROT_READ | PROT_WRITE, MAP_SHARED, sfd, 0);
+    if (g_base == MAP_FAILED) { LOG("mmap failed"); return 1; }
+    g_hdr = (volatile unsigned int *)g_base;
 
     int srv = socket(AF_INET, SOCK_STREAM, 0);
     int one = 1; setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
@@ -150,7 +159,14 @@ int main(int argc, char **argv) {
         if (c < 0) continue;
         LOG("client connected");
         char req[1024]; recv(c, req, sizeof(req), 0);   /* drain request line(s) */
-        if (send_all(c, hdr, (int)strlen(hdr)) < 0) { close(c); continue; }
+
+        flag_set();                                     /* camsiphon starts filling the ring */
+        int waited = 0;                                 /* wait for frames (camera always captures) */
+        while (g_hdr[4] == 0 && waited++ < 200) msleep(10);
+        if (g_hdr[4] == 0) { LOG("no frames (camera idle?) — closing"); flag_clear(); close(c); continue; }
+        int W = g_hdr[2] ? (int)g_hdr[2] : 672, H = g_hdr[3] ? (int)g_hdr[3] : 504;
+        if (init_encoder(W, H) != 0)      { flag_clear(); close(c); continue; }
+        if (send_all(c, hdr, (int)strlen(hdr)) < 0) { flag_clear(); close(c); continue; }
 
         unsigned last = g_hdr[1] - 1; int frames = 0;
         for (;;) {
@@ -177,6 +193,7 @@ int main(int argc, char **argv) {
             if ((++frames % 30) == 0) LOG("streamed %d frames", frames);
             msleep(66);   /* ~15 fps cap */
         }
+        flag_clear();   /* stop camsiphon filling — back to zero AVA overhead */
         close(c);
         LOG("client disconnected (%d frames)", frames);
     }
