@@ -156,12 +156,29 @@ freed) — but that contends with AVA for the sensor and risks the same instabil
 
 ---
 
-## Microphone — none
+## Microphone — none (definitively; both paths checked)
 
-The ALSA codec (`SUNXI-CODEC`, `hw:0,0`) advertises a capture channel (`capture 1`), but recording
-from it returns `read error: Input/output error` and an empty file — **no microphone is wired/routed**.
-The robot is speaker-out only (voice prompts). Speaker mute: `PUT SpeakerVolumeControlCapability
-{"action":"set_volume","value":0}`.
+The D10s Pro has **no functional microphone**. The SoC supports two mic paths and both are dead here:
+
+1. **Analog codec ADC** (`SUNXI-CODEC`, `hw:0,0`, `capture 1`). By default its capture controls are
+   off (`ADC volume`, `MIC1/MIC2 gain` = 0, boost switches off), so `arecord` returns
+   `read error: Input/output error`. **Enable them** (`amixer sset 'ADC volume'/'MIC1 gain volume'
+   100%`, `'ADCL/ADCR Input MIC1/2 Boost' on`) and capture *succeeds* — but yields only a **flat DC
+   floor (~235/32767, avg≈peak), which scales with gain and does NOT respond to a loud sound source
+   in the room** (verified with a TV playing). That's ADC self-noise, not audio → **nothing wired to
+   MIC1/MIC2**.
+2. **Digital mic (DMIC)**. The SoC has a dedicated DMIC block (`dmic-controller@0x05095000`, machine
+   `allwinner,sunxi-dmic-machine`, `sound@2`) — but it's **`status = "disabled"` in the device tree**,
+   so it never registers as an ALSA card (only card 0 `audiocodec` exists; no DMIC in `dmesg`). The
+   disabled node is the board's way of saying no DMIC chip is fitted.
+
+So the robot is **speaker-out only** (voice prompts). NOTE: the speaker mute we use
+(`PUT SpeakerVolumeControlCapability {"action":"set_volume","value":0}`) is the **playback** path
+(`DAC/HpSpeaker/LINEOUT` controls) — entirely separate from capture; it does not affect (and is not
+the cause of) the mic situation. The cloud video stack ships strings for two-way audio, but on this
+model there's no mic to feed it. **For audio on the rover, add a USB mic on the Q6A companion**, not
+the robot codec. (Only remaining robot-side avenue: flip the DMIC DT node to `okay` and reboot —
+high risk, ~zero reward since no chip is fitted; don't.)
 
 ---
 
