@@ -590,6 +590,7 @@ scripts/
     camstream.sh           robot-side launcher: start/stop/status the MJPEG stream on :8090
     go2rtc.yaml            go2rtc config: MJPEG -> H.264 (exec:ffmpeg libx264) -> RTSP/WebRTC
     go2rtc.sh              robot-side launcher: start/stop/status go2rtc (:8554 RTSP, :1984 WebRTC)
+    rollback.sh            restore stock AVA (undo shims+daemons) for the current boot
     cedar_enc.c            cedar HW encoder test/tool (NV21 -> JPEG works; H.264 IDR encodes, SPS/PPS TBD)
     h264_headers.py        workstation: synthesize H.264 SPS/PPS (for the in-progress H.264 path)
     camera_stream.sh       (unused) GStreamer stub — gst not installed; video0 deadlocks while AVA streams
