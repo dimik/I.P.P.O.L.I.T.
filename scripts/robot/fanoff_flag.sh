@@ -19,6 +19,16 @@
 # manual nav, so there is no spin-up blip.
 #
 # Launched in the background from _root_postboot.sh after Valetudo starts.
+#
+# ⚠️ NAVIGATION/DOCKING DEPENDS ON THIS. The fanoff shim parks the LiDAR turret unless
+# /tmp/lidar_allow exists. If this daemon is not running (or its SSE goes stale after an AVA/Valetudo
+# restart and stops updating the flag), the turret stays parked in active modes → the robot navigates
+# and docks BLIND → it can't find the dock and rotates endlessly. (Hit 2026-06-19 while testing the
+# LiDAR tap.) RECOVERY: restart this daemon + `: > /tmp/lidar_allow`; if AVA already parked the turret
+# (it sent "spin" while the flag was absent, which the shim rewrote to "park"), that flag alone won't
+# re-spin it — re-trigger nav so AVA re-issues the spin command: `stop` then `home` via Valetudo
+# BasicControlCapability. Verify with strace: AVA's reads on /dev/ttyS3 should resume (non-zero).
+# The read-only serialtap LiDAR tap does NOT cause this — it's this WRITE-shim gate.
 
 ALLOW=/tmp/lidar_allow
 SSE_URL=http://localhost/api/v2/robot/state/attributes/sse

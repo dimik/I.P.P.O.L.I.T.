@@ -375,6 +375,8 @@ Note: `CleanMode` (`WritePropInt type=0`) is a property-store/behavior-tree valu
 
 **Verified on the wire.** Manual nav → `SetCleaning` `00 01 00 00 00` (fan off) + ttyS3 LDS reads ~0 (turret parked) + `_CtrlMcuCMD 04 00`, with no fan/LiDAR start-up blip. With `/tmp/lidar_allow` present the LiDAR spins (~1700 reads/3s) while `SetCleaning` stays `00 01` — proving the fan is unconditional and the LiDAR is gated. MotorCtrl (driving) flows throughout; AVA healthy.
 
+> ⚠️ **This gate is load-bearing for navigation/docking.** If `fanoff_flag.sh` is not running, or `/tmp/lidar_allow` is cleared during an active mode (e.g. while manually testing the LiDAR tap, or the daemon's SSE goes stale after an AVA/Valetudo restart), the turret stays parked and **the robot navigates and docks BLIND → can't find the dock, rotates endlessly** (hit 2026-06-19). Recovery: restart `fanoff_flag.sh` + `: > /tmp/lidar_allow`, then — because AVA already parked the turret and won't re-spin on the flag alone — re-trigger nav so it re-issues the spin command: `stop` then `home` via `BasicControlCapability`. Confirm `/dev/ttyS3` reads resume. The read-only `serialtap` LiDAR tap does NOT cause this; it's this fanoff write-gate.
+
 **Deploy / persistence.**
 - `deploy_ava_shims.sh` builds a patched `ava.sh` (`export LD_PRELOAD="<shim list>"`), bind-mounts it over `/etc/rc.d/ava.sh`, restarts AVA. The LD_PRELOAD list (fanoff filter + camsiphon if present) is the shared injection MECHANISM; each shim is an independent feature.
 - `_root.sh` re-establishes that bind-mount early at boot; `_root_postboot.sh` launches the SSE gate daemon after Valetudo starts. Both persist across reboot.
