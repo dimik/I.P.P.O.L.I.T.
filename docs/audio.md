@@ -42,46 +42,58 @@ chroot /data/chroot /opt/ffmpeg -f lavfi -i "sine=frequency=660:duration=1.5" -a
 oggenc -Q /tmp/t.wav -o /tmp/t.ogg && mda_cli "single,/tmp/t,70"
 ```
 
-## ROS integration — `audio_bridge.py` (text→speech + files)
+## ROS integration — `audio_bridge.py` (multi-voice text→speech + files)
 
 `scripts/robot/audio_bridge.py` (chroot ROS, started by `_root_postboot.sh`) subscribes
 **`/robot/speak`** (`std_msgs/String`); the message is one of:
-- **text** → spoken via on-robot TTS (espeak-ng) — `"robot, say X"` in one line
+- **`text`** → spoken with the **default voice** (`default_voice` param, default `amy`)
+- **`<voice>: text`** → spoken with that voice (per-message selection)
 - a readable **`.ogg` path** → played as-is
 - **`"stop"`** → `killall ogg123`
 
 ```sh
-ros2 topic pub --once /robot/speak std_msgs/msg/String "{data: 'Docking complete'}"     # speaks it
-ros2 topic pub --once /robot/speak std_msgs/msg/String "{data: /tmp/hello.ogg}"          # plays file
+ros2 topic pub --once /robot/speak std_msgs/msg/String "{data: 'Docking complete'}"        # default voice
+ros2 topic pub --once /robot/speak std_msgs/msg/String "{data: 'gosia: Dzień dobry'}"        # Polish
+ros2 topic pub --once /robot/speak std_msgs/msg/String "{data: 'es: Hola Dmitry'}"           # Spanish
+ros2 topic pub --once /robot/speak std_msgs/msg/String "{data: 'espeak: quick beep'}"        # instant
+ros2 topic pub --once /robot/speak std_msgs/msg/String "{data: /tmp/hello.ogg}"              # play file
 ```
-Params: `volume` (90), `voice` (`en-us+f3`), `speed` (155 wpm), `amplitude` (0–200).
 
-## On-robot TTS — espeak-ng
+**Voices** (the `VOICES` map in the node; keep in sync with `/data/chroot/opt/piper/voices/`):
 
-Installed in the chroot (reproducible):
+| key | engine | language | aliases |
+|-----|--------|----------|---------|
+| `amy` | Piper (neural) | English (US ♀) | `en`, `english` |
+| `thorsten` | Piper | German | `de`, `german` |
+| `gosia` | Piper | Polish | `pl`, `polish` |
+| `davefx` | Piper | Spanish | `es`, `spanish` |
+| `espeak` | espeak-ng | any (robotic, **instant**) | — |
+
+⚠️ **Piper does NOT translate** — send text *already in the target language* (the model only
+pronounces). For English→other, translate first (an LLM/translator upstream), then send the result.
+Params: `volume` (90), `default_voice` (`amy`), `espeak_speed` (155), `espeak_amp` (200).
+
+## On-robot TTS engines
+
+**Piper** (neural, natural) — binary + voices live at **`/data/chroot/opt/piper`** (eMMC, persists;
+~281 MB = ~50 MB runtime + ~60 MB/voice). On the A7 it's ~RTF 1 for `low` voices, ~RTF 1.7 for
+`medium` (so ~9–10 s for a sentence, incl. ~2.7 s model load). Install / add voices:
+```sh
+# runtime (once): download piper_linux_aarch64.tar.gz (github.com/rhasspy/piper releases) -> /data/chroot/opt/piper
+# a voice: curl -L huggingface.co/rhasspy/piper-voices/resolve/main/<lang>/<...>/<voice>.onnx{,.json} -> .../voices/
+```
+Synthesis is piped (no temp WAV): `piper --model V --output_file - | /opt/ffmpeg -c:a libvorbis x.ogg`.
+
+**espeak-ng** (robotic, instant) — apt-installed in the chroot, used for the `espeak` voice:
 ```sh
 chroot /data/chroot apt-get -o APT::Sandbox::User=root install -y --no-install-recommends espeak-ng
 ```
-The bridge runs `espeak-ng -v <voice> -w x.wav <text>` → `/opt/ffmpeg -c:a libvorbis x.ogg` → mediad
-(both self-contained in the chroot; the chroot ffmpeg has libvorbis). espeak-ng is **robotic formant
-synthesis** but instant and tiny.
+espeak supports on-the-fly accents (`en-us`, `en-gb`, `en-gb-scotland`, foreign-accented English…).
 
-**Choose a voice** — set the `voice` param to any espeak-ng variant (sampler heard: `en-us`,
-`en-us+f3`, `en-us+f5`, `en-us+m3`, `en-us+m7`, `en-gb`, `en-us+whisper`; full list:
-`espeak-ng --voices`):
-```sh
-ros2 param set /audio_bridge voice en-gb        # or bake the default into audio_bridge.py
-```
+## Natural voices on the companion (optional)
 
-## Natural voices (optional upgrade) — do TTS on the companion
-
-For natural (neural) speech, synthesize on the Q6A (the A7 is too weak for Piper-quality at speed)
-and ship the OGG over. `companion/tts_speak.sh`:
-```sh
-./tts_speak.sh "Docking started" [robot-host]
-# Piper (preferred) or espeak-ng -> WAV -> oggenc -> scp robot:/tmp -> trigger /robot/speak (or mda_cli)
-```
-Pipeline: `LLM/text → TTS (Piper/Kokoro/Coqui/OpenAI) → WAV → oggenc → robot:/tmp → mediad`.
+The A7 is slow for Piper; for snappy natural speech, synthesize on the Q6A and ship the OGG over —
+`companion/tts_speak.sh`: `LLM/text → Piper → WAV → oggenc → robot:/tmp → mediad`.
 
 ## Caveats
 

@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
-"""audio_bridge.py — robot speaker bridge: play audio files AND speak text, via Dreame's mediad.
+"""audio_bridge.py — robot speaker bridge: speak text (multi-voice TTS) and play files, via mediad.
 
-Subscribes /robot/speak (std_msgs/String); the message is one of:
-  - text                          -> TTS (espeak-ng) -> spoken on the robot
-  - an existing .ogg file path     -> played as-is
-  - "stop"                         -> stops playback
+Subscribes /robot/speak (std_msgs/String). The message is one of:
+  - "text"                  -> spoken with the default voice
+  - "<voice>: text"         -> spoken with that voice (per-message selection)
+  - "/path/to/file.ogg"     -> played as-is
+  - "stop"                  -> stops playback
 
-Everything plays through Dreame's media daemon (mda_cli wire protocol over TCP 127.0.0.1:10100),
-NOT aplay/ogg123 directly — so it's serialized with AVA's own prompts and never fights the ALSA
-codec. The chroot reaches :10100 directly (shares host net). TTS + OGG encode are self-contained in
-the chroot: espeak-ng -> /opt/ffmpeg (libvorbis) -> /tmp/*.ogg. See docs/audio.md.
+Voices (see VOICES below): Piper neural voices (natural, ~real-time on the A7) for EN/DE/PL/ES, plus
+espeak-ng (instant, robotic). Examples:
+  ros2 topic pub --once /robot/speak std_msgs/msg/String "{data: 'Docking complete'}"        # default
+  ros2 topic pub --once /robot/speak std_msgs/msg/String "{data: 'gosia: Dzień dobry'}"       # Polish
+  ros2 topic pub --once /robot/speak std_msgs/msg/String "{data: 'es: Hola Dmitry'}"          # Spanish
+  ros2 topic pub --once /robot/speak std_msgs/msg/String "{data: 'espeak: quick beep test'}"  # instant
 
-Voice/speed/amplitude/volume are ROS params (see __init__) — change the voice with any espeak-ng
-variant, e.g. en-us, en-us+f3, en-gb, en-us+m3, en-us+whisper.
+NOTE: Piper does NOT translate — send text already in the target language (the model just pronounces).
+Pipeline (no temp WAV): piper/espeak (WAV on stdout) | ffmpeg -c:a libvorbis -> /tmp/_spoke.ogg ->
+mediad (TCP 127.0.0.1:10100), serialized with AVA's prompts, no ALSA contention. See docs/audio.md.
 
 Run: source /opt/ros/jazzy/setup.bash && python3 audio_bridge.py
-     ros2 topic pub --once /robot/speak std_msgs/msg/String "{data: 'Docking complete'}"
 """
 import os
 import socket
@@ -23,28 +26,41 @@ import subprocess
 
 import rclpy
 from rclpy.node import Node
+from rclpy.executors import ExternalShutdownException
 from std_msgs.msg import String
 
 MEDIAD = ('127.0.0.1', 10100)
 FFMPEG = '/opt/ffmpeg'
-TTS_WAV = '/tmp/_spoke.wav'
+PIPER = '/opt/piper/piper'
+PIPER_DIR = '/opt/piper'
 TTS_OGG = '/tmp/_spoke.ogg'
+
+# voice key -> (engine, model)   [piper model path | espeak voice name]
+VOICES = {
+    'amy':      ('piper', '/opt/piper/voices/amy.onnx'),   # English  (US female)
+    'thorsten': ('piper', '/opt/piper/voices/de.onnx'),    # German
+    'gosia':    ('piper', '/opt/piper/voices/pl.onnx'),    # Polish
+    'davefx':   ('piper', '/opt/piper/voices/es.onnx'),    # Spanish
+    'espeak':   ('espeak', 'en-us+f3'),                    # instant, robotic
+}
+ALIASES = {'en': 'amy', 'english': 'amy', 'de': 'thorsten', 'german': 'thorsten',
+           'pl': 'gosia', 'polish': 'gosia', 'es': 'davefx', 'spanish': 'davefx'}
 
 
 class AudioBridge(Node):
     def __init__(self):
         super().__init__('audio_bridge')
-        self.declare_parameter('volume', 90)        # mediad volume (board-scaled)
-        self.declare_parameter('voice', 'en-us+f3')  # any espeak-ng voice/variant
-        self.declare_parameter('speed', 155)         # espeak words/min
-        self.declare_parameter('amplitude', 200)     # espeak amplitude 0-200
+        self.declare_parameter('volume', 90)
+        self.declare_parameter('default_voice', 'amy')
+        self.declare_parameter('espeak_speed', 155)
+        self.declare_parameter('espeak_amp', 200)
         self.vol = int(self.get_parameter('volume').value)
-        self.voice = self.get_parameter('voice').value
-        self.speed = int(self.get_parameter('speed').value)
-        self.amp = int(self.get_parameter('amplitude').value)
+        self.default_voice = self.get_parameter('default_voice').value
+        self.speed = int(self.get_parameter('espeak_speed').value)
+        self.amp = int(self.get_parameter('espeak_amp').value)
         self.create_subscription(String, '/robot/speak', self.on_speak, 10)
-        self.get_logger().info(f'audio_bridge up; /robot/speak = text (TTS, voice={self.voice}) '
-                               f'| <path>.ogg | "stop"')
+        self.get_logger().info(f'audio_bridge up; default_voice={self.default_voice}; '
+                               f'voices={list(VOICES)}; use "<voice>: text", a .ogg path, or "stop"')
 
     def send_mediad(self, msg):
         try:
@@ -55,23 +71,30 @@ class AudioBridge(Node):
             self.get_logger().warn(f'mediad send failed: {e}')
             return False
 
-    def play_ogg(self, path):
-        if self.send_mediad(f'single,{path[:-4]},{self.vol}'):   # mediad appends .ogg
-            self.get_logger().info(f'playing {path} @vol {self.vol}')
-
-    def say_text(self, text):
+    def synth(self, engine, model, text):
+        """piper/espeak -> WAV on stdout -> ffmpeg libvorbis -> TTS_OGG (no temp WAV file)."""
+        if engine == 'piper':
+            cmd, cwd = [PIPER, '--model', model, '--output_file', '-'], PIPER_DIR
+        else:
+            cmd, cwd = ['espeak-ng', '-v', model, '-s', str(self.speed),
+                        '-a', str(self.amp), '--stdout'], None
         try:
-            subprocess.run(['espeak-ng', '-v', self.voice, '-s', str(self.speed),
-                            '-a', str(self.amp), '-w', TTS_WAV, text],
-                           check=True, capture_output=True, timeout=30)
-            subprocess.run([FFMPEG, '-hide_banner', '-loglevel', 'error', '-y',
-                            '-i', TTS_WAV, '-c:a', 'libvorbis', TTS_OGG],
-                           check=True, capture_output=True, timeout=30)
+            p1 = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                  stderr=subprocess.DEVNULL)
+            p2 = subprocess.Popen([FFMPEG, '-hide_banner', '-loglevel', 'error', '-y',
+                                   '-i', 'pipe:0', '-c:a', 'libvorbis', TTS_OGG],
+                                  stdin=p1.stdout, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            p1.stdout.close()                       # let p2 get EOF when p1 exits
+            p1.stdin.write(text.encode('utf-8')); p1.stdin.close()
+            p2.wait(timeout=60); p1.wait(timeout=60)
+            return p2.returncode == 0
         except Exception as e:
             self.get_logger().warn(f'TTS failed: {e}')
-            return
-        if self.send_mediad(f'single,{TTS_OGG[:-4]},{self.vol}'):
-            self.get_logger().info(f'speaking: {text[:60]!r}')
+            try:
+                p1.kill(); p2.kill()
+            except Exception:
+                pass
+            return False
 
     def on_speak(self, m):
         text = m.data.strip()
@@ -81,9 +104,21 @@ class AudioBridge(Node):
             subprocess.run(['killall', 'ogg123'], capture_output=True)
             return
         if text.endswith('.ogg') and os.path.exists(text):
-            self.play_ogg(text)
-        else:
-            self.say_text(text)
+            if self.send_mediad(f'single,{text[:-4]},{self.vol}'):
+                self.get_logger().info(f'playing {text}')
+            return
+        # per-message voice selection: "<voice>: text"
+        voice = self.default_voice
+        if ':' in text:
+            head, _, rest = text.partition(':')
+            key = head.strip().lower()
+            if key in VOICES or key in ALIASES:
+                voice = ALIASES.get(key, key)
+                text = rest.strip()
+        engine, model = VOICES.get(voice, VOICES[self.default_voice])
+        if text and self.synth(engine, model, text):
+            self.send_mediad(f'single,{TTS_OGG[:-4]},{self.vol}')
+            self.get_logger().info(f'[{voice}] {text[:60]!r}')
 
 
 def main():
@@ -91,7 +126,7 @@ def main():
     node = AudioBridge()
     try:
         rclpy.spin(node)
-    except (KeyboardInterrupt, SystemExit):
+    except (KeyboardInterrupt, SystemExit, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
