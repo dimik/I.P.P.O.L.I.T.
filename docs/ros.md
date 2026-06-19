@@ -22,7 +22,7 @@ on the Q6A.
 | `/robot/status` | `std_msgs/String` | default | `StatusStateAttribute` (`value/flag`) | on attr change |
 
 Plus **`/scan`** (`sensor_msgs/LaserScan`) from a *separate* pipeline — the robot's own 360° lidar via
-`libldstap.so` → tmpfs shm ring → `lds_scan_node.py`. Publishes only while the turret spins (active
+`libserialtap.so` → tmpfs shm ring → `lds_scan_node.py`. Publishes only while the turret spins (active
 nav); zero overhead when gated off. See "Tap raw ttyS3" below + `docs/sensors.md`.
 
 **Design (why this shape):** Valetudo's map SSE is *push-on-change with no initial snapshot*, so a
@@ -88,24 +88,31 @@ LDS) exclusively — so there's no clean `sensor_msgs/LaserScan` source. Decide 
 - **Tap raw ttyS3 in AVA** → **DONE — `/scan` is LIVE** (2026-06-19). The earlier "read() breaks AVA"
   wall was a bug in *our* shim, not AVA: the freestanding `read()` returned raw `-errno` instead of
   glibc's `-1`+`errno`, so AVA's non-blocking loops choked. Fixed with `__errno_location`. The
-  production path: `libldstap.so` (LD_PRELOAD, passive errno-correct read-tap on ttyS3, isolates the
+  production path: `libserialtap.so` (LD_PRELOAD, passive errno-correct read-tap on ttyS3, isolates the
   fd via `/proc/self/fd`) tees into a tmpfs shm ring → `lds_scan_node.py` decodes the LDS frames →
   `sensor_msgs/LaserScan` on `/scan`. The robot's *own* 360° lidar, no extra hardware. Boot-persistent
   and verified across a reboot; zero overhead when the turret is gated off. See `docs/sensors.md` for
-  the frame format and `scripts/robot/{ldstap.c,lds_scan_node.py}`.
+  the frame format and `scripts/robot/{serialtap.c,lds_scan_node.py}`.
 
 **Recommendation:** ship v1 nav on `/map` + pose now; for live 360° sensing, the robot's own lidar
 via the ttyS3 tap is now the preferred path (no extra hardware) — vs. a USB lidar on the Q6A as the
 zero-AVA-risk fallback.
 
-## Raw IMU / wheel-odom over ttyS4 — unblocked, not yet built
+## Raw IMU + wheel-odom over ttyS4 — LIVE
 
-`scripts/robot/mcutap.c` taps AVA's MCU Status stream (IMU gyro/accel, wheel odom, currents) on
-`/dev/ttyS4` (frames start `0x3c`). It was parked because the `read()` interposition destabilised
-AVA — **now traced to the errno-contract bug** (returned `-errno`, not `-1`+`errno`); with the fix it
-runs (see `mcutap.c` header + `docs/sensors.md`). Remaining before preloading for real: swap the
-per-frame `sendto` for a shm-ring tee (no syscall in AVA's hot path). Until built, `/odom` is
-Valetudo's SLAM pose (good for nav), not raw dead-reckoning, and there's no `sensor_msgs/Imu`.
+`libserialtap.so` also tees AVA's MCU stream on `/dev/ttyS4` (`3c…3e` frames, Modbus-CRC) into
+`/tmp/mcu_ring.buf`; **`scripts/robot/mcu_node.py`** decodes it and publishes:
+- **`/imu/data`** (`sensor_msgs/Imu`) — BMI-class gyro + accel (`imu_type=2`). Orientation left unknown
+  (no magnetometer; covariance[0]=-1); angular_velocity + linear_acceleration for EKF fusion. Gyro
+  bias auto-calibrated at startup (assumes still/docked). ~35 Hz idle (MCU throttles Status10ms).
+- **`/odom/wheel`** (`nav_msgs/Odometry`) — raw wheel dead-reckoning (separate from the bridge's
+  SLAM `/odom`; for `robot_localization` EKF, not direct nav).
+
+**Scalings are D10s-MEASURED, not Z10-borrowed** (the Z10 firmware pre-scaled; the D10s sends raw
+LSB): accel `/16384` (±2 g — confirmed by gravity = 9.807 m/s² at rest), gyro `/65.536` (±500°/s —
+confirmed by two spin cross-checks of `gyro_z` integral vs wheel-odom yaw: 0.01526/0.01527 °/s·LSB,
+both directions; see `scripts/robot/spin_calib.py`). Both are node params, re-tunable without rebuild.
+Axis/sign vs `base_link` is a v1 passthrough — verify in RViz. `mcutap.c` is superseded by serialtap.
 
 ## Roadmap
 
@@ -115,10 +122,12 @@ Valetudo's SLAM pose (good for nav), not raw dead-reckoning, and there's no `sen
 - [ ] nav2 bringup on the Q6A consuming `/map` + TF; goals → Valetudo REST move commands
 - [ ] camera into ROS (the go2rtc RTSP/WebRTC feed → an `image` topic if wanted)
 - [ ] live obstacle sensing on the Q6A when needed: camera+NPU layer, or a dedicated USB lidar
-- [x] raw `/scan` via ttyS3 read-tap (`libldstap.so` → shm ring → `lds_scan_node.py`) — **LIVE**,
+- [x] raw `/scan` via ttyS3 read-tap (`libserialtap.so` → shm ring → `lds_scan_node.py`) — **LIVE**,
       boot-persistent, the robot's own 360° lidar
-- [ ] `sensor_msgs/Imu` via the ttyS4 tap — same mechanism (read-tap unblocked); mcutap needs the
-      shm-ring tee + decoder wired up (see mcutap.c / docs/sensors.md)
+- [x] `/imu/data` + `/odom/wheel` via the ttyS4 tap (`libserialtap.so` → shm ring → `mcu_node.py`) —
+      **LIVE**, boot-persistent; scalings D10s-measured (accel /16384, gyro /65.536)
+- [ ] `robot_localization` EKF on the Q6A fusing `/odom/wheel` + `/imu/data` (and verify IMU axis
+      alignment vs `base_link` in RViz)
 
 ## Gotchas
 

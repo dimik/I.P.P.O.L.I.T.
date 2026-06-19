@@ -12,12 +12,12 @@ echo "=== _root.sh start $(date) ==="
 #   libfanoff_filter.so — fan/LiDAR quieting (rewrites MCU SetCleaning to idle on /dev/ttyS4,
 #                         gates the LiDAR motor). See CLAUDE.md "Vacuum fan disable".
 #   libcamsiphon.so     — read-only camera frame siphon (taps AVA's V4L2 DQBUF).
-#   libldstap.so        — read-only LiDAR siphon: tees AVA's ttyS3 reads to a tmpfs shm ring
+#   libserialtap.so        — read-only LiDAR siphon: tees AVA's ttyS3 reads to a tmpfs shm ring
 #                         (/tmp/lds_ring.buf) for lds_scan_node -> /scan. See docs/ros.md.
 # Must be established before app start runs /etc/rc.d/ava.sh (this is the early hook).
 # Keep this list in sync with deploy_ava_shims.sh.
 PRELOAD=""
-for so in /data/lib/libfanoff_filter.so /data/lib/libcamsiphon.so /data/lib/libldstap.so; do
+for so in /data/lib/libfanoff_filter.so /data/lib/libcamsiphon.so /data/lib/libserialtap.so; do
     [ -f "$so" ] && PRELOAD="${PRELOAD:+$PRELOAD }$so"
 done
 if [ -n "$PRELOAD" ]; then

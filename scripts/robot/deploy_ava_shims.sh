@@ -13,7 +13,7 @@
 # SHIMS (independent features; each loaded only if its .so is present):
 #   libfanoff_filter.so  — fan/LiDAR quieting   (build: build_ava_shims.sh)
 #   libcamsiphon.so      — read-only camera tap  (build: build_ava_shims.sh)
-#   libldstap.so         — read-only LiDAR ttyS3 tap -> /scan (build: build_ava_shims.sh)
+#   libserialtap.so         — read-only LiDAR ttyS3 tap -> /scan (build: build_ava_shims.sh)
 #
 # Run ON the robot:  sh /data/deploy_ava_shims.sh
 
@@ -22,9 +22,9 @@ LIBDIR=/data/lib
 PATCHED=/data/ava.sh.preload
 ORIG=/etc/rc.d/ava.sh
 
-# Assemble the LD_PRELOAD list from whichever shims are built (order: filter, camsiphon, ldstap).
+# Assemble the LD_PRELOAD list from whichever shims are built (order: filter, camsiphon, serialtap).
 PRELOAD=""
-for so in libfanoff_filter.so libcamsiphon.so libldstap.so; do
+for so in libfanoff_filter.so libcamsiphon.so libserialtap.so; do
     [ -f "$LIBDIR/$so" ] && PRELOAD="${PRELOAD:+$PRELOAD }$LIBDIR/$so"
 done
 [ -n "$PRELOAD" ] || { echo "ERROR: no shims in $LIBDIR — run build_ava_shims.sh first"; exit 1; }
@@ -56,7 +56,7 @@ sleep 8
 # Verify the shims are mapped into the running AVA.
 AVAPID=$(pidof ava)
 echo "ava pid=$AVAPID"
-for so in libfanoff_filter.so libcamsiphon.so libldstap.so; do
+for so in libfanoff_filter.so libcamsiphon.so libserialtap.so; do
     case " $PRELOAD " in *"$so"*)
         if grep -q "$so" "/proc/$AVAPID/maps" 2>/dev/null; then
             echo "OK: $so is loaded into AVA."

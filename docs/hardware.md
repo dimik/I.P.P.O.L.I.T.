@@ -36,7 +36,7 @@ The robot's USB 2.0 port cannot power the Dragon Q6A (insufficient current).
 
 | Interface | Device | Used by |
 |-----------|--------|---------|
-| LiDAR (LDS turret) | `/dev/ttyS3` @ 230400 | AVA (SLAM); tapped read-only via `libldstap.so` → `/scan` (see `docs/sensors.md`) |
+| LiDAR (LDS turret) | `/dev/ttyS3` @ 230400 | AVA (SLAM); tapped read-only via `libserialtap.so` → `/scan` (see `docs/sensors.md`) |
 | MCU (motors/IMU/odom) | `/dev/ttyS4` | AVA (`3c…3e` protocol); tappable via the same read-tap mechanism |
 | Camera | `/dev/video0`, `/dev/video2` | OV8856 MIPI, V4L2 accessible |
 | Speaker | `/dev/snd/pcmC0D0p` | SUNXI-CODEC, ALSA `hw:0,0` |

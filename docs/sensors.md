@@ -65,12 +65,12 @@ AVA owns ttyS3 exclusively and the turret only spins during active (non-manual) 
 AVA owns ttyS3 for SLAM. Two routes to lidar data, in order of risk:
 - **Processed map/pose (live, zero risk):** the **Valetudo→ROS bridge** (REST/SSE, broker-free —
   `/map`, `/odom`; see `docs/ros.md`). Valetudo exposes **no raw `/scan`**.
-- **Raw `/scan` via passive read-tap (LIVE):** `libldstap.so` (LD_PRELOAD, errno-correct) tees AVA's
+- **Raw `/scan` via passive read-tap (LIVE):** `libserialtap.so` (LD_PRELOAD, errno-correct) tees AVA's
   ttyS3 reads into a tmpfs shm ring (`/tmp/lds_ring.buf`); `lds_scan_node.py` (chroot ROS) decodes
   and publishes `sensor_msgs/LaserScan` on `/scan`. Boot-persistent (preloaded via `_root.sh`, node
   launched by `_root_postboot.sh`); verified across a reboot. **Zero overhead when the turret is
   gated off** (no ttyS3 reads → empty ring). Calibration: `base_link bearing = -lds_deg + offset`
-  (handedness −1; offset ~0–5° — tune in RViz). See `ldstap.c` / `lds_scan_node.py` / `docs/ros.md`.
+  (handedness −1; offset ~0–5° — tune in RViz). See `serialtap.c` / `lds_scan_node.py` / `docs/ros.md`.
 
 ---
 
@@ -267,22 +267,23 @@ calibration pass, but structure + values are confirmed sane.)
 
 IMU/compass ICs per the Z10 reference (D10s may differ): gyro XV7001, IMU BMI055, compass QMCX983.
 
-**MCU read-tap status (2026-06-19): read interposition UNBLOCKED, build pending.** strace confirmed
-AVA reads Status frames on ttyS4 fd 24 and they decode perfectly (IMU `accel_z=1.000g`, odom x/y/yaw,
-match the alufers formats). The first read-tap (`scripts/robot/mcutap.c`) broke AVA's startup — but
-this was **not** because interposing `read()` is unsafe; it was a bug in the freestanding shim: it
-returned the raw syscall result (`-errno`) instead of honoring glibc's contract (**return `-1` and
-set `errno`**). AVA's non-blocking read/`select` loops saw e.g. `-11` instead of `-1`/`EAGAIN` and
-choked. **Verified the fix:** an errno-correct `read()` interposer (resolving `__errno_location` from
-host glibc, `ret(r){ if(r<0){ *__errno_location()=-r; return -1; } return r; }`) — AVA launches and
-runs normally with it mapped in. So read interposition is viable; the IMU tap (ttyS4, frames `0x3c`)
-and the lidar tap (ttyS3, LDS marker `0x55 0xaa`) are both unblocked.
+**MCU IMU + odom tap status (2026-06-19): LIVE.** `libserialtap.so` tees AVA's ttyS4 reads into
+`/tmp/mcu_ring.buf`; `mcu_node.py` publishes `/imu/data` + `/odom/wheel` (see `docs/ros.md`). The key
+to AVA-safety was the **errno contract** — the first tap (`mcutap.c`) broke AVA's startup not because
+interposing `read()` is unsafe, but because the freestanding shim returned raw `-errno` instead of
+glibc's `-1`+`errno`, so AVA's non-blocking loops choked. Fixed via `__errno_location`; the tap also
+uses a shm ring (memcpy, no per-frame syscall) instead of `mcutap`'s `sendto`. `mcutap.c` is superseded.
 
-Remaining before preloading a real tap: (1) replace the per-frame `sendto` with a **shm-ring tee**
-(memcpy, no syscall in AVA's hot path — the `sendto` overhead was the other suspected risk); (2) for
-lidar, decode the LDS frame format off ttyS3. Until built, ROS v1 ships **map + pose via Valetudo's
-REST/SSE API** → the bridge (`scripts/robot/valetudo_bridge.py`, see `docs/ros.md`). `mcutap.c` holds
-the errno fix + design notes.
+**IMU chip + scalings (D10s-MEASURED — the Z10's differ).** `HwInfo` (pkt 0x29) reports
+`imu_type=2` (mcu_type=1, no 2nd IMU). The D10s sends **raw sensor LSB** (the Z10 firmware pre-scaled
+to mg/centideg), so the Z10's `/1000`,`/100` are wrong here:
+- **accel = raw/16384 g** (±2 g, 16-bit) — confirmed by gravity: `linear_acceleration.z = 9.807 m/s²`
+  (= 1.000 g) at rest.
+- **gyro = raw/65.536 °/s** (±500°/s) — confirmed by two spin cross-checks (`spin_calib.py`):
+  `gyro_z` integral vs wheel-odom yaw gave 0.01526 / 0.01527 °/s·LSB in both rotation directions.
+
+Status10ms (IMU) is throttled to ~22 Hz when idle/docked (ramps up when active). `mcu_node` params
+`gyro_scale`/`accel_scale` allow re-tuning without a rebuild.
 
 ---
 

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """lds_scan_node.py — publish the robot's own LiDAR as sensor_msgs/LaserScan on /scan.
 
-Reads the raw ttyS3 byte stream that libldstap.so tees into the tmpfs shm ring
+Reads the raw ttyS3 byte stream that libserialtap.so tees into the tmpfs shm ring
 (/tmp/lds_ring.buf), decodes LDS frames (lds_decode), accumulates one revolution, and
 publishes /scan. Runs in the chroot's ROS 2 (Jazzy). No MQTT, no polling of AVA.
 
-Pipeline:  AVA read(ttyS3) --[libldstap.so]--> /tmp/lds_ring.buf --[this node]--> /scan
+Pipeline:  AVA read(ttyS3) --[libserialtap.so]--> /tmp/lds_ring.buf --[this node]--> /scan
 
 Calibration (from cross-validation vs Valetudo's SLAM map): the LDS angle index runs OPPOSITE
 the ROS CCW convention (handedness -1), and LDS angle 0 ~ robot forward. So

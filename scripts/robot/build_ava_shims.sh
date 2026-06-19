@@ -57,17 +57,17 @@ if [ -f /data/camsiphon.c ]; then
     chroot "$CHROOT" /usr/bin/readelf --dyn-syms /tmp/libcamsiphon.so 2>/dev/null | grep -iE " (open|openat|mmap|ioctl)$" || true
 fi
 
-# --- ldstap: read-only LiDAR (ttyS3) siphon -> tmpfs shm ring (separate LD_PRELOAD lib) ---
-if [ -f /data/ldstap.c ]; then
-    echo "Building libldstap.so (LiDAR ttyS3 read-tap)..."
-    cp /data/ldstap.c "$CHROOT/tmp/ldstap.c"
-    chroot "$CHROOT" /usr/bin/gcc-13 $CFLAGS -o /tmp/libldstap.so /tmp/ldstap.c
-    cp "$CHROOT/tmp/libldstap.so" "$OUTDIR/libldstap.so"
-    ls -la "$OUTDIR/libldstap.so"
-    echo "--- ldstap version deps (should be EMPTY) ---"
-    chroot "$CHROOT" /usr/bin/readelf -V /tmp/libldstap.so 2>/dev/null | grep -i "GLIBC" || echo "  none — good (freestanding)"
-    echo "--- ldstap exports (expect: read, readv) ---"
-    chroot "$CHROOT" /usr/bin/readelf --dyn-syms /tmp/libldstap.so 2>/dev/null | grep -iE " (read|readv)$" || true
+# --- serialtap: read-only tap of AVA's sensor serial ports (ttyS3 LiDAR + ttyS4 MCU) -> shm rings ---
+if [ -f /data/serialtap.c ]; then
+    echo "Building libserialtap.so (ttyS3 LiDAR + ttyS4 MCU read-tap)..."
+    cp /data/serialtap.c "$CHROOT/tmp/serialtap.c"
+    chroot "$CHROOT" /usr/bin/gcc-13 $CFLAGS -o /tmp/libserialtap.so /tmp/serialtap.c
+    cp "$CHROOT/tmp/libserialtap.so" "$OUTDIR/libserialtap.so"
+    ls -la "$OUTDIR/libserialtap.so"
+    echo "--- serialtap version deps (should be EMPTY) ---"
+    chroot "$CHROOT" /usr/bin/readelf -V /tmp/libserialtap.so 2>/dev/null | grep -i "GLIBC" || echo "  none — good (freestanding)"
+    echo "--- serialtap exports (expect: read, readv) ---"
+    chroot "$CHROOT" /usr/bin/readelf --dyn-syms /tmp/libserialtap.so 2>/dev/null | grep -iE " (read|readv)$" || true
 fi
 
 # --- camstream: cedar HW-JPEG MJPEG-over-HTTP server (chroot-native, links vendor encoder) ---
