@@ -332,6 +332,14 @@ ceiling ~280 Mbit/s — but we never get near it because the UDC caps first.
 Robot `usb0` = static `192.168.10.1/24` (server). Host = `192.168.10.2/24` via **DHCP** from the
 robot's `usb0` dnsmasq (§6.1). No static host config needed.
 
+### Management over USB (SSH)
+The robot's `sshd` listens on `0.0.0.0:22`, so `ssh root@192.168.10.1` works over this link — and
+it's the **preferred** path when the cable's in: ~0.4 ms latency, faster/steadier bulk than WiFi,
+and independent of WiFi (works even if it's down or being reconfigured). Local `~/.ssh/config`
+alias convention: `dreame-usb` (192.168.10.1), `dreame-wifi` (192.168.1.213), `dreame` (AP
+192.168.5.1). Note SSH's own throughput is A53-CPU-bound (it encrypts) — fine for shell/scp/ROS,
+but for max bulk use a raw transport.
+
 ---
 
 ## 8. Reproduce-from-scratch checklist

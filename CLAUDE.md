@@ -21,8 +21,9 @@ Turn a Dreame D10s Pro robot vacuum into an open AI platform:
 - Speaker: SUNXI-CODEC ALSA device — `hw:0,0`, playback via `aplay`
 - Root filesystem: **squashfs (physically read-only)** — cannot be remounted RW
 - Writable partition: `/data/` (ext4, ~3.3GB total, ~2GB free after setup)
-- SSH access: `root@192.168.1.213` (home WiFi), `root@192.168.5.1` (robot AP mode)
-- SSH key: `~/.ssh/id_rsa_dreame`
+- SSH access: `root@192.168.10.1` (USB gadget link — fastest, WiFi-independent), `root@192.168.1.213`
+  (home WiFi), `root@192.168.5.1` (robot AP mode). `sshd` listens on `0.0.0.0:22`.
+- SSH key: `~/.ssh/id_rsa_dreame`. Local `~/.ssh/config` aliases: `dreame-usb`, `dreame-wifi`, `dreame` (AP).
 
 ### Companion — Radxa Dragon Q6A
 - SoC: Qualcomm QCS6490
@@ -93,8 +94,10 @@ appliance/HTTP model (`valetudo_bridge --host`). See `docs/ros.md`.
 - Laptop connects to `5K` (5GHz, 802.11ac) — Claude/SSH sessions run from here
 - Robot connects to `4K` (2.4GHz) — robot WiFi is 2.4GHz only
 - These are the same router, same password, different bands/SSIDs
-- SSH to robot at home: `root@192.168.1.213` (via 4K DHCP)
-- SSH to robot in AP mode: `root@192.168.5.1`
+- SSH to robot at home: `root@192.168.1.213` (via 4K DHCP) — alias `dreame-wifi`
+- SSH to robot over USB gadget link: `root@192.168.10.1` — alias `dreame-usb` (preferred when the
+  cable's in: ~0.4 ms, faster bulk, independent of WiFi; see `docs/usb-gadget.md`)
+- SSH to robot in AP mode: `root@192.168.5.1` — alias `dreame`
 
 **wpa_supplicant config bind-mount:**
 The init script `wpa_supplicant.sh` checks for `/usr/bin/wifi_manager`. When it exists (it does on r2250), it reads from `/etc/wifi/wpa_supplicant.conf` — a **read-only squashfs file with no network entries** — instead of `/data/config/wifi/wpa_supplicant.conf`.
