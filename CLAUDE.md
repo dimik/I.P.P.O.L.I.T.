@@ -57,7 +57,8 @@ host port** for a USB-Ethernet adapter (earlier docs wrongly assumed one). Robot
   reached. **ECM is the preferred default over NCM:** identical throughput (measured both), but 5×
   lower latency (**0.5 ms ECM vs 2.7 ms NCM**) since ECM has no NTB coalescing — NCM's aggregation
   buys nothing below the UDC cap. Fine for H.264/compressed video + ROS topics, not raw streams.
-  Needs the dontvacuum adapter's **"Micro USB VBUS" jumper bridged solidly**. Load:
+  The "Micro USB VBUS" jumper is **not** needed (link works with it open); the real host gotcha is
+  **NetworkManager** flushing the static IP → `nmcli device set <if> managed no`. Load:
   `scripts/robot/usb_ecm_gadget.sh` (or `usb_ncm_gadget.sh`). **Full reproducible build/deploy/
   findings: `docs/usb-gadget.md`.** FunctionFS (`F_FS=y`) is a no-kernel-build userspace fallback.
 - **WiFi (simplest, works today, no kernel work):** both on the LAN; Q6A → robot at `192.168.1.213`.

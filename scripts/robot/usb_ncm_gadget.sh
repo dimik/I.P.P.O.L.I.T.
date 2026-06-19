@@ -13,8 +13,9 @@
 #         usb_ncm_gadget.sh down     # tear down (proper configfs order)
 #
 # PROVEN (2026-06): binds clean, usb0=192.168.10.1, ~11-12 MB/s, 2.7 ms.
-# HARDWARE NOTE: the dontvacuum adapter's "Micro USB VBUS" jumper MUST be bridged
-# (solidly!) or the robot UDC never senses the host and nothing enumerates.
+# NOTE: the adapter's "Micro USB VBUS" jumper is NOT required (link works with it
+# open). The real host-side gotcha is NetworkManager flushing the static IP ->
+# `nmcli device set <if> managed no` on the host (see docs/usb-gadget.md).
 # MACs are PINNED so the host interface name stays stable across re-enumeration.
 set -e
 
@@ -67,7 +68,7 @@ echo 250 > $G/configs/c.1/MaxPower
 ln -sf $G/functions/ncm.usb0 $G/configs/c.1/
 
 # 2b) force OTG into peripheral mode (sunxi: READING this file triggers the role).
-# Needed so the UDC presents as a device; VBUS sense (jumper) still gates the session.
+# Usually already 'usb_device' on the micro-USB port; this is defensive.
 cat /sys/devices/platform/soc/usbc0/usb_device >/dev/null 2>&1 || true
 
 # 3) bind to the UDC  <-- the moment of truth (mainline-ABI modules crash here)
@@ -85,7 +86,7 @@ echo "[+] $IF = 192.168.10.1/24 up (mac $(cat /sys/class/net/$IF/address))"
 
 cat <<EOF
 
-On the HOST (USB host side), once the VBUS jumper is solid and cable is in:
+On the HOST (USB host side), with the micro-USB cable in (VBUS jumper not needed):
   IF=enx\$(echo $HOST_MAC | tr -d :)        # = enxd67ffa3a49bd
   sudo nmcli device set \$IF managed no      # stop NetworkManager flushing the IP
   sudo ip addr add 192.168.10.2/24 dev \$IF

@@ -8,8 +8,9 @@ measured behaviour. If anything here drifts from reality, fix *this file*.
 > (proven: ping + >1 GB transferred, 0 errors). Throughput **~11–12 MB/s** — a hard `sw_udc`
 > (Allwinner UDC) ceiling, not a framing limit. Good for H.264/compressed video + ROS 2 topics;
 > not raw uncompressed streams. **ECM is the preferred default over NCM** (same throughput, but
-> 0.5 ms vs 2.7 ms latency — see §7). The one fragile piece is the adapter's **"Micro USB VBUS"
-> jumper**, which must be bridged *solidly*.
+> 0.5 ms vs 2.7 ms latency — see §7). The adapter's "Micro USB VBUS" jumper is **not** required
+> (link works with it open). The one host-side gotcha is **NetworkManager**, which must be told to
+> leave the interface alone or it flushes the static IP (see §7).
 
 ---
 
@@ -253,23 +254,27 @@ theoretical advantage never materialises. ECM has **no NTB coalescing timer**, s
 **5× lower (0.51 ms vs 2.7 ms)**, which matters for ROS control loops. NCM (16K) remains built &
 available if you ever want aggregation; 64K NTB is pointless here (no gain, +4 ms latency).
 
-### The VBUS jumper (the real reliability blocker)
-The dontvacuum "dreameadapter" only senses host VBUS through its **"Micro USB VBUS" solder
-jumper**. Without it bridged, the UDC never registers a host session — `otg_role` can be
-`usb_device` yet `state` stays `not attached` and nothing enumerates. A **flaky/temporary**
-bridge (pencil, loose foil) causes intermittent dropouts: the link enumerates and passes data,
-then silently dies on idle (`state` still reads `configured`, but host `tx` packets vanish
-before the robot, `rx +0`). **Bridge it solidly** (solder or firmly-fixed) before trusting the
-link. There is **no software VBUS override** on this firmware (checked: no `vbus` module param,
-no force interface).
+### The "Micro USB VBUS" jumper — NOT required (corrected)
+**The link works fine with this jumper left OPEN** — verified: multi-GB transfers + 60/60 pings
+0% loss over 30 s, jumper untouched. The robot senses host VBUS from the micro-USB connector
+without it. (The jumper most likely gates feeding the host's 5 V to *power the board* — only
+needed if running the robot off USB instead of its battery. Leave it open for normal data use.)
+> Earlier notes here wrongly claimed the jumper must be bridged and blamed it for dropouts. That
+> was a bad inference — see the host-side gotcha below for the actual cause. There is no software
+> VBUS override on this firmware (no `vbus` param / force interface), but none is needed.
 
-### Host-side gotchas (Linux host / Q6A)
-- **NetworkManager** will grab the `cdc_ncm` interface and **flush your static IP** on every
-  link blip → `sudo nmcli device set <if> managed no` first.
-- Host `cdc_ncm` defaults `rx_max`/`tx_max` to 16384; it clamps to the device's advertised NTB.
-  (Only relevant if experimenting with larger NTB.) Set via
-  `/sys/class/net/<if>/cdc_ncm/{rx_max,tx_max}` while the iface is **down**.
-- **Static ARP** on the host too: `sudo ip neigh replace 192.168.10.1 lladdr 46:bb:2c:4c:0d:4b dev <if>`.
+### Host-side gotchas (Linux host / Q6A) — *this* is the real reliability item
+- **NetworkManager is what caused every "dropout."** It grabs the gadget interface and **flushes
+  the static IP/ARP** (on each gadget re-enumeration, and on its own DHCP attempts), so the link
+  goes dead while the robot still reads `configured` and the host `carrier=1`. **Fix:**
+  `sudo nmcli device set <if> managed no` — after that the link is stable (proven). This is the
+  single most important host step.
+- **Static ARP** both ends (NCM/ECM are unreliable at broadcast/ARP):
+  `sudo ip neigh replace 192.168.10.1 lladdr 46:bb:2c:4c:0d:4b dev <if>` (host) + `arp -s` (robot).
+- A static IP that survives reboots: a systemd-networkd `.network` (or NM keyfile with
+  `autoconnect`) for `enxd67ffa3a49bd` is cleaner than re-running `ip addr add` by hand.
+- *(NCM only)* host `cdc_ncm` `rx_max`/`tx_max` default 16384, clamped to the device NTB; only
+  relevant if experimenting with larger NTB. (ECM has no such knobs.)
 
 ### Connection topology
 Robot OTG = device/gadget; host (PC or Q6A) = USB host. Use the adapter's **micro-USB "FEL
@@ -289,8 +294,8 @@ Robot `usb0` = `192.168.10.1/24`; host = `192.168.10.2/24`.
 3. `cp` the three `.ko` to `kernel/modules/`, refresh `SHA256SUMS`.
 4. Push to robot `/tmp` per §6.
 5. Run `scripts/robot/usb_ecm_gadget.sh` on the robot (or `usb_ncm_gadget.sh` for NCM).
-6. Bridge the **Micro USB VBUS** jumper (solid); plug micro-USB → host.
-7. Host: unmanage in NM, set `192.168.10.2/24` + static ARP, `ping 192.168.10.1`.
+6. Plug the adapter's **micro-USB (FEL)** → host (VBUS jumper can stay open).
+7. Host: **`nmcli device set <if> managed no`** (critical), set `192.168.10.2/24` + static ARP, `ping 192.168.10.1`.
 8. Expect ~11–12 MB/s; latency ~0.5 ms (ECM) / ~2.7 ms (NCM).
 
 Related: `docs/hardware.md` (board/USB overview), memory `usb-gadget-ethernet-abi-fix`.

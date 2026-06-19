@@ -82,7 +82,7 @@ echo "[+] $IF = 192.168.10.1/24 up (mac $(cat /sys/class/net/$IF/address))"
 
 cat <<EOF
 
-On the HOST (USB host side), once the VBUS jumper is solid and cable is in:
+On the HOST (USB host side), with the micro-USB cable in (VBUS jumper not needed):
   IF=enx\$(echo $HOST_MAC | tr -d :)        # = enxd67ffa3a49bd
   sudo nmcli device set \$IF managed no      # stop NetworkManager flushing the IP
   sudo ip addr add 192.168.10.2/24 dev \$IF
