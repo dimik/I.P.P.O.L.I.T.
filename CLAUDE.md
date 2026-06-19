@@ -15,7 +15,8 @@ Turn a Dreame D10s Pro robot vacuum into an open AI platform:
 ### Robot — Dreame D10s Pro (model r2250)
 - SoC: AllWinner MR813, quad-core Cortex-A7 @ 1.2GHz, aarch64
 - WiFi: Realtek 8189fs — **2.4GHz only, single radio** (cannot do AP + STA on different channels simultaneously)
-- LiDAR: on `/dev/ttyS4` — read exclusively by AVA, proprietary binary protocol
+- LiDAR (LDS turret): on `/dev/ttyS3` @ 230400 — read by AVA; tapped read-only via `libldstap.so` →
+  `/scan` (LDS protocol fully decoded — see `docs/sensors.md`). MCU (motors/IMU/odom) is on `/dev/ttyS4`.
 - Camera: OV8856 MIPI sensor (`/dev/video0`,`/dev/video2`, multi-plane sunxi-vin). AVA owns it; live frames are siphoned read-only via `camsiphon.so` — see `docs/sensors.md`.
 - Speaker: SUNXI-CODEC ALSA device — `hw:0,0`, playback via `aplay`
 - Root filesystem: **squashfs (physically read-only)** — cannot be remounted RW
@@ -106,8 +107,10 @@ Dreame D10s Pro                              Radxa Dragon Q6A
 ────────────────────────────────             ──────────────────────────────────
 AVA  ──► LiDAR / motors / SLAM
 Valetudo REST (port 80)  ◄────────── REST ────── navigation commands
-Valetudo MQTT (port 1883) ──── MQTT ──────────►  valetudo_bridge node
-                                                    └─► /scan /odom /map
+Valetudo REST+SSE (port 80) ─ REST/SSE ───────►  valetudo_bridge.py (chroot ROS, broker-free)
+                                                    └─► /odom /map /robot/status
+AVA /dev/ttyS3 ──► libldstap.so (LD_PRELOAD read-tap) ──► /tmp/lds_ring.buf ──► lds_scan_node.py
+                                                                              └─► /scan  ✅
 
 AVA /dev/video2 ──► camsiphon.so (LD_PRELOAD, read-only DQBUF tap) ──► NV21 frames
    ├─► one-shot:  /tmp/cam_grab  → /tmp/cam_frame.raw  (PNG via nv21_to_png.py)
@@ -132,6 +135,7 @@ Ubuntu chroot (idle, available)             inference_node (YOLOv8, NPU)
 | Map | Valetudo REST seed + **map SSE** | `valetudo_bridge.py` (chroot ROS) | `/map` OccupancyGrid (latched) ✅ |
 | Robot pose | Valetudo SSE `robot_position` | `valetudo_bridge.py` (2 Hz heartbeat) | `/odom` + `map→base_link` TF ✅ |
 | Status | Valetudo attributes SSE | `valetudo_bridge.py` | `/robot/status` ✅ |
+| **LiDAR** | `/dev/ttyS3` LDS read-tap | `libldstap.so` → shm ring → `lds_scan_node.py` | `/scan` LaserScan (robot's own 360° lidar) ✅ |
 
 (Bridge is broker-free + SSE-driven, no polling — full details, QoS, frames, cross-host DDS plan in `docs/ros.md`.)
 | Nav commands | Dragon Q6A Nav2 | Valetudo REST API | AVA motors via Valetudo |
@@ -145,7 +149,7 @@ Ubuntu chroot (idle, available)             inference_node (YOLOv8, NPU)
 2. **Single radio** — robot AP (hostapd on wlan0) and STA mode (wpa_supplicant) cannot run simultaneously on different channels. Our fix: kill hostapd at boot, use wlan0 as STA only.
 3. **BusyBox wget cannot follow HTTPS redirects** — always use `curl -L` on the robot, or download on laptop and `scp`
 4. **Kernel 4.9.191** — Ubuntu 24.04 glibc 2.39 mostly works, but apt's sandbox user (`_apt`) cannot do DNS — requires `APT::Sandbox::User "root"` workaround
-5. **AVA owns `/dev/ttyS4`** — LiDAR cannot be read directly without conflicting with AVA. Use Valetudo MQTT for map/scan data instead.
+5. **AVA owns the sensor serial ports exclusively** — `/dev/ttyS4` (MCU: motors/IMU/odom, `3c…3e`) and `/dev/ttyS3` (LiDAR LDS, `55 aa 03 08`). You can't open them yourself. Instead, **passive LD_PRELOAD read-taps** copy the bytes AVA already read: `libldstap.so` tees ttyS3 → `/scan` (live). The key to AVA-safety is the **errno contract** — a freestanding `read()` MUST return `-1`+errno, not raw `-errno`, or AVA's non-blocking loops choke (this broke the first tap, `mcutap`). See `docs/sensors.md` / `docs/ros.md`. Processed map/pose still come via Valetudo's REST/SSE bridge.
 6. **squashfs root** — any change to system files requires either a bind mount from `/data/` or a chroot. Never attempt `mount -o remount,rw /`. `/etc/miio` is a SYMLINK to `/data/config/miio/` (so it's already writable via /data/).
 7. **exec_monitor.sh** watches only the `ava` process — it does NOT restart hostapd if killed. Safe to kill hostapd permanently.
 8. **firmware 1413 IoT flag** — AVA does NOT connect to `miio_agent` (TCP 54320) at boot unless `/data/config/ava/iot.flag` contains `miiot`. This flag is normally written during cloud provisioning (which we bypass via Valetudo). Without it, ALL Valetudo MIIO property/action commands time out. Fix: `_root_postboot.sh` writes `miiot` to the flag and calls `avacmd iot '{"type":"iot","notify":"open_server"}'` at boot.
@@ -160,17 +164,17 @@ Ubuntu chroot (idle, available)             inference_node (YOLOv8, NPU)
 ### AVA daemon internals
 
 AVA (`/ava/bin/ava`) is a closed-source C++ binary running as PID 1-level process on the robot. It owns all hardware:
-- Motors (wheels, side brush, main brush, fan/vacuum, mop pump) via the MCU on `/dev/ttyS4` (`3c…3e`-framed protocol with Modbus CRC16 — see the MCU serial section)
-- LiDAR via `/dev/ttyS4` (fd 24 of ava process)
+- Motors (wheels, side brush, main brush, fan/vacuum, mop pump) + IMU/odom via the MCU on `/dev/ttyS4` (fd 24; `3c…3e`-framed protocol with Modbus CRC16 — see the MCU serial section)
+- LiDAR (LDS turret) via `/dev/ttyS3` (fd 26; `55 aa 03 08` frames — see `docs/sensors.md`)
 - SLAM, path planning, behavior tree
 
-AVA is structured as a behavior tree with named nodes. Nodes communicate via pub/sub (nanomsg) and expose a command interface through `/tmp/avacmd.socket`.
+AVA is structured as a behavior tree with named nodes. Nodes communicate via an **in-process** pub/sub bus (`ava::Publisher<…>`; e.g. `LaserWitPose`) and expose a command interface through `/tmp/avacmd.socket`. Recon (2026-06-19) confirmed AVA exposes **no external IPC for raw sensor data** (`/dev/shm` empty; only `avacmd`/`avaexec`/`videomonitor` unix sockets), and the IMU has **no kernel `iio`/`input` driver** — it's MCU-serial only. Hence raw `/scan` + IMU come from passive read-taps, not an IPC subscription.
 
 **Key AVA file descriptors:**
 | fd | Device | Purpose |
 |----|--------|---------|
 | 24 | `/dev/ttyS4` | MCU serial — motors, fan, brushes, IMU/sensors (`3c…3e` protocol) |
-| 26 | `/dev/ttyS3` | held open but read-mostly (LiDAR); no writes observed |
+| 26 | `/dev/ttyS3` | LiDAR LDS @ 230400 (`55 aa 03 08` frames); read-only, tapped by `libldstap.so` → `/scan`. Reads only while the turret spins (active nav). |
 
 **Key AVA config files (on `/data/`, writable):**
 | File | Purpose |
@@ -459,7 +463,7 @@ curl -X PUT http://192.168.1.213/api/v2/robot/capabilities/HighResolutionManualC
 
 Two independent serial links from the SoC (AVA):
 - **`/dev/ttyS4` — MCU** (motors: wheels, vacuum fan, brushes, pump; plus IMU/sensor telemetry). AVA opens it on a dynamic fd (observed fd 24). Per the alufers Z10 repo the MCU link is **115200**; D10s value not independently confirmed.
-- **`/dev/ttyS3` — LDS / LiDAR**, **230400**. AVA opens it (observed fd 26); read-mostly (the turret streams scans; AVA rarely writes). LDS frames are a *different* format — `55 aa` + 36 data bytes (38B) — which the old docs mislabeled as an "MCU 55 AA protocol".
+- **`/dev/ttyS3` — LDS / LiDAR**, **230400**. AVA opens it (observed fd 26); read-mostly (the turret streams scans; AVA rarely writes). LDS frames are a *different* format from the MCU link (old docs mislabeled it "MCU 55 AA protocol"): a **40-byte fixed frame** `55 aa 03 08 | speed | startAngle | 8×(dist_mm,qual) | endAngle | 6-byte timestamp` — **fully decoded + validated, no checksum**. Full table + the decoder/tap in `docs/sensors.md`; published as `/scan` via `libldstap.so` + `lds_scan_node.py`.
 
 RE'd from `github.com/alufers/dreame_mcu_protocol` (cloned `~/dreame_mcu_protocol`; written for the Z10 Pro — same protocol family as the D10s; framing/CRC/SetCleaning/_CtrlMcuCMD all re-verified on our D10s). Firmware dumped at `~/dreame-re/mcu.bin` (GD32F303-class MCU, FreeRTOS) — import to Ghidra as Raw Binary, ARM Cortex LE, base `0x08000000`. AVA-side node that builds messages: `~/dreame-re/node_signal.so`.
 
@@ -605,8 +609,11 @@ scripts/
     fanoff_flag.sh         event-driven (Valetudo SSE) LiDAR gate: /tmp/lidar_allow in non-manual modes
     valetudo_bridge.py     Valetudo REST -> ROS 2: /map (OccupancyGrid), /odom + TF, /robot/status
     valetudo_bridge.sh     robot-side launcher: start/stop/status the ROS bridge (chroot ROS 2 Jazzy)
-    mcutap.c               PARKED MCU ttyS4 read-tap (validated; read() interposition breaks AVA)
-    build_ava_shims.sh     compile fanoff + camsiphon .so + camstream in chroot, glibc-2.23-safe
+    ldstap.c               LD_PRELOAD read-tap: tees AVA's ttyS3 (LiDAR) -> tmpfs shm ring (freestanding)
+    lds_decode.py          LDS frame decoder (reference) + strace-capture analyzer
+    lds_scan_node.py       chroot-ROS node: shm ring -> sensor_msgs/LaserScan on /scan
+    mcutap.c               MCU ttyS4 read-tap (errno-corrected; read interposition now AVA-safe — unbuilt: needs shm-ring tee, see ldstap.c)
+    build_ava_shims.sh     compile fanoff + camsiphon + ldstap .so + camstream in chroot, glibc-2.23-safe
     capture_cleanset.sh    capture MCU 3c..3e frames across fan states
     deploy_ava_shims.sh    bind-mount patched ava.sh exporting the LD_PRELOAD shim list, restart + verify
   companion/
