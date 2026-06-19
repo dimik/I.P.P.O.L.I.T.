@@ -48,10 +48,18 @@ host port** for a USB-Ethernet adapter (earlier docs wrongly assumed one). Robot
   the gadget *core* is built-in (`CONFIG_USB_GADGET/LIBCOMPOSITE/CONFIGFS=y`, `USB_SUNXI_UDC0=y`, UDC
   `5100000.udc-controller` free) but **no ethernet function is compiled** (`CONFIG_USB_CONFIGFS_ECM/
   RNDIS/NCM/EEM` all `=n`, no `g_ether`/`usb_f_ecm.ko`), and there are no host-side USB-net drivers
-  either (`usbnet`/`cdc_ether`/`r8152` absent). To enable: build `usb_f_ecm`+ConfigFS-ECM (or
-  `g_ether`) as a module vs the r2250 kernel source (Allwinner Tina 4.9.191, matching .config +
-  Module.symvers) and `insmod` (the kernel does load out-of-tree modules — the wifi driver is one).
+  either (`usbnet`/`cdc_ether`/`r8152` absent). To enable: build a NIC gadget function as a module vs
+  the r2250 kernel source (Allwinner Tina 4.9.191) + the saved `kernel/config-4.9.191.txt` and `insmod`
+  (`MODVERSIONS=n` → only vermagic `4.9.191 SMP preempt mod_unload aarch64` must match; no symvers).
   Then robot `192.168.10.1` / Q6A `192.168.10.2`.
+  - **Build NCM, not ECM:** ECM = one frame/USB-transfer (~20–40 MB/s); **CDC-NCM** (`usb_f_ncm` +
+    `CONFIG_USB_CONFIGFS_NCM`) aggregates → ~35–45 MB/s, near the bus ceiling. The hard limit is the
+    bus: robot OTG is **USB 2.0** (~40–45 MB/s real; no USB 3). Compressed ROS+camera load is well
+    under even ECM, so the link rarely bottlenecks; NCM is for headroom/raw streams.
+  - **Gadget path VERIFIED (2026-06-19):** a `mass_storage` configfs gadget binds to the UDC cleanly
+    (configfs + libcomposite + SUNXI UDC all work) — the OTG-device mechanism is proven; the NIC
+    function module is the only missing piece. FunctionFS (`F_FS=y`) is a no-kernel-build fallback
+    (userspace raw-bulk tunnel, ~45 MB/s, custom non-NIC transport).
 - **WiFi (simplest, works today, no kernel work):** both on the LAN; Q6A → robot at `192.168.1.213`.
 - OTG→host (ID-grounded adapter) + a USB-Ethernet/BT dongle is possible too, but occupies the debug
   port and VBUS drive there is unverified.
