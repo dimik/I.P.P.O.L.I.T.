@@ -24,12 +24,16 @@ rm -f /tmp/cam_stream /tmp/cam_grab /tmp/cam_stream.buf /tmp/lidar_allow
 echo "  flags cleared (/tmp/cam_stream, /tmp/cam_grab, /tmp/lidar_allow)"
 
 echo "=== removing patched ava.sh bind-mount(s) ==="
+# NOTE: `mountpoint -q` does NOT reliably detect a bind-mounted regular FILE (only dirs), so we
+# just umount until it fails — this also clears any stacked bind-mounts.
 n=0
-while mountpoint -q /etc/rc.d/ava.sh 2>/dev/null; do
-    umount /etc/rc.d/ava.sh 2>/dev/null || break
-    n=$((n+1))
-done
-[ "$n" -gt 0 ] && echo "  removed $n bind-mount(s) — stock ava.sh restored" || echo "  ava.sh already stock (not bind-mounted)"
+while umount /etc/rc.d/ava.sh 2>/dev/null; do n=$((n+1)); done
+# sanity: confirm the live ava.sh no longer carries our LD_PRELOAD line
+if grep -q '^export LD_PRELOAD=' /etc/rc.d/ava.sh 2>/dev/null; then
+    echo "  WARNING: ava.sh still has LD_PRELOAD after umount — investigate before relaunch"
+else
+    [ "$n" -gt 0 ] && echo "  removed $n bind-mount(s) — stock ava.sh restored" || echo "  ava.sh already stock"
+fi
 
 echo "=== restarting AVA (stock, no LD_PRELOAD) ==="
 killall -9 ava 2>/dev/null; sleep 2
