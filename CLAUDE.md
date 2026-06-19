@@ -43,10 +43,16 @@ gadget serial `athena`, used for rooting/flashing). The SoC's 2nd USB controller
 stub with empty gpio), `/sys/kernel/debug/usb/devices` shows only the two root hubs, and nothing
 enumerates. Community rooting hardware also exposes a single OTG header. So **there is no spare USB
 host port** for a USB-Ethernet adapter (earlier docs wrongly assumed one). Robot↔Q6A link options:
-- **USB gadget-Ethernet (preferred wired):** robot OTG in *device* mode (`g_ether`/configfs) → appears
-  as a USB NIC to the Q6A (which is USB host). One cable, the existing OTG port — no host port needed.
-  Robot `192.168.10.1` / Q6A `192.168.10.2`.
-- **WiFi (simplest):** both on the LAN; Q6A reaches the robot at its IP (`192.168.1.213`).
+- **USB gadget-Ethernet (preferred wired, but NEEDS A KERNEL MODULE):** robot OTG in *device* mode →
+  USB NIC to the Q6A (USB host), one cable on the existing OTG port. **Blocked on the stock kernel:**
+  the gadget *core* is built-in (`CONFIG_USB_GADGET/LIBCOMPOSITE/CONFIGFS=y`, `USB_SUNXI_UDC0=y`, UDC
+  `5100000.udc-controller` free) but **no ethernet function is compiled** (`CONFIG_USB_CONFIGFS_ECM/
+  RNDIS/NCM/EEM` all `=n`, no `g_ether`/`usb_f_ecm.ko`), and there are no host-side USB-net drivers
+  either (`usbnet`/`cdc_ether`/`r8152` absent). To enable: build `usb_f_ecm`+ConfigFS-ECM (or
+  `g_ether`) as a module vs the r2250 kernel source (Allwinner Tina 4.9.191, matching .config +
+  Module.symvers) and `insmod` (the kernel does load out-of-tree modules — the wifi driver is one).
+  Then robot `192.168.10.1` / Q6A `192.168.10.2`.
+- **WiFi (simplest, works today, no kernel work):** both on the LAN; Q6A → robot at `192.168.1.213`.
 - OTG→host (ID-grounded adapter) + a USB-Ethernet/BT dongle is possible too, but occupies the debug
   port and VBUS drive there is unverified.
 

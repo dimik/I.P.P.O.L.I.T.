@@ -16,9 +16,13 @@ stub; only the two root hubs in `/sys/kernel/debug/usb/devices`; nothing enumera
 "USB-host → USB-Ethernet → GbE" plan below **does not apply** — there is no spare host port.
 
 Link options (in order of preference):
-1. **USB gadget-Ethernet (wired, one cable):** robot OTG in *device* mode (`g_ether`) → a USB NIC to
-   the Q6A (USB host). Uses the existing OTG/debug port; no host port or adapter needed.
-2. **WiFi (simplest):** both on the LAN; Q6A reaches the robot at `192.168.1.213`.
+1. **USB gadget-Ethernet (wired, one cable) — needs a kernel module:** robot OTG in *device* mode →
+   USB NIC to the Q6A (USB host). The gadget **core** is built-in (`USB_GADGET/LIBCOMPOSITE/CONFIGFS=y`,
+   `USB_SUNXI_UDC0=y`) but **no ethernet function is compiled** (`CONFIG_USB_CONFIGFS_ECM/RNDIS=n`, no
+   `g_ether`/`usb_f_ecm.ko`; no host-side `usbnet`/`r8152` either). Requires building `usb_f_ecm`/`g_ether`
+   against the r2250 kernel source (Tina 4.9.191) and `insmod`. Feasible (kernel loads out-of-tree
+   modules) but a side-project — not available out of the box.
+2. **WiFi (simplest, works today):** both on the LAN; Q6A reaches the robot at `192.168.1.213`.
 3. OTG→host (ID-grounded adapter) + USB-Ethernet dongle — possible but occupies the debug port,
    VBUS-on-that-port unverified.
 
