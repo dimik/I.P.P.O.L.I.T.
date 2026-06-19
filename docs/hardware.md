@@ -4,7 +4,7 @@
 
 | Board | Role | SoC | Notes |
 |-------|------|-----|-------|
-| Dreame D10s Pro (r2250) | Robot | AllWinner MR813 (quad Cortex-A7 @ 1.2GHz) | 3.3GB /data partition |
+| Dreame D10s Pro (r2250) | Robot | AllWinner MR813 = **sun50iw10** (quad Cortex-A53, aarch64) | kernel 4.9.191 #3; 3.3GB /data partition |
 | Radxa Dragon Q6A | Companion / AI | Qualcomm QCS6490 (Kryo, 12 TOPS NPU) | 85×56mm, runs all ROS 2 |
 
 ## Physical connection (Q6A ↔ robot)
@@ -16,15 +16,21 @@ stub; only the two root hubs in `/sys/kernel/debug/usb/devices`; nothing enumera
 "USB-host → USB-Ethernet → GbE" plan below **does not apply** — there is no spare host port.
 
 Link options (in order of preference):
-1. **USB gadget-Ethernet (wired, one cable) — needs a kernel module:** robot OTG in *device* mode →
-   USB NIC to the Q6A (USB host). The gadget **core** is built-in (`USB_GADGET/LIBCOMPOSITE/CONFIGFS=y`,
-   `USB_SUNXI_UDC0=y`; a `mass_storage` configfs gadget binds to the UDC fine — path verified) but **no
-   ethernet function is compiled** (`CONFIG_USB_CONFIGFS_ECM/NCM/RNDIS=n`, no `g_ether`; no host-side
-   `usbnet`/`r8152` either). Build a NIC gadget module vs the r2250 kernel source (Tina 4.9.191) + the
-   saved `kernel/config-4.9.191.txt` (`MODVERSIONS=n` → only vermagic must match). **Use CDC-NCM**
-   (`usb_f_ncm`), not ECM: ECM ~20–40 MB/s (one frame/transfer), NCM ~35–45 MB/s (aggregated).
-   **Bus ceiling: USB 2.0 ≈ 40–45 MB/s** (no USB 3 on the robot). FunctionFS (`CONFIG_USB_F_FS=y`) is a
-   no-kernel-build fallback (userspace raw-bulk tunnel). Feasible but a side-project.
+1. **USB gadget-Ethernet (wired, one cable) — SOLVED, NCM gadget binds cleanly.** Robot OTG in
+   *device* mode → CDC-NCM NIC to the Q6A (USB host). The gadget **core** is built-in
+   (`USB_GADGET/LIBCOMPOSITE/CONFIGFS=y`, `USB_SUNXI_UDC0=y`) but **no ethernet function ships**, so
+   `u_ether`/`usb_f_ncm`/`usb_f_ecm` are built out-of-tree (`kernel/modules/`). ⚠️ **They must be built
+   against the Allwinner sun50iw10 BSP struct ABI, not mainline:** the BSP adds `int dma_flag;` to
+   `struct usb_request` (under `CONFIG_USB_SUNXI_UDC0`, which is ON) + `struct usb_function *f;` to
+   `usb_function_instance`. A **mainline**-built module insmods fine but **crashes the kernel at UDC
+   bind** (wrong struct offsets → watchdog reboot); the bug is in the bind path, so ECM crashes the
+   same way. Fix = mainline 4.9.191 (exact vermagic) + those BSP header deltas, `KCFLAGS=
+   -DCONFIG_USB_SUNXI_UDC0=1`. Source of the deltas: GitHub `HandsomeMod/linux-allwinner-4.9`. Load:
+   `scripts/robot/usb_ncm_gadget.sh` (ECM variant: `usb_ecm_gadget.sh`) — all RAM-only (`/tmp` +
+   configfs), reboot-safe. **PROVEN:** binds, `usb0`=`192.168.10.1`. Throughput pending Q6A hookup.
+   **Use NCM** (aggregated, ~35–45 MB/s) over ECM (one frame/transfer, ~20–40). **Bus ceiling: USB 2.0
+   ≈ 40–45 MB/s** (no USB 3). FunctionFS (`USB_F_FS=y`) is a no-build userspace-tunnel fallback. See
+   [[usb-gadget-ethernet-abi-fix]].
 2. **WiFi (simplest, works today):** both on the LAN; Q6A reaches the robot at `192.168.1.213`.
 3. OTG→host (ID-grounded adapter) + USB-Ethernet dongle — possible but occupies the debug port,
    VBUS-on-that-port unverified.
