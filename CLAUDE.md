@@ -158,6 +158,55 @@ per the Architecture section); (3) integrate into robot 12V power; (4) change de
   `scripts/companion/` (`q6a_llmd.py`, `q6a-llm`, `q6a-llm-remote`, `systemd/*.service`, `setup_npu_llm.sh`). NB: generation is ~10-15 tok/s, so *long* answers
   still scale with token count (~12s for ~120 tokens) — the daemon only removes the fixed per-call init.
 
+### Offline agent: local LLM + MCP tools (prototype 2026-07-02)
+Working proof-of-concept in `scripts/companion/agent/`: the **offline** Llama 3.2 1B (Genie daemon)
+drives real tools via two **MCP servers** — `mcp_websearch.py` (keyless DuckDuckGo) and `mcp_robot.py`
+(Valetudo REST wrapper). `agent.py` is an MCP client + ReAct loop. Verified end-to-end:
+*"capital of Australia?"* → NPU LLM picks `web_search` → live result → **"Canberra."**
+
+- **Daemon raw mode:** `q6a_llmd.py` now accepts a `\x01RAW\x01`-prefixed payload = a fully-formatted
+  Llama-3.2 prompt (no template wrap / no reset), so the harness controls multi-turn + prefill. Plain
+  clients (`q6a-llm`) still work unchanged.
+- **The 1B is a weak agent — needs heavy scaffolding** (all in `agent.py`): (1) it won't emit tool calls
+  from instructions alone, so we **prefill** the assistant turn; (2) it hallucinates tool *names*, so we
+  do **2-stage selection** (numbered menu → inject the valid name); (3) it returns empty args, so we
+  **prefill the primary arg's opening quote** and read the value; (4) it doesn't know when to stop, so we
+  **break after the first useful observation**. Even then, tool *selection* is poor (tends to pick #1).
+- **Implication for the ROS head:** don't expect open-ended tool choice from the 1B. The event-driven
+  `behavior_node` design mitigates this — a triggering ROS event (voice cmd, battery-low, detection)
+  routes to a *narrow* handler where the tool is largely implied, not freely chosen. Open-ended agentic
+  reasoning wants a bigger brain (cloud/CPU) — keep the 1B for fast, well-scoped, offline decisions.
+- Deps (Q6A, user pip): `mcp`, `ddgs`, `httpx`. Run: `python3 agent/agent.py "..."`.
+
+### GPU LLM via Qualcomm OpenCL + thermal limits (explored 2026-07-02)
+**The GPU path works, but it's no faster than the NPU and thermally-shuts-down the board on big models.**
+See `scripts/companion/gpu/setup_gpu_llm.sh`.
+- **The proprietary Qualcomm Adreno OpenCL driver is PACKAGED** — `qcom-adreno-cl1` (+ `qcom-adreno-cl-dev`
+  headers, `linux-firmware-dragonwing`) from the already-enabled **`ubuntu-qcom-iot` PPA**. No blob
+  extraction, no building a driver — it's an `apt install`.
+- **It works on the STOCK mainline `msm` kernel via dma-heap** (deps `qcom-libdmabufheap`/`qcom-property-vault`)
+  — **NO KGSL / kernel swap.** This *contradicts* the common "Adreno unusable on Q6A Ubuntu, only the NPU
+  works" consensus (which assumed you must swap to a KGSL vendor kernel). `clinfo` shows
+  "QUALCOMM Adreno(TM) 635" (the 643 IDs as the 635 family).
+- **Build gotcha:** `qcom-adreno-cl-dev` **conflicts** with generic `opencl-*-headers` — install it alone.
+  Then llama.cpp `-DGGML_OPENCL=ON` (build tools: `git build-essential cmake`; glslc only for Vulkan).
+- **Measured (Llama-3.2 Q4, `-ngl 99`):** **1B = ~11.7 tok/s gen / ~82 tok/s prompt — identical to the NPU
+  (~12).** Decode is memory-bandwidth bound and GPU+NPU share the ~40-50 GB/s LPDDR5, so **the GPU is NOT
+  faster.** (Community "20-55 tok/s" is flagship Snapdragons w/ LPDDR5X, not this 2021 Adreno 643.)
+- **⚠️ THERMAL — the 3B GPU full-offload run CRASHED the board (thermal shutdown).** Trips: **critical 110°C,
+  hot 90°C**; the board idles ~65-70°C (passive cooling, enclosed in the D10s compartment). Sustained
+  GPU/CPU compute → 110°C → PMIC emergency power-off (whole board dies: both NICs + SSH, hard hang, needs
+  physical power-cycle). Recovery is clean (services autostart). **The NPU is the most power-efficient
+  (coolest) path** → the NPU 1B is the thermally-sustainable default. Sustained heavier models need
+  **active cooling** (heatsink+fan; board has PWM/GPIO) or **offload to cloud**. Read temps:
+  `for z in /sys/class/thermal/thermal_zone*; do echo $(cat $z/type)=$(($(cat $z/temp)/1000))C; done`.
+- **Turnip Vulkan** (`mesa-vulkan-drivers` → enumerates "Turnip Adreno 643") also works but is the flaky
+  path; the Qualcomm **OpenCL** backend is the one that runs.
+- **Bottom line — model runtime map:** NPU = pre-compiled **v68** QNN binaries ONLY (arbitrary/3B not
+  possible; needs v73+ tooling to compile). GPU/CPU (llama.cpp) = **any GGUF**, but GPU ≈ NPU speed +
+  thermal risk on 3B, and CPU is slow (~few tok/s). So: **NPU 1B = on-device default; cloud (free
+  Gemini/Groq key) or CPU-3B for heavier reasoning.**
+
 ### Physical link (Q6A ↔ robot)
 **The robot exposes only ONE USB port — the OTG/debug port** (`usbc0` = `allwinner,sunxi-otg-manager`,
 gadget serial `athena`, used for rooting/flashing). The SoC's 2nd USB controller (`usbc1` → `ehci1`/

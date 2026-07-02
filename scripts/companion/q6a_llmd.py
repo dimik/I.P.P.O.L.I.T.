@@ -67,15 +67,20 @@ def handle(conn):
     try:
         conn.settimeout(120)
         data = b""
-        while not data.endswith(b"\n"):
-            chunk = conn.recv(4096)
+        while True:                                   # read until the client half-closes
+            chunk = conn.recv(65536)
             if not chunk:
                 break
             data += chunk
-        msg = data.decode("utf-8", "replace").rstrip("\n")
-        if not msg:
+        if not data:
             return
-        prompt = TEMPLATE.format(msg=msg).encode("utf-8")
+        if data.startswith(b"\x01RAW\x01"):           # agent harness: already-formatted prompt
+            prompt = data[len(b"\x01RAW\x01"):]
+        else:                                         # plain client: wrap one user turn
+            msg = data.decode("utf-8", "replace").rstrip("\n")
+            if not msg:
+                return
+            prompt = TEMPLATE.format(msg=msg).encode("utf-8")
 
         def cb(resp, code, ud):
             if resp:

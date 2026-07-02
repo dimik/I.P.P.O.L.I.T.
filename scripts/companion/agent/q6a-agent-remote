@@ -1,0 +1,8 @@
+#!/bin/bash
+# q6a-agent (Odyssey side): run the Q6A tool-using agent (local Llama + web search
+# + robot MCP tools) over the wired link and stream the final answer. Slower than
+# q6a-llm (several LLM calls + tool use) but gives grounded, tool-backed answers.
+[ -z "$*" ] && { echo "usage: q6a-agent <prompt>"; exit 1; }
+printf '%s' "$*" | ssh -o ConnectTimeout=8 \
+  -o ControlMaster=auto -o ControlPath=/tmp/q6a-cm-%r@%h:%p -o ControlPersist=120 \
+  ippolit-lan 'p=$(cat); exec ~/.local/bin/q6a-agent "$p"'
