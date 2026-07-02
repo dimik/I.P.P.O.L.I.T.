@@ -214,6 +214,24 @@ See `scripts/companion/gpu/setup_gpu_llm.sh`.
   thermal risk on 3B, and CPU is slow (~few tok/s). So: **NPU 1B = on-device default; cloud (free
   Gemini/Groq key) or CPU-3B for heavier reasoning.**
 
+### Direct QNN via QAI AppBuilder — bypassing Genie (started 2026-07-02)
+To get **adaptive polling** (Genie only exposes `poll:true/false`; adaptive polling is a
+`QnnHtpPerfInfrastructure` C-API config) and own the inference path, we're going QNN-direct via the
+**QAI AppBuilder** fork (`dimik/qai-appbuilder`). See `scripts/companion/qnn/` (setup + smoke test + README).
+- **SDK without a Qualcomm account** (their SDK requires **company verification** — blocked): extracted the
+  **QAIRT 2.42 SDK** from Radxa's **`radxazifeng278/qairt-npu-v68`** docker image (arm64, ~3.9 GB) →
+  `~/qairt_2.42.0.251225`. Gotcha: `QNN_SDK_ROOT` path **must contain the version string** (setup.py parses it).
+- Built the **aarch64/v68 `qai_appbuilder` wheel** from source (`QNN_SDK_ROOT` + `QAI_TOOLCHAINS=aarch64-oe-linux-gcc11.2`,
+  `python -m build -w`); it bundles `libQnnHtpV68Skel/Stub.so`. Docker now installed on the Q6A.
+- ✅ **QNN-direct proven**: `QNNContext` loads the Llama-3.2-1B v68 context binary onto the NPU (HTP), no
+  Genie (~3 s init). Adaptive-polling hook = `perfInfra.setPowerConfig(... ADAPTIVE_POLLING_TIME ...)` in
+  `QnnInferenceEngine.cpp` (Phase 2, not yet patched).
+- **v68 LLM context-binary structure** (recon): graph `ar128_cl4096` — 128-token chunked prefill, 4096 ctx,
+  **16 layers, 8 KV heads (GQA), head_dim 64, vocab 128256, ufp8 KV cache**; I/O = input_ids + per-layer KV +
+  RoPE cos/sin + attention_mask → updated KV + logits. Full details in `scripts/companion/qnn/README.md`.
+- **Remaining (Phase 3, multi-week):** the QNN-direct LLM runtime (ufp8 KV-cache orchestration across
+  prefill chunks + decode, tokenizer, sampling) — the part Genie otherwise handles.
+
 ### Physical link (Q6A ↔ robot)
 **The robot exposes only ONE USB port — the OTG/debug port** (`usbc0` = `allwinner,sunxi-otg-manager`,
 gadget serial `athena`, used for rooting/flashing). The SoC's 2nd USB controller (`usbc1` → `ehci1`/
