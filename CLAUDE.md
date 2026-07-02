@@ -157,6 +157,13 @@ per the Architecture section); (3) integrate into robot 12V power; (4) change de
   token + ~12 tok/s, so `total ≈ 0.8s + tokens/12` (one-liner ~1-3s, paragraph ~15s). All in
   `scripts/companion/` (`q6a_llmd.py`, `q6a-llm`, `q6a-llm-remote`, `systemd/*.service`, `setup_npu_llm.sh`). NB: generation is ~10-15 tok/s, so *long* answers
   still scale with token count (~12s for ~120 tokens) — the daemon only removes the fixed per-call init.
+- **⚠️ MUST set `"poll": false` in the model config for the resident daemon (fixed 2026-07-02).** Radxa's
+  bundle ships `"poll": true`, which makes the HTP backend **busy-wait ~2.5 CPU cores CONTINUOUSLY** once
+  the model is loaded — even with zero queries — driving the passively-cooled board to **~90°C at idle**.
+  It was *this daemon bug*, not the hardware, that pre-heated the board into the 110°C thermal shutdown
+  during the GPU test. `poll:false` (interrupt-driven) → idle CPU **247% → ~5%**, idle temp **~90°C → ~66°C**,
+  and **same ~0.45s query latency**. `setup_npu_llm.sh` now patches this automatically. True idle ~66°C;
+  sustained NPU 1B load peaks ~80°C (10°C under the 90°C hot-trip) — sustainable *only* with poll:false.
 
 ### Offline agent: local LLM + MCP tools (prototype 2026-07-02)
 Working proof-of-concept in `scripts/companion/agent/`: the **offline** Llama 3.2 1B (Genie daemon)

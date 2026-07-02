@@ -27,6 +27,13 @@ mkdir -p "$MODEL_DIR"
 "$HOME/.local/bin/modelscope" download --model "$MODEL_REPO" --local_dir "$MODEL_DIR"
 chmod +x "$MODEL_DIR/genie-t2t-run"
 
+# CRITICAL for the resident daemon: Radxa's config ships "poll": true, which makes
+# the HTP backend BUSY-WAIT ~2.5 CPU cores CONTINUOUSLY once the model is loaded
+# (not just during generation) -> ~90C idle on this passively-cooled board and
+# eventual thermal shutdown. poll:false is interrupt-driven (idle ~5% CPU, ~66C)
+# with no measurable latency cost for a resident daemon. (Verified 2026-07-02.)
+sed -i 's/"poll": true/"poll": false/' "$MODEL_DIR/$GENIE_CONFIG"
+
 echo "=== 3. deploy resident daemon + helpers ==="
 cp "$HERE/q6a_llmd.py" "$MODEL_DIR/q6a_llmd.py"
 mkdir -p "$HOME/.local/bin"
