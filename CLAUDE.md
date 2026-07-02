@@ -224,8 +224,14 @@ To get **adaptive polling** (Genie only exposes `poll:true/false`; adaptive poll
 - Built the **aarch64/v68 `qai_appbuilder` wheel** from source (`QNN_SDK_ROOT` + `QAI_TOOLCHAINS=aarch64-oe-linux-gcc11.2`,
   `python -m build -w`); it bundles `libQnnHtpV68Skel/Stub.so`. Docker now installed on the Q6A.
 - ✅ **QNN-direct proven**: `QNNContext` loads the Llama-3.2-1B v68 context binary onto the NPU (HTP), no
-  Genie (~3 s init). Adaptive-polling hook = `perfInfra.setPowerConfig(... ADAPTIVE_POLLING_TIME ...)` in
-  `QnnInferenceEngine.cpp` (Phase 2, not yet patched).
+  Genie (~3 s init).
+- ✅ **Phase 2 — adaptive polling WORKS on v68** (the whole reason for going QNN-direct): patched
+  `QnnInferenceEngine.cpp` to `setPowerConfig(RPC_POLLING_TIME=9999)` then `setPowerConfig(ADAPTIVE_POLLING_TIME=1000µs)`
+  right after `createPowerConfigId`. Both return **rc=0 (SUCCESS)** on the QCS6490 — **contradicting the
+  SDK header's "RPC polling is v69 and later" note.** So adaptive polling (poll during inference, idle
+  between → no 24/7 busy-spin) is reachable here, unlike through Genie. Patch is in the Q6A fork build;
+  snippet in `scripts/companion/qnn/README.md`. NB: full *effect* (idle CPU + tok/s) needs the Phase-3 LLM
+  loop to measure — this confirms feasibility + that the config applies.
 - **v68 LLM context-binary structure** (recon): graph `ar128_cl4096` — 128-token chunked prefill, 4096 ctx,
   **16 layers, 8 KV heads (GQA), head_dim 64, vocab 128256, ufp8 KV cache**; I/O = input_ids + per-layer KV +
   RoPE cos/sin + attention_mask → updated KV + logits. Full details in `scripts/companion/qnn/README.md`.

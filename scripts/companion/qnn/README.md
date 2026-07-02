@@ -22,6 +22,27 @@ Gotcha: `QNN_SDK_ROOT` path **must contain the version string** (setup.py parses
   no Genie, ~3 s `model_initialize`. API: `QNNConfig.Config(Runtime.HTP, ...)`, `QNNContext(name, bin)`,
   `PerfProfile.SetPerfProfileGlobal(...)`, `.Inference(...)`.
 
+## Phase 2 — adaptive polling: WORKS on v68 (done)
+Patched `src/QnnInferenceEngine.cpp` right after `createPowerConfigId(...)`:
+```cpp
+QnnHtpPerfInfrastructure_PowerConfig_t rpcPoll{}; memset(&rpcPoll,0,sizeof(rpcPoll));
+rpcPoll.option = QNN_HTP_PERF_INFRASTRUCTURE_POWER_CONFIGOPTION_RPC_POLLING_TIME;
+rpcPoll.rpcPollingTimeConfig = 9999;                 // enable RPC polling (prereq)
+const QnnHtpPerfInfrastructure_PowerConfig_t* c1[]={&rpcPoll,NULL};
+m_perfInfra.setPowerConfig(m_powerConfigId, c1);      // rc=0 on v68
+
+QnnHtpPerfInfrastructure_PowerConfig_t adPoll{}; memset(&adPoll,0,sizeof(adPoll));
+adPoll.option = QNN_HTP_PERF_INFRASTRUCTURE_POWER_CONFIGOPTION_ADAPTIVE_POLLING_TIME;
+adPoll.adaptivePollingTimeConfig = 1000;              // µs threshold; poll only if inference > this
+const QnnHtpPerfInfrastructure_PowerConfig_t* c2[]={&adPoll,NULL};
+m_perfInfra.setPowerConfig(m_powerConfigId, c2);      // rc=0 on v68
+```
+Both `setPowerConfig` calls return **rc=0 (SUCCESS)** on the QCS6490 — **contradicting the SDK header's
+"RPC polling is V69 and later" comment.** Adaptive polling is therefore reachable on v68 (poll during
+inference, idle between → no 24/7 busy-spin), which is impossible through Genie. `RpcPollingTime_t` /
+`AdaptivePollingTime_t` are both `uint32_t`. Full *effect* (idle CPU + tok/s) is measurable once the
+Phase-3 LLM loop exists; this confirms feasibility + that the config applies.
+
 ## Llama-3.2-1B v68 context-binary structure (Phase-3 recon)
 Graph **`ar128_cl4096_1_of_1`** — chunked prefill (128-token chunk, 4096 context):
 - **Inputs (36):** `input_ids`[1,128] int32; per-layer KV cache ×16 → `past_key_N_in`[8,1,64,3968] +
