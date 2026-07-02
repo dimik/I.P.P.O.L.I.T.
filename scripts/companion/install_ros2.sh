@@ -1,23 +1,30 @@
 #!/bin/bash
-# Install ROS 2 Jazzy on Radxa Dragon Q6A (Debian 12 / Ubuntu 24.04 arm64)
-set -e
+# Install ROS 2 Jazzy on Radxa Dragon Q6A (Ubuntu 24.04 noble, arm64).
+# Run as a NORMAL user with passwordless sudo (e.g. `radxa`):  bash install_ros2.sh
+# System changes use sudo explicitly; rosdep update + .bashrc run as the invoking user.
+set -euo pipefail
+
+ARCH="$(dpkg --print-architecture)"          # arm64 on the Q6A
+CODENAME="$(. /etc/os-release && echo "$VERSION_CODENAME")"   # noble
 
 echo "=== Setting locale ==="
-apt-get install -y locales
-locale-gen en_US en_US.UTF-8
-update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
+sudo apt-get update
+sudo apt-get install -y locales
+sudo locale-gen en_US en_US.UTF-8
+sudo update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
+export LANG=en_US.UTF-8
 
-echo "=== Adding ROS 2 apt repository ==="
-apt-get install -y curl software-properties-common
-curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
+echo "=== Enabling universe + ROS 2 apt repository ==="
+sudo apt-get install -y curl software-properties-common
+sudo add-apt-repository -y universe
+sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
   -o /usr/share/keyrings/ros-archive-keyring.gpg
-echo "deb [arch=arm64 signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] \
-  http://packages.ros.org/ros2/ubuntu noble main" \
-  > /etc/apt/sources.list.d/ros2.list
+echo "deb [arch=${ARCH} signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu ${CODENAME} main" \
+  | sudo tee /etc/apt/sources.list.d/ros2.list > /dev/null
 
 echo "=== Installing ROS 2 Jazzy base + Nav2 ==="
-apt-get update
-apt-get install -y \
+sudo apt-get update
+sudo apt-get install -y \
   ros-jazzy-ros-base \
   ros-jazzy-nav2-bringup \
   ros-jazzy-nav2-msgs \
@@ -28,10 +35,12 @@ apt-get install -y \
   python3-rosdep
 
 echo "=== Initialising rosdep ==="
-rosdep init || true
+sudo rosdep init || true
 rosdep update
 
-echo "=== Adding ROS setup to .bashrc ==="
-echo "source /opt/ros/jazzy/setup.bash" >> ~/.bashrc
+echo "=== Adding ROS setup to ~/.bashrc ==="
+grep -qxF "source /opt/ros/jazzy/setup.bash" "$HOME/.bashrc" \
+  || echo "source /opt/ros/jazzy/setup.bash" >> "$HOME/.bashrc"
 
-echo "Done. Run: source /opt/ros/jazzy/setup.bash"
+echo "=== DONE. ROS 2 Jazzy installed: $(ls -d /opt/ros/jazzy) ==="
+echo "Run: source /opt/ros/jazzy/setup.bash"

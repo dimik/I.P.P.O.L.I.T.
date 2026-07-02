@@ -44,14 +44,16 @@ Turn a Dreame D10s Pro robot vacuum into an open AI platform:
 - Connectivity: GbE, WiFi 6, BT 5.4, USB 3.1 + 3× USB 2.0, 3× MIPI CSI, 40-pin GPIO
 - Power: 12V, 18–30W (powered from robot 14.8V battery via 12V buck converter)
 - OS: **Ubuntu 24.04.4 LTS (Radxa OS, `rsdk-r2`) — installed on the M.2 2230 NVMe** (`/dev/nvme0n1p3`,
-  kernel 6.18 qcom), booting from NVMe, headless. ROS 2 Jazzy Tier 1 native (not yet installed).
+  kernel 6.18 qcom), booting from NVMe, headless. ROS 2 Jazzy Tier 1 native (**installed 2026-07-02**).
 - Size: 85×56mm — fits in D10s Pro top compartment
 
 ### Q6A setup, access & gotchas (provisioned 2026-07-02 — READ before touching the board)
 
 **Current state:** Ubuntu 24.04.4 LTS (Radxa OS `rsdk-r2`, GNOME image) installed on the **M.2 2230
 NVMe** and booting from it, headless. Kernel `6.18.2-3-qcom`, aarch64. Hostname `radxa-dragon-q6a`,
-eth MAC `00:48:54:21:5d:f2`. ROS 2 Jazzy **not yet installed**.
+eth MAC `00:48:54:21:5d:f2`. ROS 2 Jazzy **installed 2026-07-02** — `ros-jazzy-ros-base` + Nav2 stack
+(`nav2-bringup`, `tf2-ros`, `sensor/geometry-msgs`, colcon, rosdep) via `scripts/companion/install_ros2.sh`;
+`ros2 pkg list` = 307 pkgs, `ROS_DISTRO=jazzy`, `source /opt/ros/jazzy/setup.bash` in `~radxa/.bashrc`.
 
 **Storage / boot layout** (`/dev/nvme0n1`, 465.8 GB):
 | Part | Mount | FS | Notes |
@@ -81,13 +83,28 @@ on the Mac → boot Q6A from SD → from that running system `xz -dc os.img.xz |
 has a **12V/3A** fixed PDO and **works** — use a **single port only** (dual-port mode drops 12V). The
 robot's own 12V buck (DC 10-30V → USB-C PD, off the 14.8V battery) is the final in-robot supply.
 
+**⚠️ Headless auto-suspend (fixed 2026-07-02):** the Radxa GNOME image **auto-suspends on idle
+(~20 min on AC)**, and SSH activity does **not** reset the idle timer — so the board silently slept
+and dropped **both** WiFi *and* the wired link at once (PHY powers down → Odyssey `enp2s0` carrier→0;
+no ping/ARP/mDNS on any path; **power LED stays lit**, so it looks alive). Only the **power button**
+woke it (WoL is unusable — this suspend state cuts PHY power; NIC supports `g` but it was off). **Fix
+applied:** `sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target`
+(+ GNOME `gsettings … power sleep-inactive-ac-type nothing`). Mandatory for a headless companion;
+consider dropping GNOME/gdm entirely later.
+
 **Access (on WiFi, Mac-independent):** `ssh q6a` (alias → **`radxa-dragon-q6a.local`**, key
 `~/.ssh/id_ed25519_q6a`). Connected to home **`4K` (2.4 GHz)** via NetworkManager (`nmcli`, autoconnect
 on; `5K`/5GHz saved as a **manual fallback**, autoconnect off). Currently DHCP `192.168.1.243` on the
 home LAN — use the mDNS name since the IP can change. **Any host on the LAN reaches it** (incl. the
 **Seeed Odyssey**): `ssh radxa@radxa-dragon-q6a.local` (pw `radxa`), then append that host's *public*
-key to `~radxa/.ssh/authorized_keys`. (2.4 GHz chosen over 5 GHz for compartment penetration + same
+key to `~radxa/.ssh/authorized_keys`. **✅ Done for the Odyssey** (`odyssey-x86j4125`: `ssh ippolit`, key `~/.ssh/id_ed25519_ippolit`, installed 2026-07-02, passwordless verified). (2.4 GHz chosen over 5 GHz for compartment penetration + same
 band as the robot.)
+- **Direct wired link to the Odyssey (preferred, added 2026-07-02):** point-to-point cable Odyssey
+  `enp2s0` ↔ Q6A `enp1s0`, static **`192.168.20.0/24`** (Odyssey `.1`, Q6A `.2`). NM profiles
+  `q6a-lan` (Odyssey) / `odyssey-lan` (Q6A), both `ipv4.never-default yes` so the link never touches
+  either box's internet routing (Q6A still defaults out via WiFi). From the Odyssey: **`ssh ippolit-lan`**
+  (→ `192.168.20.2`, ~1.8 ms, key-only, autoconnect survives reboot). The WiFi/mDNS path `ssh ippolit`
+  stays as a fallback (note: Odyssey mDNS for `*.local` was flaky — the static wired IP is more reliable).
 - **Legacy bring-up link (only if WiFi is down):** macOS **Internet Sharing** (Wi-Fi `en0` → AX88179A
   USB-Ethernet `en7`, direct Mac↔Q6A cable; bridge `192.168.2.1`, leases in `/var/db/dhcpd_leases`)
   gives `192.168.2.2` + NAT internet. Private to the Mac; dies if the Mac sleeps or Sharing is off.
@@ -102,9 +119,10 @@ v1.5.0), loader `flat_build/flat_build/spinor/dragon-q6a/prog_firehose_ddr.elf`,
 `flat_build_wp_260120` (≥20251230, needed for `r2` images), image `*.output_512.img(.xz)` (sha512
 `c96977…88aaf`), and `flash.sh {detect|firmware|os|reset}`.
 
-**Next steps / TODO:** (1) Wi-Fi on the Q6A so the Odyssey can reach it + it's Mac-independent;
-(2) ROS 2 Jazzy install (companion role: vision/nav/audio per the Architecture section);
-(3) integrate into robot 12V power; (4) change default password.
+**Next steps / TODO:** (1) ✅ Wi-Fi on the Q6A working + the Odyssey reaches it Mac-independently (`ssh ippolit`, done 2026-07-02);
+(2) ✅ ROS 2 Jazzy installed 2026-07-02 (`ros-base` + Nav2) — next: relocate `valetudo_bridge.py`
+here (`--host http://<robot-ip>`) + nav2 bringup consuming `/map`+TF (companion role: vision/nav/audio
+per the Architecture section); (3) integrate into robot 12V power; (4) change default password.
 
 ### Physical link (Q6A ↔ robot)
 **The robot exposes only ONE USB port — the OTG/debug port** (`usbc0` = `allwinner,sunxi-otg-manager`,
