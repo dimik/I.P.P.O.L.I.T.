@@ -29,13 +29,26 @@ graph orchestration, KV-cache management, sampling.
    (4095 window); get logits[1,1,vocab] + 1 KV slot; argmax; append; stop on eos(128009) or max tokens.
 5. Detokenize the generated ids.
 
-## Remaining sub-steps
-- [ ] 3a RoPE cos/sin builder + causal mask builder (shapes above)
-- [ ] 3b KV-cache ring buffer (ufp8 bytes; prefill 3968 ↔ decode 4095 window handling)
-- [ ] 3c prefill loop (graphIndex=0) wired through `QNNContext.Inference`
-- [ ] 3d decode loop (graphIndex=1) + greedy sampling + eos stop
-- [ ] 3e wrap as a socket daemon like q6a-llmd (drop-in, but QNN-direct + adaptive polling)
+## Progress (2026-07-03) — see `qnn_llm.py`, `qnn_prefill_test.py`
+- [x] 3a RoPE (llama3 θ=500000, scaling) + causal mask — **PROVEN CORRECT**.
+- [x] **Prefill works end-to-end (graphIndex=0):** `qnn_prefill_test.py` — "The capital of France is"
+      → **" Paris"** (top-1; top5 Paris/not/Berlin/…/a). So RoPE + mask + input remap + qai float→quant
+      pipeline + greedy are ALL correct on the first real attempt. Key facts confirmed:
+      - `Inference(inputs, "burst", graphIndex)` — 3 positional args only (data types default float).
+      - Pass **float** cos/sin/mask/KV; qai_appbuilder quantizes per the graph encodings. Output float.
+      - Mask: `-100.0` masked / `0.0` keep; layout `[past(3968), current(128)]`, cols 3968+j causal.
+      - KV feedback must remap **by name** (in-order ≠ out-order; out is value-before-key, seq layers).
+- [~] 3d decode loop (graphIndex=1): **first decode step works (33 outputs); the SECOND step FAILS**
+      with `Internal error: Dma execution failed on the skel side. result = 1100`. Cause: re-DMA'ing the
+      huge KV tensors (32 × ~2M elems) to the DSP every step. Passing `.copy()` did NOT help.
+      **FIX (next): use qai_appbuilder ShareMemory** — keep KV resident on the DSP and update in place,
+      instead of re-passing 67M-element float arrays per token. This is the standard LLM-decode approach.
+- [ ] 3e wrap as a socket daemon like q6a-llmd (QNN-direct + adaptive polling)
 - [ ] 3f measure: idle CPU (adaptive polling) + tok/s vs Genie's 9.6/12
+
+**Bottom line:** the QNN-direct path is *proven correct* (prefill predicts right tokens, no Genie). The
+only blocker to full generation is the repeated-decode DSP DMA error → needs ShareMemory-backed KV
+buffers (the multi-day-ish piece). `qnn_llm.py` has the full loop; swap the decode KV to ShareMemory.
 
 ## Notes / risks
 - ufp8 KV quant encodings: since out→in is verbatim, no scale/offset needed for passthrough. The graph
