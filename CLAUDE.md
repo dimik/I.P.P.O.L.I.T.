@@ -36,6 +36,8 @@ Turn a Dreame D10s Pro robot vacuum into an open AI platform:
   Our `lds_scan`/`mcu` nodes are now adaptive (don't busy-poll when idle). See `docs/power.md`.
 
 ### Companion — Radxa Dragon Q6A
+> **Consolidated status, findings & resume guide: [`docs/q6a-companion.md`](docs/q6a-companion.md)** —
+> read that first for the big picture (LLM/NPU/GPU/QNN, thermal, networking, open items).
 - SoC: Qualcomm QCS6490
 - CPU: 1× Kryo Prime @ 2.7GHz + 3× Gold @ 2.4GHz + 4× Silver @ 1.9GHz
 - NPU: **12 TOPS** (Hexagon DSP, 6th-gen Qualcomm AI Engine)
