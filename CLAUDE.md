@@ -232,6 +232,14 @@ To get **adaptive polling** (Genie only exposes `poll:true/false`; adaptive poll
   between → no 24/7 busy-spin) is reachable here, unlike through Genie. Patch is in the Q6A fork build;
   snippet in `scripts/companion/qnn/README.md`. NB: full *effect* (idle CPU + tok/s) needs the Phase-3 LLM
   loop to measure — this confirms feasibility + that the config applies.
+- ❌ **Adaptive polling CANNOT be bolted onto the Genie daemon** (tested + refuted 2026-07-02). Genie is a
+  closed binary (can't rebuild); it only exposes `poll:true/false`; and although adaptive polling is
+  "process-wide", you can't make the `setPowerConfig` call in Genie's process — creating a 2nd QNN HTP
+  backend alongside Genie **fails** (`DspTransport.transport_config failed`, `Failed to load skel 1002` —
+  Genie owns the DSP/FastRPC session), and Genie's own backend handle isn't exposed. Verified: Genie
+  poll:true = 2.58 cores idle; injection attempt left it at 2.57 (unchanged, and the 2nd backend errored).
+  **Conclusion: adaptive polling for the LLM is only reachable via the QNN-direct Phase-3 runtime, not Genie.
+  Keep the Genie daemon at `poll:false` (cool, ~9.6 tok/s); adaptive polling (~12 tok/s cool) is a Phase-3 payoff.**
 - **v68 LLM context-binary structure** (recon): graph `ar128_cl4096` — 128-token chunked prefill, 4096 ctx,
   **16 layers, 8 KV heads (GQA), head_dim 64, vocab 128256, ufp8 KV cache**; I/O = input_ids + per-layer KV +
   RoPE cos/sin + attention_mask → updated KV + logits. Full details in `scripts/companion/qnn/README.md`.
