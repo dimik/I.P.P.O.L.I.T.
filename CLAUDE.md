@@ -43,8 +43,68 @@ Turn a Dreame D10s Pro robot vacuum into an open AI platform:
 - RAM: up to 16GB LPDDR5
 - Connectivity: GbE, WiFi 6, BT 5.4, USB 3.1 + 3× USB 2.0, 3× MIPI CSI, 40-pin GPIO
 - Power: 12V, 18–30W (powered from robot 14.8V battery via 12V buck converter)
-- OS: Ubuntu 24.04 (Armbian) — ROS 2 Jazzy Tier 1 native
+- OS: **Ubuntu 24.04.4 LTS (Radxa OS, `rsdk-r2`) — installed on the M.2 2230 NVMe** (`/dev/nvme0n1p3`,
+  kernel 6.18 qcom), booting from NVMe, headless. ROS 2 Jazzy Tier 1 native (not yet installed).
 - Size: 85×56mm — fits in D10s Pro top compartment
+
+### Q6A setup, access & gotchas (provisioned 2026-07-02 — READ before touching the board)
+
+**Current state:** Ubuntu 24.04.4 LTS (Radxa OS `rsdk-r2`, GNOME image) installed on the **M.2 2230
+NVMe** and booting from it, headless. Kernel `6.18.2-3-qcom`, aarch64. Hostname `radxa-dragon-q6a`,
+eth MAC `00:48:54:21:5d:f2`. ROS 2 Jazzy **not yet installed**.
+
+**Storage / boot layout** (`/dev/nvme0n1`, 465.8 GB):
+| Part | Mount | FS | Notes |
+|------|-------|----|-------|
+| `nvme0n1p1` | `/config` | vfat 16M | label `config` |
+| `nvme0n1p2` | `/boot/efi` | vfat 1G | label `efi` — the ESP/bootloader (UEFI removable path) |
+| `nvme0n1p3` | `/` | ext4 464.7G | label `rootfs`, `root=UUID=a03a5c05-3365-4811-a1dd-f1776983aa76` |
+- Boot chain: SPI (XBL/UEFI, pre-installed) → UEFI finds the NVMe ESP's fallback loader → GRUB →
+  root by UUID. fstab mounts `/`, `/config`, `/boot/efi` all **by UUID**. `zram0` = 5.6G swap.
+- **⚠️ Duplicate-UUID trap:** the NVMe was cloned from the SD with `dd`, so SD & NVMe share the same
+  FS/PART UUIDs. **Never boot with both inserted** — the initramfs can grab the wrong root. The SD is
+  now free to reuse.
+
+**How it was flashed — microSD bootstrap, NOT EDL:** `dd` the Radxa `*.output_512.img` to a microSD
+on the Mac → boot Q6A from SD → from that running system `xz -dc os.img.xz | sudo dd of=/dev/nvme0n1`
+(same image) → `growpart /dev/nvme0n1 3` + `resize2fs` → poweroff, **remove SD**, boot NVMe.
+- **EDL-from-Mac does NOT work** with a plain USB-C→USB-A(male) cable: wrong CC/Rp termination, so the
+  Mac never acts as USB host and `edl-ng` never sees `05c6:9008` (board powers/green-LED but nothing
+  enumerates; you may hear one transient chime). EDL from a Mac needs a USB-C→USB-A-**female**
+  adapter/hub + an A-to-A cable, or a PC with a native USB-A port. EDL button is next to the 3.5mm
+  audio jack (hold → apply power → release). We went SD instead; EDL untested-working from this Mac.
+- (macOS quirk hit while debugging: USB enumerates under `system_profiler SPUSBHostDataType`, **not**
+  `SPUSBDataType`; and my sandboxed Bash couldn't read IOKit — needed sandbox-disabled to see USB.)
+
+**Power:** needs **12V USB-C PD** into the USB-C port (or the 2-pin 12V header). Apple 65/67W bricks
+(PDOs 5.2/9/15/20V, **no 12V**) do **NOT** work. **Belkin BoostCharge Pro Dual USB-C 67W (WCH020)**
+has a **12V/3A** fixed PDO and **works** — use a **single port only** (dual-port mode drops 12V). The
+robot's own 12V buck (DC 10-30V → USB-C PD, off the 14.8V battery) is the final in-robot supply.
+
+**Access (on WiFi, Mac-independent):** `ssh q6a` (alias → **`radxa-dragon-q6a.local`**, key
+`~/.ssh/id_ed25519_q6a`). Connected to home **`4K` (2.4 GHz)** via NetworkManager (`nmcli`, autoconnect
+on; `5K`/5GHz saved as a **manual fallback**, autoconnect off). Currently DHCP `192.168.1.243` on the
+home LAN — use the mDNS name since the IP can change. **Any host on the LAN reaches it** (incl. the
+**Seeed Odyssey**): `ssh radxa@radxa-dragon-q6a.local` (pw `radxa`), then append that host's *public*
+key to `~radxa/.ssh/authorized_keys`. (2.4 GHz chosen over 5 GHz for compartment penetration + same
+band as the robot.)
+- **Legacy bring-up link (only if WiFi is down):** macOS **Internet Sharing** (Wi-Fi `en0` → AX88179A
+  USB-Ethernet `en7`, direct Mac↔Q6A cable; bridge `192.168.2.1`, leases in `/var/db/dhcpd_leases`)
+  gives `192.168.2.2` + NAT internet. Private to the Mac; dies if the Mac sleeps or Sharing is off.
+
+**On-board state:** default login `radxa`/`radxa` (unchanged — consider changing); **NOPASSWD sudo**
+configured for `radxa` (`/etc/sudoers.d/010_radxa-nopasswd`); Mac's pubkey in `~radxa/.ssh/
+authorized_keys`. Tools present: `xz curl partprobe growpart nvme`. **Never commit private keys** to
+this repo (it has a GitHub remote) — add each new machine's *public* key to `authorized_keys`.
+
+**Mac-side staging dir `~/dragon-q6a-flash/`** (for re-flash / future EDL): `edl-ng` (macos-arm64,
+v1.5.0), loader `flat_build/flat_build/spinor/dragon-q6a/prog_firehose_ddr.elf`, SPI firmware
+`flat_build_wp_260120` (≥20251230, needed for `r2` images), image `*.output_512.img(.xz)` (sha512
+`c96977…88aaf`), and `flash.sh {detect|firmware|os|reset}`.
+
+**Next steps / TODO:** (1) Wi-Fi on the Q6A so the Odyssey can reach it + it's Mac-independent;
+(2) ROS 2 Jazzy install (companion role: vision/nav/audio per the Architecture section);
+(3) integrate into robot 12V power; (4) change default password.
 
 ### Physical link (Q6A ↔ robot)
 **The robot exposes only ONE USB port — the OTG/debug port** (`usbc0` = `allwinner,sunxi-otg-manager`,
