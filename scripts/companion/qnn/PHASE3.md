@@ -152,12 +152,22 @@ spin-during-active-decode behavior with zero idle burn.
   "Name three primary colors." → "Red, blue, and yellow." in 1.0s.
 
 ### Two operational gotchas (cost real time — remember them)
-1. **Wedged cdsp session:** rapidly restarting the daemon while a prior instance held the DSP left an
-   orphaned fastrpc session on domain 3 (`Create From Binary List Async ... err 5005`,
-   `remote_munmap64 failed`, `reverse module apps_mem already found refs 2`). It survives `pkill -9`;
-   even standalone `genie-t2t-run` then hangs at context creation. **Fix = reboot the Q6A** (clears cdsp);
-   the daemon comes back healthy on boot. Avoid restart storms — always `stop` + confirm no NPU client
-   before the next start.
+1. **Wedged cdsp session — root cause + why reboot is the only fix here.** Every NPU call goes through
+   **fastrpc**, which creates a process-domain (PD) + rpcmem mappings on the Hexagon cDSP. A client that
+   exits **cleanly** (`systemctl stop`) does the teardown handshake and releases the PD. A client
+   **killed/aborted mid-op** (`pkill -9`, the 7B `SIGABRT`, or restart-storming) leaves an **orphaned PD
+   on the DSP that userspace can't reclaim** → the next client hits `err 5005` /
+   `reverse module apps_mem already found refs 2` / `remote_munmap64 failed`, or `genie-t2t-run` hangs at
+   context creation. *Verified: clean stop→start never wedges it; only unclean kills do.*
+   - **The textbook reboot-free reset — remoteproc SSR — does NOT work on this Radxa kernel.** `remoteproc1`
+     is the cdsp (`/sys/class/remoteproc/remoteproc1`, `name=cdsp`), but `echo stop > .../state` **blocks
+     uninterruptibly** (even `timeout` can't kill the write), emits no dmesg stop/up events, and never
+     cleanly cycles. Tested 3×. So sysfs SSR is a dead end here — **don't re-investigate it.**
+   - **Prevention (the real fix):** never `kill -9` an NPU client, never restart-storm, only ONE NPU
+     client at a time, always `systemctl stop q6a-llmd` + confirm no genie proc before the next start.
+   - **Recovery when wedged: reboot the Q6A** (~40 s; daemon auto-starts healthy on boot).
+   - (`error 0x80000600 "domains support not available in listener"` in the logs is a **benign** shell/
+     `cdsp.mbn` version warning — the model loads fine despite it; it is NOT the wedge.)
 2. **Daemon socket protocol:** `q6a_llmd.py handle()` reads the prompt **until the client half-closes**
    (`recv` loop until EOF). A test client MUST `s.shutdown(socket.SHUT_WR)` after `sendall` or the daemon
    blocks forever in `recv` and the query never runs. (Agent harness prefix `\x01RAW\x01` = pre-formatted
