@@ -166,26 +166,25 @@ per the Architecture section); (3) integrate into robot 12V power; (4) change de
   during the GPU test. `poll:false` (interrupt-driven) → idle CPU **247% → ~5%**, idle temp **~90°C → ~66°C**,
   and **same ~0.45s query latency**. `setup_npu_llm.sh` now patches this automatically. True idle ~66°C;
   sustained NPU 1B load peaks ~80°C (10°C under the 90°C hot-trip) — sustainable *only* with poll:false.
+  **UPDATE (2026-07-04): the daemon now runs a from-source `libGenie.so` with an adaptive-spin threadpool
+  patch at `poll:true` → 0.00 idle cores AND full speed (no busy-spin). This poll:false workaround applies
+  to the *stock* bundle libGenie; the deployed daemon supersedes it. See the QNN section + `PHASE3.md`.**
 
-### Offline agent: local LLM + MCP tools (prototype 2026-07-02)
-Working proof-of-concept in `scripts/companion/agent/`: the **offline** Llama 3.2 1B (Genie daemon)
-drives real tools via two **MCP servers** — `mcp_websearch.py` (keyless DuckDuckGo) and `mcp_robot.py`
-(Valetudo REST wrapper). `agent.py` is an MCP client + ReAct loop. Verified end-to-end:
-*"capital of Australia?"* → NPU LLM picks `web_search` → live result → **"Canberra."**
+### Offline agent / MCP tools — TRIED AND DROPPED (2026-07-04)
+We built an offline MCP agent (Llama-3.2-1B + `mcp_websearch.py` + `mcp_robot.py` + a ReAct `agent.py`)
+and **removed it** — the 1B is too weak to be a reliable tool-using agent: it hallucinates tool names,
+returns empty args, tends to pick tool #1, and confabulates facts even with heavy scaffolding (2-stage
+name selection, arg prefilling, forced stop). Code deleted from `scripts/companion/agent/` and the Q6A.
 
-- **Daemon raw mode:** `q6a_llmd.py` now accepts a `\x01RAW\x01`-prefixed payload = a fully-formatted
-  Llama-3.2 prompt (no template wrap / no reset), so the harness controls multi-turn + prefill. Plain
-  clients (`q6a-llm`) still work unchanged.
-- **The 1B is a weak agent — needs heavy scaffolding** (all in `agent.py`): (1) it won't emit tool calls
-  from instructions alone, so we **prefill** the assistant turn; (2) it hallucinates tool *names*, so we
-  do **2-stage selection** (numbered menu → inject the valid name); (3) it returns empty args, so we
-  **prefill the primary arg's opening quote** and read the value; (4) it doesn't know when to stop, so we
-  **break after the first useful observation**. Even then, tool *selection* is poor (tends to pick #1).
-- **Implication for the ROS head:** don't expect open-ended tool choice from the 1B. The event-driven
-  `behavior_node` design mitigates this — a triggering ROS event (voice cmd, battery-low, detection)
-  routes to a *narrow* handler where the tool is largely implied, not freely chosen. Open-ended agentic
-  reasoning wants a bigger brain (cloud/CPU) — keep the 1B for fast, well-scoped, offline decisions.
-- Deps (Q6A, user pip): `mcp`, `ddgs`, `httpx`. Run: `python3 agent/agent.py "..."`.
+**Lesson (keep this — it's the durable takeaway):** don't put open-ended tool/agent reasoning on the
+on-device 1B. It's fine as a fast, well-scoped, offline text generator, but **agentic decisions want a
+bigger brain**. Since v68 caps the NPU at ~1B (see the QNN section — no 3B+ path exists on this chip),
+real agentic quality must come from **cloud** (Gemini/Groq free tier) or a **v73+ board**. For the ROS
+head, prefer event-driven *narrow* handlers (a ROS event → a specific action, tool largely implied) over
+free tool choice by the 1B.
+
+**Kept:** the `q6a-llmd` daemon and its `\x01RAW\x01` raw-prompt mode (a client sends a fully-formatted
+prompt, no template wrap) — that's a generic, useful serving feature independent of the dropped agent.
 
 ### GPU LLM via Qualcomm OpenCL + thermal limits (explored 2026-07-02)
 **The GPU path works, but it's no faster than the NPU and thermally-shuts-down the board on big models.**
@@ -234,19 +233,52 @@ To get **adaptive polling** (Genie only exposes `poll:true/false`; adaptive poll
   between → no 24/7 busy-spin) is reachable here, unlike through Genie. Patch is in the Q6A fork build;
   snippet in `scripts/companion/qnn/README.md`. NB: full *effect* (idle CPU + tok/s) needs the Phase-3 LLM
   loop to measure — this confirms feasibility + that the config applies.
-- ❌ **Adaptive polling CANNOT be bolted onto the Genie daemon** (tested + refuted 2026-07-02). Genie is a
-  closed binary (can't rebuild); it only exposes `poll:true/false`; and although adaptive polling is
-  "process-wide", you can't make the `setPowerConfig` call in Genie's process — creating a 2nd QNN HTP
-  backend alongside Genie **fails** (`DspTransport.transport_config failed`, `Failed to load skel 1002` —
-  Genie owns the DSP/FastRPC session), and Genie's own backend handle isn't exposed. Verified: Genie
-  poll:true = 2.58 cores idle; injection attempt left it at 2.57 (unchanged, and the 2nd backend errored).
-  **Conclusion: adaptive polling for the LLM is only reachable via the QNN-direct Phase-3 runtime, not Genie.
-  Keep the Genie daemon at `poll:false` (cool, ~9.6 tok/s); adaptive polling (~12 tok/s cool) is a Phase-3 payoff.**
+- ❌ Adaptive polling can't be *injected* into Genie's process (2nd QNN HTP backend fails — Genie owns the
+  DSP/FastRPC session). But this whole QNN-direct detour was **SUPERSEDED** — see next.
+
+### ✅ RESOLVED (2026-07-04): adaptive-polling libGenie built from source + DEPLOYED — read `scripts/companion/qnn/PHASE3.md`
+The premise above ("Genie is a closed binary") is **wrong**: the QAIRT SDK ships the **full Genie source**
+(`examples/Genie/Genie`), and it's buildable on the Q6A. We discovered Genie's `poll` is its own worker
+**threadpool** busy-spin (not the QNN RPC power config), patched `threadpool.cpp` for **time-based adaptive
+spinning** (spin 100 ms after last work, then block on the condvar), built `libGenie.so` from source with
+`-DCMAKE_BUILD_TYPE=Release`, and **deployed it into `q6a-llmd`** (config `poll:true` + a systemd drop-in
+pointing LD at the 2.42 QNN libs). Result: **decode ~9.8 tok/s with 0.00 idle cores** (was 2.55 cores /
+~90 °C at poll:true). So the daemon now runs the **from-source adaptive libGenie at poll:true** — the
+"MUST set poll:false" workaround above is superseded (still true for the *stock* bundle libGenie, but the
+deployed daemon uses ours). Full build recipe, the `-O0`→`-O3` gotcha, benchmark, and the cdsp-wedge /
+reboot recovery are in `scripts/companion/qnn/PHASE3.md` + `genie-build/`.
+- **v68 tops out at ~1B LLMs (confirmed 2026-07-04).** No 3B+ path exists on this chip: Radxa prebuilds
+  only ≤1B for v68, aidevhome's 7B is a **v73** (X-Elite) build, and *no* qai-hub-models LLM recipe lists
+  `qcs6490`. Bigger models need cloud (Gemini/Groq) or a v73+ board. The offline **MCP agent was dropped**
+  (1B too weak; see the "Offline agent" section). A **QAIRT x86 host quantizer** was stood up on the
+  Odyssey (Py3.10 venv from the 2.42 SDK) but `qairt-quantizer` **SIGILLs on the J4125 (no AVX2)** — quantize
+  must run on an AVX2 box, the Q6A's ARM cores, or **QAI Hub** (cloud; token configured).
 - **v68 LLM context-binary structure** (recon): graph `ar128_cl4096` — 128-token chunked prefill, 4096 ctx,
   **16 layers, 8 KV heads (GQA), head_dim 64, vocab 128256, ufp8 KV cache**; I/O = input_ids + per-layer KV +
   RoPE cos/sin + attention_mask → updated KV + logits. Full details in `scripts/companion/qnn/README.md`.
-- **Remaining (Phase 3, multi-week):** the QNN-direct LLM runtime (ufp8 KV-cache orchestration across
-  prefill chunks + decode, tokenizer, sampling) — the part Genie otherwise handles.
+- **The multi-week QNN-direct LLM runtime is NOT needed** — its only goal (adaptive polling) was achieved by
+  building Genie from source instead (see RESOLVED above). Kept `scripts/companion/qnn/` for the recon/notes.
+
+### Q6A MIPI camera — Sony IMX296 global shutter (WORKING, 2026-07-04) → `docs/q6a-camera.md`
+A Sony **IMX296** global-shutter camera (1-lane MIPI, 1.58 MP, i2c 0x1a) captures live frames on the Q6A via
+mainline **qcom-camss**. Plugged into **CAM2** (one of the two 15-pin RPi-CSI-compatible connectors; the 3rd,
+CAM1, is the 31-pin 4-lane). None of this ships working — we built the missing `imx296.ko` and a corrected
+overlay. Artifacts + build/deploy scripts in `scripts/companion/camera/`.
+- **⚠️ Radxa's shipped camera overlays BOOT-LOOP this board** ([issue #4](https://github.com/radxa-build/radxa-dragon-q6a/issues/4)):
+  the overlay's `linux,cma` reserved-memory node collides with the `cdsp/video/zap` firmware reservations →
+  kernel can't reserve them → loop. **Fix = strip the `linux,cma` fragment** from the overlay (CAMSS uses
+  system CMA). This is a fix ahead of the community — nobody had a working camera setup.
+- Other overlay fixes vs Radxa's imx219 template: `compatible=sony,imx296` @ 0x1a; `clock-names="inck"`
+  (driver requirement) + 37.125 MHz mclk; **`data-lanes=<1>`** (IMX296 is 1-lane; 2 lanes → 0 frames).
+- **Boot backend is embloader (systemd-boot/EDK2), NOT extlinux.** Overlays enable via a `devicetree-overlay`
+  line in `/boot/efi/loader/entries/RadxaOS-<ver>.conf` + the `.dtbo` in `/boot/efi/RadxaOS/<ver>/dtbo/`.
+  **⚠️ en7581 trap:** enabling can trigger a BLS regen that picks the wrong DTB (`en7581-evb.dtb`) → won't
+  boot. Pin `/etc/kernel/devicetree=qcom/qcs6490-radxa-dragon-q6a.dtb` and verify the BLS entry before reboot.
+- Capture: pipeline `imx296 → csiphy2 → csid0 → vfe0_rdi0 → /dev/video0`, format `SBGGR10_1X10/1456x1088`,
+  video-node pixelformat **`pBAA`** (packed 10-bit; `BG10` unpacked → STREAMON EPIPE). Full recipe in the doc.
+- Recovery if a camera overlay ever bricks boot: microSD boot → mount NVMe → remove the overlay/BLS line.
+  **The rootfs is NOT wiped** (reflash is not required for a boot-config issue). Session backup: `~/q6a-backup/`
+  on the Odyssey (imx296-bringup, llama-1b, systemd/netplan configs).
 
 ### Physical link (Q6A ↔ robot)
 **The robot exposes only ONE USB port — the OTG/debug port** (`usbc0` = `allwinner,sunxi-otg-manager`,
@@ -866,6 +898,9 @@ scripts/
     deploy_ava_shims.sh    bind-mount patched ava.sh exporting the LD_PRELOAD shim list, restart + verify
   companion/
     install_ros2.sh        run on Dragon Q6A to install ROS 2 Jazzy
+    setup_npu_llm.sh       NPU Genie LLM daemon (Llama-3.2-1B) + q6a_llmd.py, q6a-llm[-remote], systemd units
+    qnn/                   from-source adaptive libGenie (PHASE3.md, genie-build/) + QNN-direct recon
+    camera/                IMX296 bring-up: build_imx296.sh, deploy_imx296.sh [CAM 2|3], cam2/cam3 overlays (.dts/.dtbo)
 robot/
   boot/README.md           deployment instructions for boot hooks
   valetudo/valetudo.json   Valetudo configuration
@@ -878,6 +913,9 @@ robot/
 companion/
   ros2/                    ROS 2 node packages (valetudo_bridge, camera_node, etc.)
 docs/
+  q6a-companion.md         Q6A big-picture status/resume guide (LLM/NPU/GPU/QNN/networking/thermal)
+  q6a-llm-toolchain.md     deep reference: QNN/QAIRT/AIMET, LLM quantization+export, distribution, v68 ceiling
+  q6a-camera.md            IMX296 global-shutter camera bring-up (CAMSS overlay, boot-loop fix, capture recipe)
   hardware.md              wiring, power, physical setup
   wifi-hack.md             detailed explanation of the wpa_supplicant fix
   sensors.md               sensors & data access (LiDAR, camera, IMU, mic) + how to read each

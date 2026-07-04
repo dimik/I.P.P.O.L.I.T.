@@ -1,0 +1,180 @@
+/dts-v1/;
+
+/ {
+
+	metadata {
+		title = "Enable Sony IMX296 GS on CAM2";
+		compatible = "radxa,dragon-q6a";
+		category = "camera";
+		exclusive = "cci1_i2c0";
+		description = "Enable Sony IMX296 GS on CAM2.";
+	};
+
+	fragment@0 {
+		target-path = "/";
+
+		__overlay__ {
+
+			ext-cam-clk-imx219 {
+				status = "okay";
+				compatible = "fixed-clock";
+				clock-frequency = <37125000>;
+				clock-output-names = "ext_cam_clk_imx219";
+				#clock-cells = <0x00>;
+				phandle = <0x03>;
+			};
+
+			camera-pwdn-gpio-0 {
+				status = "okay";
+				compatible = "regulator-fixed";
+				regulator-name = "camera_pwdn_gpio_0";
+				regulator-always-on;
+				enable-active-high;
+				gpios = <0xffffffff 0x4d 0x00>;
+				pinctrl-names = "default";
+				pinctrl-0 = <0x01>;
+				phandle = <0x05>;
+			};
+		};
+	};
+
+
+	fragment@2 {
+		target = <0xffffffff>;
+
+		__overlay__ {
+			vdda-phy-supply = <0xffffffff>;
+			vdda-pll-supply = <0xffffffff>;
+			status = "okay";
+
+			ports {
+				#address-cells = <0x01>;
+				#size-cells = <0x00>;
+
+				port@2 {
+					reg = <0x02>;
+
+					endpoint {
+						clock-lanes = <0x07>;
+						data-lanes = <0x00>;
+						remote-endpoint = <0x02>;
+						phandle = <0x04>;
+					};
+				};
+			};
+		};
+	};
+
+	fragment@3 {
+		target = <0xffffffff>;
+
+		__overlay__ {
+			status = "okay";
+		};
+	};
+
+	fragment@4 {
+		target = <0xffffffff>;
+
+		__overlay__ {
+			#address-cells = <0x01>;
+			#size-cells = <0x00>;
+			status = "okay";
+
+			camera@10 {
+				compatible = "sony,imx296";
+				reg = <0x1a>;
+				clocks = <0x03>;
+				clock-names = "inck";
+
+				port {
+
+					endpoint {
+						link-frequencies = <0x00 594000000>;
+						data-lanes = <0x01>;
+						remote-endpoint = <0x04>;
+						phandle = <0x02>;
+					};
+				};
+			};
+		};
+	};
+
+	fragment@5 {
+		target = <0xffffffff>;
+
+		__overlay__ {
+
+			cam-pwdn-gpio-0-state {
+				pins = "gpio77";
+				function = "gpio";
+				drive-strength = <0x02>;
+				bias-pull-up;
+				phandle = <0x01>;
+			};
+		};
+	};
+
+	__symbols__ {
+		ext_cam_clk_imx219 = "/fragment@0/__overlay__/ext-cam-clk-imx219";
+		camera_pwdn_gpio_0 = "/fragment@0/__overlay__/camera-pwdn-gpio-0";
+		csiphy2_ep = "/fragment@2/__overlay__/ports/port@2/endpoint";
+		imx219_0_ep = "/fragment@4/__overlay__/camera@10/port/endpoint";
+		cam_pwdn_gpio_0 = "/fragment@5/__overlay__/cam-pwdn-gpio-0-state";
+	};
+
+	__fixups__ {
+		tlmm = "/fragment@0/__overlay__/camera-pwdn-gpio-0:gpios:0\0/fragment@5:target:0";
+		camss = "/fragment@2:target:0";
+		vreg_l10c_0p88 = "/fragment@2/__overlay__:vdda-phy-supply:0";
+		vreg_l6b_1p2 = "/fragment@2/__overlay__:vdda-pll-supply:0";
+		cci1 = "/fragment@3:target:0";
+		cci1_i2c0 = "/fragment@4:target:0";
+	};
+
+	__local_fixups__ {
+
+		fragment@0 {
+
+			__overlay__ {
+
+				camera-pwdn-gpio-0 {
+					pinctrl-0 = <0x00>;
+				};
+			};
+		};
+
+		fragment@2 {
+
+			__overlay__ {
+
+				ports {
+
+					port@2 {
+
+						endpoint {
+							remote-endpoint = <0x00>;
+						};
+					};
+				};
+			};
+		};
+
+		fragment@4 {
+
+			__overlay__ {
+
+				camera@10 {
+					clocks = <0x00>;
+
+					port {
+
+						endpoint {
+							remote-endpoint = <0x00>;
+						};
+					};
+				};
+			};
+		};
+	};
+};
