@@ -64,3 +64,19 @@ buffers (the multi-day-ish piece). `qnn_llm.py` has the full loop; swap the deco
   handles quant internally. Only input_ids/cos/sin/mask/logits are float/int we construct.
 - `Inference` input order = `getInputName()` order (NOT declaration order) — build arrays in that order.
 - This is the multi-day part Genie otherwise hides. Foundation is proven; the loop is the work.
+
+## Option 1 RULED OUT + the proper fix (researched 2026-07-04)
+- **QNNShareMemory/QNNContextProc will NOT fix the DSP DMA exhaustion.** `CreateShareMem` uses
+  `ipc::SharedRegion` (host `mmap` shared memory for the multi-PROCESS model), and `QnnInferenceEngine.cpp`
+  has ZERO `QnnMem`/`MemHandle`/`rpcmem` usage — qai_appbuilder always uses `clientBuf` tensors (re-registered
+  to the DSP every execute). ShareMemory only removes host-side inter-process copies, not the per-call DSP
+  registration that exhausts on step 2.
+- **Proper fix = QNN HTP shared buffers (MemHandle)** — register KV buffers ONCE, reuse across executes:
+  `rpcmem_alloc(HEAP_ID_SYSTEM=25, FLAGS=1)` → `rpcmem_to_fd` → `Qnn_MemDescriptor_t` → `QnnMem_register`
+  → `Qnn_MemHandle_t`; set tensor `memType=QNN_TENSORMEMTYPE_MEMHANDLE`, `memHandle=…`, `clientBuf=null`.
+  (Ref: QNN "HTP Shared Buffer Tutorial", docs.qualcomm.com 80-63442-50.) This is what Genie does internally.
+- **Remaining path:** OPTION 2 — patch qai_appbuilder's IO-tensor code (QnnInferenceEngine executeGraphs/IO
+  setup) to allocate rpcmem + QnnMem_register the KV tensors as MemHandles and keep them resident across
+  prefill(g0)+decode(g1); update the new KV slot in place. OR OPTION 3 raw-QNN. Both = the multi-week core.
+  Genie/QAIRT offer no shortcut (confirmed). qai_appbuilder gives us working graph/context plumbing to build
+  option 2 on, which is more tractable than raw QNN.
