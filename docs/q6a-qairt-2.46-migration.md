@@ -10,6 +10,11 @@ if we ever do migrate.
   arch **≥73**; v68 is rejected at **both 2.42 and 2.46** with the explicit error
   `has incorrect Value 68, expected >= 73` on `/model/10/m/0/attn/MatMul`. It's a **hardware** gate (v73+
   matrix engine), not a version issue. → **Use YOLOv8** (no attention; composes fine on v68). Already deployed.
+  - **Confirmed from both directions.** Local `qnn-context-binary-generator` (v68) shows the explicit
+    `>= 73` op error. AI Hub's own cloud `qnn_context_binary` **link job also FAILS** (`exit code 14`,
+    job `jgz4rljxp`, device `hexagon:v68`) — Qualcomm's full tooling can't build a v68 YOLOv11 binary
+    either. The `qnn_dlc` target "succeeds" only because a DLC defers the compose to load-time, where it
+    then fails on-device identically.
 - **The 1B LLM is identical** on 2.42 vs 2.46 (chip is v68-capped at ~1B). Stock 2.46 Genie measured
   **8.1 tok/s** decode vs the **~9.8 tok/s** of our from-source *adaptive* libGenie on 2.42. So stock 2.46
   is a touch slower unless we rebuild the adaptive patch.
