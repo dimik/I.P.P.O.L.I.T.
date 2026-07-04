@@ -80,3 +80,20 @@ buffers (the multi-day-ish piece). `qnn_llm.py` has the full loop; swap the deco
   prefill(g0)+decode(g1); update the new KV slot in place. OR OPTION 3 raw-QNN. Both = the multi-week core.
   Genie/QAIRT offer no shortcut (confirmed). qai_appbuilder gives us working graph/context plumbing to build
   option 2 on, which is more tractable than raw QNN.
+
+## BREAKTHROUGH (2026-07-04): Genie is buildable from source; "poll" = threadpool spin
+The QAIRT SDK ships the **full Genie source** at `examples/Genie/Genie/` (CMake + README:
+"recreate the Genie library from source") — libGenie is NOT closed. Two key realizations:
+- **Genie's `poll` is its own worker-THREADPOOL spin, NOT the QNN HTP RPC-polling power config**
+  (Genie source has zero `setPowerConfig`). `threadpool.cpp::loop()`:
+  `if (!_jobs.empty()) run; else if (_poll) __cpu_relax()  // spin forever = 247% idle; else cond.wait()`.
+  So poll:true = threads busy-spin between jobs (the 90 °C idle); poll:false = block (cool, +wake latency).
+- **Adaptive polling = a ~4-line threadpool patch** (bounded spin then block):
+  `else if (_poll && idle_spins++ < LIMIT) __cpu_relax(); else { cond.wait(lock); idle_spins=0; }`
+  → spin during active decode (poll:true speed ~12 tok/s), block when idle (cool). Enqueue already
+  notifies the condition, so blocked threads wake on new jobs.
+
+**This SUPERSEDES options 1/2/3.** Plan: patch `threadpool.cpp`, rebuild `libGenie.so` from the SDK source,
+swap it into the working `q6a-llmd` daemon (config poll:true) → Genie's proven resident-KV decode +
+adaptive polling, no reimplementation. (Note: the earlier qai_appbuilder QNN-direct + MemHandle path
+is moot for this goal — the fix lives in Genie's threadpool, and Genie is buildable.)
