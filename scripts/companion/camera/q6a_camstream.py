@@ -9,7 +9,7 @@ serves multipart/x-mixed-replace MJPEG on :8092. View from the Odyssey with view
 Usage:  python3 q6a_camstream.py [--cam 2] [--port 8092] [--full]
   --full : full-res debayer (1456x1088, slower); default is fast half-res super-pixel (728x544).
 """
-import argparse, subprocess, threading, sys
+import argparse, subprocess, threading, sys, os
 import numpy as np
 from PIL import Image
 from io import BytesIO
@@ -18,6 +18,20 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 W, H = 1456, 1088
 STRIDE = 1824            # bytes/line for pBAA (1456*10/8=1820, padded to 1824)
 FRAME = STRIDE * H       # 1,984,512 bytes/frame (v4l2 sizeimage)
+
+# Calibrated color profile (flat-field): a per-pixel per-channel gain map that corrects lens shading
+# (radial magenta->green) AND white balance. Created by --calibrate (point at a uniform white surface).
+PROFILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "imx296_flatfield.npz")
+FLAT = None
+def load_profile():
+    global FLAT
+    if os.path.exists(PROFILE):
+        g = np.load(PROFILE)["gain"]                       # small (36,48,3) smooth gain map
+        FLAT = np.stack([np.asarray(Image.fromarray(g[..., c]).resize((W, H), Image.BILINEAR))
+                         for c in range(3)], axis=2).astype(np.float32)   # upscale to full res
+        print(f"loaded color profile -> {FLAT.shape} from {PROFILE}", flush=True)
+    else:
+        print("no color profile — run with --calibrate (aim at a white/gray surface). Using gray-world fallback.", flush=True)
 
 # --- CAMSS media pipeline: sensor -> csiphyN -> csidX -> vfe0_rdi0 -> /dev/video0 ---
 CAM_MAP = {2: ("msm_csiphy2", "msm_csid0"), 3: ("msm_csiphy3", "msm_csid1")}
@@ -91,15 +105,43 @@ def debayer(px, full=True):
     col = out.mean(axis=0); out -= (col - _smooth(col, 41))[None, :, :]   # vertical stripes
     row = out.mean(axis=1); out -= (row - _smooth(row, 41))[:, None, :]   # horizontal stripes
     out = np.clip(out, 0, None)
-    # gray-world white balance: scale each channel to a common mean so a neutral surface reads gray
-    means = out.reshape(-1, 3).mean(axis=0)
-    out *= means.mean() / np.maximum(means, 1e-3)
+    # color correction: calibrated flat-field (fixes lens shading + white balance), else gray-world fallback
+    if FLAT is not None and FLAT.shape == out.shape:
+        out *= FLAT
+    else:
+        means = out.reshape(-1, 3).mean(axis=0)
+        out *= means.mean() / np.maximum(means, 1e-3)
     # tone map: subtract black level, lift to a TARGET MEAN brightness (robust to a bright light in the
     # frame, unlike a min/max stretch which the lamp would anchor), then gamma to lift shadows.
     out = np.clip(out - np.percentile(out, 1), 0, None)
     out *= 95.0 / max(out.mean(), 1.0)                     # target mean brightness ~95
     out = 255.0 * np.clip(out / 255.0, 0, 1) ** 0.7        # gamma 0.7 lifts midtones/shadows
     return np.clip(out, 0, 255).astype(np.uint8)
+
+def calibrate(cam, exposure, gain, n=40):
+    """Flat-field color calibration: aim at a UNIFORM white/gray surface; capture a reference and
+    derive a per-pixel per-channel gain that corrects lens shading + white balance. Saved to PROFILE."""
+    import time
+    setup_pipeline(cam, exposure, gain)
+    print(f"CALIBRATION: fill the frame with a UNIFORM white/gray surface. Capturing {n} frames...", flush=True)
+    subprocess.run(["pkill", "-9", "-f", "v4l2-ctl"], check=False); time.sleep(1)
+    tmp = "/dev/shm/q6a_cal.raw"
+    subprocess.run(["v4l2-ctl", "-d", "/dev/video0",
+                    "--set-fmt-video=width=1456,height=1088,pixelformat=pBAA",
+                    "--stream-mmap", f"--stream-count={n}", f"--stream-to={tmp}"], check=True)
+    acc = np.zeros((H, W, 3), np.float64); cnt = 0
+    with open(tmp, "rb") as f:
+        for _ in range(n):
+            b = f.read(FRAME)
+            if len(b) < FRAME: break
+            acc += demosaic_bggr(unpack_raw10(b)); cnt += 1
+    ff = acc / max(cnt, 1)
+    # lens shading is low-frequency -> store a small smooth gain map (upscaled at load); tiny + committable
+    small = np.stack([np.asarray(Image.fromarray(ff[..., c].astype("float32")).resize((48, 36), Image.BILINEAR))
+                      for c in range(3)], axis=2)          # (36,48,3) smooth shading
+    gain = small.mean() / np.maximum(small, 1.0)           # applying this maps the flat-field -> neutral gray
+    np.savez(PROFILE, gain=gain.astype(np.float32))
+    print(f"saved color profile ({cnt} frames) to {PROFILE}", flush=True)
 
 def draw_overlay(rgb, dets=None):
     """Hook for YOLO overlay — dets: list of (x1,y1,x2,y2,label,conf) in rgb pixel coords.
@@ -205,7 +247,12 @@ if __name__ == "__main__":
     ap.add_argument("--fast", action="store_true", help="half-res debayer (faster, softer); default is full-res")
     ap.add_argument("--exposure", type=int, default=6000, help="sensor exposure (lines); higher=brighter+more motion blur")
     ap.add_argument("--gain", type=int, default=200, help="analogue gain 0..480 (0.1dB); higher=brighter+noisier")
+    ap.add_argument("--calibrate", action="store_true", help="capture a flat-field color profile (aim at a white/gray surface)")
     args = ap.parse_args()
+    if args.calibrate:
+        calibrate(args.cam, args.exposure, args.gain)
+        sys.exit(0)
+    load_profile()
     print("start: setting up pipeline...", flush=True)
     rdi = setup_pipeline(args.cam, args.exposure, args.gain)
     print(f"pipeline ready ({rdi}); starting capture + server", flush=True)
