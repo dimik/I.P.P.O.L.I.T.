@@ -116,18 +116,21 @@ def process(buf, full):
     with State.lock:
         State.jpeg = bio.getvalue()
 
-def capture_loop(rdi, full, batch=200):
+def capture_loop(rdi, full, batch=300):
     """Smooth continuous capture. v4l2-ctl --stream-count=0-to-pipe HANGS this CAMSS driver, and a
     capture-then-process batch stutters (freeze during capture). Instead: run a large finite batch
     writing to a tmpfs file while we *tail* it, always seeking to the LATEST complete frame (dropping
     any we can't keep up with -> low latency, no stutter). Brief hiccup only every ~batch frames."""
     import time, os
     tmp = "/dev/shm/q6a_cap.raw"
+    subprocess.run(["pkill", "-9", "-f", "v4l2-ctl"], check=False)  # clear orphans once at startup
     while True:
         if State.clients == 0:                 # no viewer -> stop capturing (camera + CPU idle)
             State.jpeg = None
+            subprocess.run(["pkill", "-9", "-f", "v4l2-ctl"], check=False)
             State.wake.wait(); State.wake.clear()
             continue
+        proc = None
         try:
             open(tmp, "wb").close()             # truncate before the new batch
             proc = subprocess.Popen(
@@ -135,26 +138,31 @@ def capture_loop(rdi, full, batch=200):
                  "--set-fmt-video=width=1456,height=1088,pixelformat=pBAA",
                  "--stream-mmap", f"--stream-count={batch}", f"--stream-to={tmp}"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            f = open(tmp, "rb"); last = 0
+            f = open(tmp, "rb"); last = 0; last_sz = -1; grew = time.time()
             while State.clients > 0:
-                n = os.path.getsize(tmp) // FRAME
-                if n > last:                    # new frame available -> jump to the freshest one
+                sz = os.path.getsize(tmp)
+                if sz != last_sz:
+                    last_sz = sz; grew = time.time()
+                n = sz // FRAME
+                if n > last:                    # new frame -> jump to the freshest one
                     f.seek((n - 1) * FRAME)
                     buf = f.read(FRAME)
                     if len(buf) == FRAME:
                         process(buf, full); last = n
                 elif proc.poll() is not None:   # batch finished -> restart
                     break
+                elif time.time() - grew > 2.5:  # capture stalled -> kill + restart
+                    break
                 else:
                     time.sleep(0.01)
             f.close()
-            if proc.poll() is None:
-                proc.terminate()
-                try: proc.wait(timeout=3)
-                except Exception: proc.kill()
         except Exception as e:
-            print("capture error:", e, flush=True)
-            time.sleep(1)
+            print("capture error:", e, flush=True); time.sleep(1)
+        finally:
+            if proc and proc.poll() is None:
+                proc.terminate()
+                try: proc.wait(timeout=2)
+                except Exception: proc.kill()
 
 PAGE = (b"<!doctype html><html><head><title>Q6A IMX296</title>"
         b"<style>body{margin:0;background:#111}img{width:100vw;height:100vh;object-fit:contain}</style>"
