@@ -54,3 +54,12 @@ Graph **`ar128_cl4096_1_of_1`** — chunked prefill (128-token chunk, 4096 conte
 Feed input_ids + KV + RoPE cos/sin + causal mask through the graph; ring-manage the **ufp8** KV cache across
 128-token prefill chunks, then autoregressive decode; tokenize with the bundle's `tokenizer.json` (BPE);
 sample logits. This is the multi-week part Genie otherwise does for us.
+
+## Genie perf API — tested, no adaptive-polling shortcut (2026-07-04)
+QAIRT's high-level LLM runtime IS Genie (built on QNN); "using QAIRT" for LLM = using Genie, which we
+already run. Genie's headers expose only: `GenieDialog_setPerformancePolicy` (DCVS modes
+BURST/SUSTAINED_HIGH_PERFORMANCE/…/POWER_SAVER) and the config's `poll:true/false`. **No adaptive polling.**
+Tested `setPerformancePolicy` at runtime (rc=0 for all): poll:false = 9.5 chunks/s; SUSTAINED_HIGH_PERF /
+BURST / HIGH_PERFORMANCE = 9.1–9.2 (no gain — config already burst; the 9.6-vs-12 gap is the RPC-polling
+axis, which DCVS doesn't affect). **Conclusion: adaptive polling is reachable ONLY via the QNN-direct
+resident-KV runtime (Phase 3 core); Genie/QAIRT offers no shortcut.** `perfpolicy_test.py` added.
