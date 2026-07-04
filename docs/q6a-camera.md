@@ -100,3 +100,47 @@ v4l2-ctl -d /dev/video1 --set-fmt-video=width=1456,height=1088,pixelformat=pBAA 
 Both cameras can run at once (CAM2→csiphy2→csid0→rdi0→video0, CAM3→csiphy3→csid1→rdi1→video1) — the CSIPHY,
 CSID, and RDI resources are distinct. (CAM3 overlay committed + offline-validated; not yet live-captured — the
 CSIPHY/csid/rdi numbers above are the expected mapping, confirm with `media-ctl -p` after enabling.)
+
+---
+
+## Color pipeline (`q6a_camstream.py`)
+
+The IMX296 here is a **color BGGR Bayer** sensor (the two green Bayer phases match each other and read
+~1.6× red/blue — that is the colour-filter array + sensor QE, not a defect). Getting neutral colour is
+**deterministic**, not per-frame guessing:
+
+- **Black level 56**, then **fixed raw white-balance gains R×1.60 / B×1.52 / G×1.0**, applied at the raw
+  Bayer level *before* demosaic. Measured from raw phase statistics; scene-independent. This alone moves
+  the centre from R/G 0.61 (green) to ~1.04 (neutral). These live as constants in `q6a_camstream.py`.
+- Residual **radial magenta-centre / green-edge** is genuine lens shading. `--calibrate` (aim at a
+  uniform, evenly-lit grey/white surface) fits a **smooth quadratic, green-relative** gain map (green
+  untouched → no vignette/noise amplification), saved to `imx296_wb.npz` and applied at load.
+- **Do not** reintroduce per-frame gray-world or a raw per-pixel flat-field — both are fragile and were
+  explicitly rejected. The fixed WB + optional smooth shading map is the whole story.
+
+Calibrate: `./view_q6a_cam.sh calibrate 2` (grey card) → writes/commits `imx296_wb.npz`.
+
+## On-device YOLO detection (`q6a_yolo.py` + `build_yolo.sh`)
+
+COCO object detection on the **Hexagon v68 NPU**, ~21 ms/inference, drawn as an overlay on the stream
+(`detector_loop`, runs only while a viewer is connected; coexists with the `q6a-llmd` LLM daemon — two
+HTP contexts are fine). `--no-yolo` disables it.
+
+**The version maze (why it is not one `pip`/export step):**
+- Qualcomm **AI Hub only builds QAIRT 2.45/2.46/2.47**. The Q6A runtime + `qai_appbuilder` are **2.42**
+  (upgrading would disturb the working Genie stack; `pip` `qai_appbuilder` caps at 2.40). A 2.45 DLC or
+  context binary **will not load on 2.42** (`Failed to create dlc handle … code 1002`).
+- **Fix:** export a **w8a16 QDQ ONNX** from AI Hub, then convert **ONNX → 2.42 DLC** ourselves with the
+  x86 `qairt-converter` in `~/qairt-x86` (2.42) on the Odyssey. The **converter does *not* need AVX2**
+  (unlike `qairt-quantizer`, which SIGILLs on the J4125), and it preserves the QDQ encodings → a
+  quantized 2.42 DLC. Then `qnn-context-binary-generator` on the Q6A builds the **v68 context binary**.
+- **YOLOv11 does not work on v68/2.42:** its C2PSA attention `MatMul` requires HTP arch **≥73** (`has
+  incorrect Value 68, expected >= 73`) — the same "v68 is old" wall as the 7B LLM. **Use YOLOv8** (no
+  attention block → composes cleanly).
+- **Model I/O (qai-hub YOLO):** input `image` **NCHW [1,3,640,640], values [0,1]**, **bottom-right
+  letterbox** (centered padding roughly halves the scores). Outputs `scores[8400]`, `class_idx[8400]`,
+  `boxes[8400,4]` (xyxy in 640-space). `qai_appbuilder` does float I/O — feed `[0,1]` floats, it
+  quantises the input and dequantises the outputs. Post-process = threshold (~0.30) + NMS + unletterbox.
+
+Rebuild the model end-to-end: `./build_yolo.sh yolov8_det` (Odyssey). Turnkey deploy of the prebuilt
+`models/yolov8_det.bin` happens automatically via `./view_q6a_cam.sh`.
