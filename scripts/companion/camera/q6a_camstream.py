@@ -52,26 +52,49 @@ def unpack_raw10(buf):
     px = hi | ((lo[:, :, None] >> (2 * np.arange(4))) & 3)
     return px.reshape(H, W)                      # 10-bit values 0..1023
 
-def debayer(px, full):
-    """BGGR Bayer -> RGB uint8 with a per-frame contrast stretch."""
+def _smooth(v, win):
+    """Low-pass a (N,3) brightness profile along axis 0 with a box filter (for destriping)."""
+    k = np.ones(win) / win
+    return np.stack([np.convolve(v[:, c], k, mode="same") for c in range(3)], axis=1)
+
+def _conv3(a, k):
+    """3x3 convolution via edge-padded shifted adds (no scipy)."""
+    p = np.pad(a, 1, mode="edge"); o = np.zeros_like(a)
+    for dy in range(3):
+        for dx in range(3):
+            if k[dy, dx]:
+                o += k[dy, dx] * p[dy:dy + a.shape[0], dx:dx + a.shape[1]]
+    return o
+
+_KG = np.array([[0, .25, 0], [.25, 0, .25], [0, .25, 0]])          # 4-neighbour G
+_KRB = np.array([[.25, .5, .25], [.5, 1, .5], [.25, .5, .25]])     # bilinear R/B upsample
+
+def demosaic_bggr(px):
+    """Full-resolution bilinear demosaic of a BGGR Bayer plane -> (H,W,3) float."""
+    px = px.astype(np.float32)
+    R = np.zeros_like(px); G = np.zeros_like(px); B = np.zeros_like(px)
+    B[0::2, 0::2] = px[0::2, 0::2]
+    G[0::2, 1::2] = px[0::2, 1::2]; G[1::2, 0::2] = px[1::2, 0::2]
+    R[1::2, 1::2] = px[1::2, 1::2]
+    G = np.where(G > 0, G, _conv3(G, _KG))     # interpolate G only at R/B sites
+    R = _conv3(R, _KRB); B = _conv3(B, _KRB)   # bilinear-upsample the quarter-density R/B
+    return np.dstack([R, G, B])
+
+def debayer(px, full=True):
+    """BGGR Bayer -> full-res RGB uint8: demosaic -> destripe -> white balance -> contrast stretch."""
     if full:
-        img = (px >> 2).astype(np.uint8)         # quick 10->8; simple bilinear-ish via slicing
-        rgb = np.empty((H, W, 3), np.uint8)
-        rgb[..., 2] = img; rgb[..., 1] = img; rgb[..., 0] = img  # placeholder gray (full debayer TODO)
-        out = rgb
-    else:  # fast 2x2 super-pixel: BGGR -> half-res RGB
+        out = demosaic_bggr(px)                                  # sharp 1456x1088
+    else:  # fast half-res super-pixel (fallback)
         b = px[0::2, 0::2]; g = (px[0::2, 1::2] + px[1::2, 0::2]) // 2; r = px[1::2, 1::2]
         out = np.dstack([r, g, b]).astype(np.float32)
-    # destripe both axes: remove per-row (horizontal) AND per-column (vertical) fixed-pattern offsets.
-    g = np.median(out, axis=(0, 1), keepdims=True)
-    out -= np.median(out, axis=1, keepdims=True) - g   # horizontal-line FPN (per-row offset)
-    out -= np.median(out, axis=0, keepdims=True) - g   # vertical-line FPN (per-column offset)
+    # destripe: subtract the HIGH-FREQUENCY part of the per-column and per-row brightness profiles
+    col = out.mean(axis=0); out -= (col - _smooth(col, 41))[None, :, :]   # vertical stripes
+    row = out.mean(axis=1); out -= (row - _smooth(row, 41))[:, None, :]   # horizontal stripes
     out = np.clip(out, 0, None)
-    # gray-world white balance: scale each channel to a common mean so a neutral surface reads gray.
-    # (A per-channel *stretch* only equalizes endpoints, not the mean -> green midtones stayed dominant.)
+    # gray-world white balance: scale each channel to a common mean so a neutral surface reads gray
     means = out.reshape(-1, 3).mean(axis=0)
     out *= means.mean() / np.maximum(means, 1e-3)
-    # global contrast stretch for exposure/display
+    # global contrast stretch for display
     lo, hi = np.percentile(out, 1), np.percentile(out, 99)
     out = np.clip((out - lo) * (255.0 / max(hi - lo, 1)), 0, 255)
     return out.astype(np.uint8)
@@ -93,28 +116,42 @@ def process(buf, full):
     with State.lock:
         State.jpeg = bio.getvalue()
 
-def capture_loop(rdi, full, batch=16):
-    """v4l2-ctl --stream-count=0 (continuous-to-pipe) HANGS on this CAMSS driver, but bounded
-    count=N-to-file works. So capture batches to tmpfs and process them, in a loop."""
+def capture_loop(rdi, full, batch=200):
+    """Smooth continuous capture. v4l2-ctl --stream-count=0-to-pipe HANGS this CAMSS driver, and a
+    capture-then-process batch stutters (freeze during capture). Instead: run a large finite batch
+    writing to a tmpfs file while we *tail* it, always seeking to the LATEST complete frame (dropping
+    any we can't keep up with -> low latency, no stutter). Brief hiccup only every ~batch frames."""
+    import time, os
     tmp = "/dev/shm/q6a_cap.raw"
-    import time
     while True:
         if State.clients == 0:                 # no viewer -> stop capturing (camera + CPU idle)
             State.jpeg = None
             State.wake.wait(); State.wake.clear()
             continue
         try:
-            subprocess.run(
+            open(tmp, "wb").close()             # truncate before the new batch
+            proc = subprocess.Popen(
                 ["v4l2-ctl", "-d", "/dev/video0",
                  "--set-fmt-video=width=1456,height=1088,pixelformat=pBAA",
                  "--stream-mmap", f"--stream-count={batch}", f"--stream-to={tmp}"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
-            with open(tmp, "rb") as f:
-                while State.clients > 0:        # abort the batch early if all viewers left
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            f = open(tmp, "rb"); last = 0
+            while State.clients > 0:
+                n = os.path.getsize(tmp) // FRAME
+                if n > last:                    # new frame available -> jump to the freshest one
+                    f.seek((n - 1) * FRAME)
                     buf = f.read(FRAME)
-                    if len(buf) < FRAME:
-                        break
-                    process(buf, full)
+                    if len(buf) == FRAME:
+                        process(buf, full); last = n
+                elif proc.poll() is not None:   # batch finished -> restart
+                    break
+                else:
+                    time.sleep(0.01)
+            f.close()
+            if proc.poll() is None:
+                proc.terminate()
+                try: proc.wait(timeout=3)
+                except Exception: proc.kill()
         except Exception as e:
             print("capture error:", e, flush=True)
             time.sleep(1)
@@ -155,13 +192,13 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--cam", type=int, default=2, choices=(2, 3))
     ap.add_argument("--port", type=int, default=8092)
-    ap.add_argument("--full", action="store_true")
-    ap.add_argument("--exposure", type=int, default=8000, help="sensor exposure (lines); higher=brighter")
-    ap.add_argument("--gain", type=int, default=120, help="analogue gain 0..480 (0.1dB); higher=brighter+noisier")
+    ap.add_argument("--fast", action="store_true", help="half-res debayer (faster, softer); default is full-res")
+    ap.add_argument("--exposure", type=int, default=3000, help="sensor exposure (lines); higher=brighter+more motion blur")
+    ap.add_argument("--gain", type=int, default=100, help="analogue gain 0..480 (0.1dB); higher=brighter+noisier")
     args = ap.parse_args()
     print("start: setting up pipeline...", flush=True)
     rdi = setup_pipeline(args.cam, args.exposure, args.gain)
     print(f"pipeline ready ({rdi}); starting capture + server", flush=True)
-    threading.Thread(target=capture_loop, args=(rdi, args.full), daemon=True).start()
+    threading.Thread(target=capture_loop, args=(rdi, not args.fast), daemon=True).start()
     print(f"MJPEG stream on http://0.0.0.0:{args.port}/  (cam{args.cam})", flush=True)
     ThreadingHTTPServer(("0.0.0.0", args.port), Handler).serve_forever()
