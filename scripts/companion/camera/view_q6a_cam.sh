@@ -25,8 +25,11 @@ if [ "${1:-}" = calibrate ]; then
 fi
 
 CAM="${1:-2}"
-echo "== ensure streamer script + color profile are on the Q6A =="
+echo "== ensure streamer + detector + model + color profile are on the Q6A =="
 scp -q "$REPO_DIR/q6a_camstream.py" "$Q6A:~/q6a_camstream.py"
+scp -q "$REPO_DIR/q6a_yolo.py" "$Q6A:~/q6a_yolo.py"
+[ -f "$REPO_DIR/models/yolov8_det.bin" ] && scp -q "$REPO_DIR/models/yolov8_det.bin" "$Q6A:~/yolov8_det.bin" 2>/dev/null || true
+[ -f "$REPO_DIR/models/coco_labels.txt" ] && scp -q "$REPO_DIR/models/coco_labels.txt" "$Q6A:~/coco_labels.txt" 2>/dev/null || true
 [ -f "$REPO_DIR/imx296_wb.npz" ] && scp -q "$REPO_DIR/imx296_wb.npz" "$Q6A:~/imx296_wb.npz" 2>/dev/null || true
 
 echo "== start streamer on the Q6A (detached; harmless if already running) =="

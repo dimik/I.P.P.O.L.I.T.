@@ -15,7 +15,7 @@ import os
 import numpy as np
 from PIL import Image
 
-MODEL_BIN = os.path.expanduser("~/yolov11_det.bin")     # context binary (built on-device)
+MODEL_BIN = os.path.expanduser("~/yolov8_det.bin")      # context binary (built on-device, v68)
 LABELS_TXT = os.path.expanduser("~/coco_labels.txt")
 IN = 640                                                # model input size
 
@@ -42,7 +42,7 @@ def _nms(boxes, scores, iou_thr):
 
 
 class YoloDetector:
-    def __init__(self, model=MODEL_BIN, labels=LABELS_TXT, conf=0.35, iou=0.45):
+    def __init__(self, model=MODEL_BIN, labels=LABELS_TXT, conf=0.30, iou=0.45):
         from qai_appbuilder import QNNContext, QNNConfig, Runtime, LogLevel, ProfilingLevel
         QNNConfig.Config(Runtime.HTP, LogLevel.WARN, ProfilingLevel.OFF)  # bundled 2.42 v68 backend
         self.ctx = QNNContext("yolov11_det", model)
@@ -56,15 +56,15 @@ class YoloDetector:
             self.onames = None
 
     def _letterbox(self, rgb):
-        """Resize keeping aspect ratio, pad to IN x IN. Returns (img, scale, off_x, off_y)."""
+        """Resize keeping aspect ratio, pad bottom-right to IN x IN (qai-hub YOLO convention -> the
+        model scores much higher this way than with centered padding). Returns (img, scale, 0, 0)."""
         h, w = rgb.shape[:2]
         s = min(IN / w, IN / h)
         nw, nh = int(round(w * s)), int(round(h * s))
         im = np.asarray(Image.fromarray(rgb).resize((nw, nh), Image.BILINEAR))
         pad = np.full((IN, IN, 3), 114, np.uint8)
-        ox, oy = (IN - nw) // 2, (IN - nh) // 2
-        pad[oy:oy + nh, ox:ox + nw] = im
-        return pad, s, ox, oy
+        pad[:nh, :nw] = im
+        return pad, s, 0, 0
 
     def _map_outputs(self, out):
         """Return (boxes(N,4), scores(N,), class_idx(N,)) regardless of graph output order."""
@@ -88,7 +88,8 @@ class YoloDetector:
     def infer(self, rgb):
         """rgb: (H,W,3) uint8. Returns list of (x1,y1,x2,y2,label,conf) in source-frame pixels."""
         lb, s, ox, oy = self._letterbox(rgb)
-        x = np.ascontiguousarray(lb.astype(np.float32) / 255.0).reshape(1, IN, IN, 3)
+        # model input is NCHW [1,3,640,640], values [0,1]; appbuilder quantises float->uint16 for us
+        x = np.ascontiguousarray((lb.astype(np.float32) / 255.0).transpose(2, 0, 1)).reshape(1, 3, IN, IN)
         out = self.ctx.Inference([x])
         boxes, scores, cls = self._map_outputs(out)
         if boxes is None or scores is None or cls is None:
