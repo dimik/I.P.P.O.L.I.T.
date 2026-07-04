@@ -97,3 +97,68 @@ The QAIRT SDK ships the **full Genie source** at `examples/Genie/Genie/` (CMake 
 swap it into the working `q6a-llmd` daemon (config poll:true) → Genie's proven resident-KV decode +
 adaptive polling, no reimplementation. (Note: the earlier qai_appbuilder QNN-direct + MemHandle path
 is moot for this goal — the fix lives in Genie's threadpool, and Genie is buildable.)
+
+## DONE (2026-07-04): adaptive polling built from source and DEPLOYED to q6a-llmd
+Built `libGenie.so` from the SDK source, patched the threadpool for adaptive spinning, and deployed it
+into the live daemon. **The full win is achieved and running.** Exact patched files saved under
+`genie-build/` (threadpool.cpp, threadpool.hpp, Genie-CMakeLists.txt, q6a-llmd-adaptive.conf).
+
+### The adaptive patch (final form — time-based, in `threadpool.cpp::loop()`)
+```cpp
+auto _last_work = std::chrono::steady_clock::now();      // before the while loop
+// ... after dispatching a job j(): _last_work = std::chrono::steady_clock::now();
+// no-jobs branch:
+if (_poll && (std::chrono::steady_clock::now() - _last_work) < std::chrono::milliseconds(100)) {
+  lock.unlock(); __cpu_relax();                          // spin only within 100ms of last work
+} else {
+  _mutex_condition.wait(lock); lock.unlock();            // idle >100ms → block (cool)
+  _last_work = std::chrono::steady_clock::now();
+}
+```
+Requires `#include <chrono>` (added after the threadpool.hpp include). `enqueue()` already
+`notify_one()`s unconditionally under the queue mutex, so the block/wake is race-free — a job pushed
+during the spin→block transition is seen on the next `!_jobs.empty()` check.
+
+### Building it (all Windows-port hurdles resolved in `Genie-CMakeLists.txt`)
+- Toolchain: rustup cargo ≥1.80 (apt cargo 1.75 too old for rayon-core); keep Cargo.lock v4.
+- CMake patches: `TOKENIZERS_RUST_TARGET`/`TARGET_ARCH` → `aarch64-unknown-linux-gnu`;
+  `tokenizers_capi.lib`→`libtokenizers_capi.a`; `GENIE_API=__declspec(dllexport)`→ empty; EXCLUDE
+  `windows/DynamicLoading.cpp` (not linux); `STATIC_LIBS_FOR_RUST` → `gcc_s;util;rt;pthread;m;dl;<abs>/libonig.a`.
+- **CRITICAL — optimization:** the SDK example CMake sets NO build type → defaults to `-O0`. Configure
+  with `-DCMAKE_BUILD_TYPE=Release` (→ `-O3 -DNDEBUG`). At `-O0` decode ran ~8.3; at `-O3` it matches
+  the prebuilt bundle. Build: `cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j8`.
+
+### Definitive benchmark — there was NEVER a throughput regression
+The earlier "~12 tok/s" was a stale/optimistic reading; the real reproducible rate for this Llama-3.2-1B
+on the Q6A (Hexagon v68) is ~9.4–9.8 tok/s regardless of build or poll mode. Apples-to-apples
+(`genie-t2t-run --profile`, poll:true, identical prompt):
+
+| Build | decode-rate | idle CPU |
+|---|---|---|
+| Bundle 2.40 (prebuilt) | 9.38 tok/s | 2.55 cores 🔥 (~90 °C busy-spin) |
+| **Our 2.42 `-O3` + adaptive** | **9.81 tok/s** | **0.00 cores** ❄️ |
+
+Our from-source build slightly *beats* the bundle AND idles cool. Adaptive polling delivers poll:true's
+spin-during-active-decode behavior with zero idle burn.
+
+### Deployment into q6a-llmd
+- Copied our `build/lib/libGenie.so` (2.42, `-O3`, adaptive) over the daemon's; set config
+  `htp-model-config-llama32-1b-gqa.json` → `"poll": true`.
+- systemd drop-in `q6a-llmd.service.d/adaptive.conf` sets the daemon's lib env to the **proven 2.42 combo**:
+  `LD_LIBRARY_PATH=<Genie>/build/lib:<SDK2.42>/lib/aarch64-oe-linux-gcc11.2`,
+  `ADSP_LIBRARY_PATH=<SDK2.42>/lib/hexagon-v68/unsigned`. (Our 2.42 libGenie needs 2.42 QnnSystem — the
+  2.40 QNN libs still in `~/llama-1b` must NOT be first in LD, or you get `getQnnSystemInterface FAILED`.)
+- Verified: `model loaded on NPU; ready`; idle **0.000 cores**; end-to-end query
+  "Name three primary colors." → "Red, blue, and yellow." in 1.0s.
+
+### Two operational gotchas (cost real time — remember them)
+1. **Wedged cdsp session:** rapidly restarting the daemon while a prior instance held the DSP left an
+   orphaned fastrpc session on domain 3 (`Create From Binary List Async ... err 5005`,
+   `remote_munmap64 failed`, `reverse module apps_mem already found refs 2`). It survives `pkill -9`;
+   even standalone `genie-t2t-run` then hangs at context creation. **Fix = reboot the Q6A** (clears cdsp);
+   the daemon comes back healthy on boot. Avoid restart storms — always `stop` + confirm no NPU client
+   before the next start.
+2. **Daemon socket protocol:** `q6a_llmd.py handle()` reads the prompt **until the client half-closes**
+   (`recv` loop until EOF). A test client MUST `s.shutdown(socket.SHUT_WR)` after `sendall` or the daemon
+   blocks forever in `recv` and the query never runs. (Agent harness prefix `\x01RAW\x01` = pre-formatted
+   prompt, else it wraps in the Llama-3 chat TEMPLATE.)
