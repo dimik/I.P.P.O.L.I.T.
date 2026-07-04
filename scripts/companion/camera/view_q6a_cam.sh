@@ -12,13 +12,14 @@ stop_streamer() { ssh "$Q6A" "p=\$(ss -ltnp 2>/dev/null|grep ':$PORT '|grep -oP 
 if [ "${1:-}" = calibrate ]; then
     CAM="${2:-2}"
     scp -q "$REPO_DIR/q6a_camstream.py" "$Q6A:~/q6a_camstream.py"
-    echo ">>> Aim the camera at a UNIFORM white/gray surface (white wall/paper), filling the frame,"
-    echo ">>> under the SAME lighting you'll use. This calibrates lens-shading + white balance."
+    echo ">>> Aim at a UNIFORM, EVENLY-LIT white/grey surface filling the whole frame (a blank wall or"
+    echo ">>> a sheet of paper). Avoid shadows, glare and light pools; slightly DEFOCUS to blur texture."
+    echo ">>> This measures white balance + the radial colour-shading map (magenta-centre / green-edge)."
     read -r -p "Press Enter when ready... "
     stop_streamer
     ssh "$Q6A" "python3 ~/q6a_camstream.py --calibrate --cam $CAM"
     echo "== color profile saved. copying it into the repo (shared) =="
-    scp -q "$Q6A:~/imx296_flatfield.npz" "$REPO_DIR/imx296_flatfield.npz" 2>/dev/null || true
+    scp -q "$Q6A:~/imx296_wb.npz" "$REPO_DIR/imx296_wb.npz" 2>/dev/null || true
     echo "Done. Now run: ./view_q6a_cam.sh $CAM"
     exit 0
 fi
@@ -26,7 +27,7 @@ fi
 CAM="${1:-2}"
 echo "== ensure streamer script + color profile are on the Q6A =="
 scp -q "$REPO_DIR/q6a_camstream.py" "$Q6A:~/q6a_camstream.py"
-[ -f "$REPO_DIR/imx296_flatfield.npz" ] && scp -q "$REPO_DIR/imx296_flatfield.npz" "$Q6A:~/imx296_flatfield.npz" 2>/dev/null || true
+[ -f "$REPO_DIR/imx296_wb.npz" ] && scp -q "$REPO_DIR/imx296_wb.npz" "$Q6A:~/imx296_wb.npz" 2>/dev/null || true
 
 echo "== start streamer on the Q6A (detached; harmless if already running) =="
 ssh "$Q6A" "ss -ltn 2>/dev/null | grep -q ":$PORT " || \

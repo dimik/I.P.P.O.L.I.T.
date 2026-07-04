@@ -19,19 +19,29 @@ W, H = 1456, 1088
 STRIDE = 1824            # bytes/line for pBAA (1456*10/8=1820, padded to 1824)
 FRAME = STRIDE * H       # 1,984,512 bytes/frame (v4l2 sizeimage)
 
-# Calibrated color profile (flat-field): a per-pixel per-channel gain map that corrects lens shading
-# (radial magenta->green) AND white balance. Created by --calibrate (point at a uniform white surface).
-PROFILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "imx296_flatfield.npz")
-FLAT = None
+# --- Color pipeline: deterministic, measured from raw Bayer statistics (NOT per-frame guessing) ---
+# A raw Bayer sensor needs black-level subtraction + fixed white-balance gains. On this IMX296 the two
+# green phases read ~1.6x red/blue (CFA + sensor QE peak in green) -> without WB everything looks green.
+# Measured from raw: black~56, R/G=B/G~0.62 globally and SCENE-INDEPENDENT, so a single fixed gain per
+# channel neutralises it everywhere (no fragile per-pixel flat-field). Re-derive on a grey card via
+# --calibrate; it writes the 4 numbers below to PROFILE, which load_profile() then uses to override.
+BLACK_LEVEL = 56.0
+WB_R, WB_G, WB_B = 1.60, 1.00, 1.52          # raw per-channel gains -> neutral grey (measured)
+SHADE = None                                  # optional (H,W,3) radial COLOR-shading gain (green-relative)
+PROFILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "imx296_wb.npz")
 def load_profile():
-    global FLAT
+    global BLACK_LEVEL, WB_R, WB_G, WB_B, SHADE
     if os.path.exists(PROFILE):
-        g = np.load(PROFILE)["gain"]                       # small (36,48,3) smooth gain map
-        FLAT = np.stack([np.asarray(Image.fromarray(g[..., c]).resize((W, H), Image.BILINEAR))
-                         for c in range(3)], axis=2).astype(np.float32)   # upscale to full res
-        print(f"loaded color profile -> {FLAT.shape} from {PROFILE}", flush=True)
+        z = np.load(PROFILE); BLACK_LEVEL = float(z["black"]); WB_R, WB_G, WB_B = (float(x) for x in z["wb"])
+        msg = f"loaded WB profile: black={BLACK_LEVEL:.0f} wb=({WB_R:.3f},{WB_G:.3f},{WB_B:.3f})"
+        if "shade" in z.files:                 # small green-relative gain grid -> upscale to full res
+            s = z["shade"]
+            SHADE = np.stack([np.asarray(Image.fromarray(s[..., c]).resize((W, H), Image.BILINEAR))
+                              for c in range(3)], axis=2).astype(np.float32)
+            msg += f" + shading map {s.shape[:2]}"
+        print(msg, flush=True)
     else:
-        print("no color profile — run with --calibrate (aim at a white/gray surface). Using gray-world fallback.", flush=True)
+        print(f"using default WB: black={BLACK_LEVEL:.0f} wb=({WB_R:.3f},{WB_G:.3f},{WB_B:.3f}) (no shading map)", flush=True)
 
 # --- CAMSS media pipeline: sensor -> csiphyN -> csidX -> vfe0_rdi0 -> /dev/video0 ---
 CAM_MAP = {2: ("msm_csiphy2", "msm_csid0"), 3: ("msm_csiphy3", "msm_csid1")}
@@ -95,22 +105,22 @@ def demosaic_bggr(px):
     return np.dstack([R, G, B])
 
 def debayer(px, full=True):
-    """BGGR Bayer -> full-res RGB uint8: demosaic -> destripe -> white balance -> contrast stretch."""
+    """BGGR Bayer -> full-res RGB uint8: black-level + raw WB -> demosaic -> destripe -> tone map."""
+    px = px.astype(np.float32) - BLACK_LEVEL
+    np.clip(px, 0, None, out=px)
+    px[1::2, 1::2] *= WB_R                    # R sites   (raw white balance, per Bayer position)
+    px[0::2, 0::2] *= WB_B                    # B sites   (G sites keep WB_G=1)
     if full:
         out = demosaic_bggr(px)                                  # sharp 1456x1088
     else:  # fast half-res super-pixel (fallback)
-        b = px[0::2, 0::2]; g = (px[0::2, 1::2] + px[1::2, 0::2]) // 2; r = px[1::2, 1::2]
+        b = px[0::2, 0::2]; g = (px[0::2, 1::2] + px[1::2, 0::2]) * 0.5; r = px[1::2, 1::2]
         out = np.dstack([r, g, b]).astype(np.float32)
+    if SHADE is not None and SHADE.shape == out.shape:
+        out *= SHADE                          # radial color-shading correction (magenta centre -> green edge)
     # destripe: subtract the HIGH-FREQUENCY part of the per-column and per-row brightness profiles
     col = out.mean(axis=0); out -= (col - _smooth(col, 41))[None, :, :]   # vertical stripes
     row = out.mean(axis=1); out -= (row - _smooth(row, 41))[:, None, :]   # horizontal stripes
     out = np.clip(out, 0, None)
-    # color correction: calibrated flat-field (fixes lens shading + white balance), else gray-world fallback
-    if FLAT is not None and FLAT.shape == out.shape:
-        out *= FLAT
-    else:
-        means = out.reshape(-1, 3).mean(axis=0)
-        out *= means.mean() / np.maximum(means, 1e-3)
     # tone map: subtract black level, lift to a TARGET MEAN brightness (robust to a bright light in the
     # frame, unlike a min/max stretch which the lamp would anchor), then gamma to lift shadows.
     out = np.clip(out - np.percentile(out, 1), 0, None)
@@ -119,29 +129,48 @@ def debayer(px, full=True):
     return np.clip(out, 0, 255).astype(np.uint8)
 
 def calibrate(cam, exposure, gain, n=40):
-    """Flat-field color calibration: aim at a UNIFORM white/gray surface; capture a reference and
-    derive a per-pixel per-channel gain that corrects lens shading + white balance. Saved to PROFILE."""
+    """White-balance calibration: aim at a UNIFORM grey/white surface; measure the raw black level and
+    per-channel WB gains that render it neutral. Saves 4 numbers to PROFILE (load_profile uses them)."""
     import time
     setup_pipeline(cam, exposure, gain)
-    print(f"CALIBRATION: fill the frame with a UNIFORM white/gray surface. Capturing {n} frames...", flush=True)
+    print(f"CALIBRATION: fill the frame with a UNIFORM grey/white surface. Capturing {n} frames...", flush=True)
     subprocess.run(["pkill", "-9", "-f", "v4l2-ctl"], check=False); time.sleep(1)
     tmp = "/dev/shm/q6a_cal.raw"
     subprocess.run(["v4l2-ctl", "-d", "/dev/video0",
                     "--set-fmt-video=width=1456,height=1088,pixelformat=pBAA",
                     "--stream-mmap", f"--stream-count={n}", f"--stream-to={tmp}"], check=True)
-    acc = np.zeros((H, W, 3), np.float64); cnt = 0
+    acc = np.zeros((H, W), np.float64); cnt = 0
     with open(tmp, "rb") as f:
         for _ in range(n):
             b = f.read(FRAME)
             if len(b) < FRAME: break
-            acc += demosaic_bggr(unpack_raw10(b)); cnt += 1
-    ff = acc / max(cnt, 1)
-    # lens shading is low-frequency -> store a small smooth gain map (upscaled at load); tiny + committable
-    small = np.stack([np.asarray(Image.fromarray(ff[..., c].astype("float32")).resize((48, 36), Image.BILINEAR))
-                      for c in range(3)], axis=2)          # (36,48,3) smooth shading
-    gain = small.mean() / np.maximum(small, 1.0)           # applying this maps the flat-field -> neutral gray
-    np.savez(PROFILE, gain=gain.astype(np.float32))
-    print(f"saved color profile ({cnt} frames) to {PROFILE}", flush=True)
+            acc += unpack_raw10(b); cnt += 1
+    px = acc / max(cnt, 1)                                  # averaged raw Bayer (low noise)
+    black = float(min(px[0::2, 0::2].min(), px[1::2, 1::2].min(), px[0::2, 1::2].min()))
+    Rm = (px[1::2, 1::2] - black).mean(); Bm = (px[0::2, 0::2] - black).mean()
+    Gm = ((px[0::2, 1::2] - black).mean() + (px[1::2, 0::2] - black).mean()) / 2
+    wb = np.array([Gm / max(Rm, 1e-3), 1.0, Gm / max(Bm, 1e-3)], np.float32)
+    # radial COLOR shading: WB-correct + demosaic the flat field, fit a smooth quadratic per channel
+    # (robust to local non-uniformity), then a GREEN-RELATIVE gain that flattens R/G,B/G across the field
+    # without touching luminance (green gain = 1 -> no vignette boost -> no corner-noise amplification).
+    q = np.clip(px - black, 0, None); q[1::2, 1::2] *= wb[0]; q[0::2, 0::2] *= wb[2]
+    flat = demosaic_bggr(q)                                 # (H,W,3) WB-corrected flat field
+    GX, GY = 32, 24
+    coarse = np.stack([np.asarray(Image.fromarray(flat[..., c]).resize((GX, GY), Image.BILINEAR))
+                       for c in range(3)], axis=2).astype(np.float64)     # (GY,GX,3) mean-pooled
+    xs = np.linspace(-1, 1, GX); ys = np.linspace(-1, 1, GY); X, Y = np.meshgrid(xs, ys)
+    A = np.stack([np.ones_like(X), X, Y, X * X, X * Y, Y * Y], axis=-1).reshape(-1, 6)  # quadratic basis
+    model = np.stack([(A @ np.linalg.lstsq(A, coarse[..., c].ravel(), rcond=None)[0]).reshape(GY, GX)
+                      for c in range(3)], axis=2)            # smooth per-channel surface
+    cy, cx = GY // 2, GX // 2
+    ratioR = (model[..., 0] / np.maximum(model[..., 1], 1e-3))    # R/G across field
+    ratioB = (model[..., 2] / np.maximum(model[..., 1], 1e-3))    # B/G across field
+    gR = np.clip(ratioR[cy, cx] / np.maximum(ratioR, 1e-3), 0.5, 2.0)   # gain to flatten R/G to centre
+    gB = np.clip(ratioB[cy, cx] / np.maximum(ratioB, 1e-3), 0.5, 2.0)
+    shade = np.stack([gR, np.ones_like(gR), gB], axis=2).astype(np.float32)  # green untouched
+    np.savez(PROFILE, black=np.float32(black), wb=wb, shade=shade)
+    print(f"saved profile ({cnt} frames): black={black:.0f} wb=({wb[0]:.3f},1.000,{wb[2]:.3f}) "
+          f"shade R[{gR.min():.2f}-{gR.max():.2f}] B[{gB.min():.2f}-{gB.max():.2f}] to {PROFILE}", flush=True)
 
 def draw_overlay(rgb, dets=None):
     """Hook for YOLO overlay — dets: list of (x1,y1,x2,y2,label,conf) in rgb pixel coords.
