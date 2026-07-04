@@ -38,11 +38,20 @@ graph orchestration, KV-cache management, sampling.
       - Pass **float** cos/sin/mask/KV; qai_appbuilder quantizes per the graph encodings. Output float.
       - Mask: `-100.0` masked / `0.0` keep; layout `[past(3968), current(128)]`, cols 3968+j causal.
       - KV feedback must remap **by name** (in-order ≠ out-order; out is value-before-key, seq layers).
-- [~] 3d decode loop (graphIndex=1): **first decode step works (33 outputs); the SECOND step FAILS**
-      with `Internal error: Dma execution failed on the skel side. result = 1100`. Cause: re-DMA'ing the
-      huge KV tensors (32 × ~2M elems) to the DSP every step. Passing `.copy()` did NOT help.
-      **FIX (next): use qai_appbuilder ShareMemory** — keep KV resident on the DSP and update in place,
-      instead of re-passing 67M-element float arrays per token. This is the standard LLM-decode approach.
+- [~] 3d decode loop (graphIndex=1): **first decode step works; the SECOND step FAILS** with
+      `Dma execution failed on the skel side result=1100` (during graph execution, DSP side).
+      **ROOT CAUSE (diagnosed 2026-07-04):** qai_appbuilder's `Inference` re-registers ALL 36 input + 33
+      output DMA buffers with the DSP **every call**; the 32 huge KV tensors exhaust the DSP DMA/mapping
+      capacity after ~2 calls. Ruled out: host OOM (6.3 GB free); data size / conversion (**native ufp8
+      mode = 4× less data, no float conversion → SAME error**); `.copy()`. Native prefill/decode step-1
+      both correct (" Paris", logits uint8, argmax works) — so it's purely the per-call DMA registration.
+      **The real fix = KV RESIDENT on the DSP** (register once, update in place, pass only the new token) —
+      exactly what Genie does internally. qai_appbuilder's "pass all I/O every call" API doesn't support
+      this. Options (all substantial): (a) qai_appbuilder `QNNShareMemory`+`QNNContextProc` (persistent ION
+      buffer — uncertain it keeps DSP registration resident; multi-process restructure); (b) patch
+      qai_appbuilder's buffer lifecycle to reuse/free DMA mappings; (c) **raw QNN with persistent
+      `Qnn_MemHandle` shared buffers for the KV** (the proper approach = reimplementing Genie's KV residency;
+      multi-week). See `native_gen.py` / `native_prefill.py` for the proven-correct native path.
 - [ ] 3e wrap as a socket daemon like q6a-llmd (QNN-direct + adaptive polling)
 - [ ] 3f measure: idle CPU (adaptive polling) + tok/s vs Genie's 9.6/12
 
