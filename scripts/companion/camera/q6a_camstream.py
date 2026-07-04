@@ -94,10 +94,12 @@ def debayer(px, full=True):
     # gray-world white balance: scale each channel to a common mean so a neutral surface reads gray
     means = out.reshape(-1, 3).mean(axis=0)
     out *= means.mean() / np.maximum(means, 1e-3)
-    # global contrast stretch for display
-    lo, hi = np.percentile(out, 1), np.percentile(out, 99)
-    out = np.clip((out - lo) * (255.0 / max(hi - lo, 1)), 0, 255)
-    return out.astype(np.uint8)
+    # tone map: subtract black level, lift to a TARGET MEAN brightness (robust to a bright light in the
+    # frame, unlike a min/max stretch which the lamp would anchor), then gamma to lift shadows.
+    out = np.clip(out - np.percentile(out, 1), 0, None)
+    out *= 95.0 / max(out.mean(), 1.0)                     # target mean brightness ~95
+    out = 255.0 * np.clip(out / 255.0, 0, 1) ** 0.7        # gamma 0.7 lifts midtones/shadows
+    return np.clip(out, 0, 255).astype(np.uint8)
 
 def draw_overlay(rgb, dets=None):
     """Hook for YOLO overlay — dets: list of (x1,y1,x2,y2,label,conf) in rgb pixel coords.
@@ -201,8 +203,8 @@ if __name__ == "__main__":
     ap.add_argument("--cam", type=int, default=2, choices=(2, 3))
     ap.add_argument("--port", type=int, default=8092)
     ap.add_argument("--fast", action="store_true", help="half-res debayer (faster, softer); default is full-res")
-    ap.add_argument("--exposure", type=int, default=3000, help="sensor exposure (lines); higher=brighter+more motion blur")
-    ap.add_argument("--gain", type=int, default=100, help="analogue gain 0..480 (0.1dB); higher=brighter+noisier")
+    ap.add_argument("--exposure", type=int, default=6000, help="sensor exposure (lines); higher=brighter+more motion blur")
+    ap.add_argument("--gain", type=int, default=200, help="analogue gain 0..480 (0.1dB); higher=brighter+noisier")
     args = ap.parse_args()
     print("start: setting up pipeline...", flush=True)
     rdi = setup_pipeline(args.cam, args.exposure, args.gain)
