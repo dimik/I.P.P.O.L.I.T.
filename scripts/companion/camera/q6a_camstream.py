@@ -172,22 +172,66 @@ def calibrate(cam, exposure, gain, n=40):
     print(f"saved profile ({cnt} frames): black={black:.0f} wb=({wb[0]:.3f},1.000,{wb[2]:.3f}) "
           f"shade R[{gR.min():.2f}-{gR.max():.2f}] B[{gB.min():.2f}-{gB.max():.2f}] to {PROFILE}", flush=True)
 
+from PIL import ImageDraw, ImageFont
+_FONT = ImageFont.load_default()
+# stable per-class-ish palette (indexed by hash of label) for box colors
+_PALETTE = [(255, 64, 64), (64, 200, 64), (64, 160, 255), (255, 200, 0), (255, 64, 255),
+            (0, 220, 220), (255, 128, 0), (160, 96, 255)]
+
 def draw_overlay(rgb, dets=None):
-    """Hook for YOLO overlay — dets: list of (x1,y1,x2,y2,label,conf) in rgb pixel coords.
-    Drawn with PIL later once the NPU detector feeds boxes. For now a no-op passthrough."""
-    return rgb
+    """Draw YOLO detections. dets: list of (x1,y1,x2,y2,label,conf) in rgb pixel coords."""
+    if not dets:
+        return rgb
+    im = Image.fromarray(rgb); d = ImageDraw.Draw(im)
+    for x1, y1, x2, y2, label, conf in dets:
+        col = _PALETTE[hash(label) % len(_PALETTE)]
+        d.rectangle([x1, y1, x2, y2], outline=col, width=3)
+        tag = f"{label} {conf:.2f}"
+        tw = d.textlength(tag, font=_FONT); th = 12
+        d.rectangle([x1, y1 - th - 2, x1 + tw + 4, y1], fill=col)
+        d.text((x1 + 2, y1 - th - 2), tag, fill=(0, 0, 0), font=_FONT)
+    return np.asarray(im)
 
 class State:
     jpeg = None
     lock = threading.Lock()
     clients = 0                 # active /stream viewers
     wake = threading.Event()    # signalled when a viewer connects
+    rgb = None                  # latest full-res RGB frame (for the detector to consume)
+    dets = []                   # latest YOLO detections (drawn onto every frame)
 
 def process(buf, full):
-    rgb = draw_overlay(debayer(unpack_raw10(buf), full))
+    rgb = debayer(unpack_raw10(buf), full)
+    with State.lock:
+        State.rgb = rgb; dets = State.dets
+    rgb = draw_overlay(rgb, dets)                       # draw_overlay returns a new array (PIL)
     bio = BytesIO(); Image.fromarray(rgb).save(bio, "JPEG", quality=80)
     with State.lock:
         State.jpeg = bio.getvalue()
+
+def detector_loop(interval=0.25):
+    """Run YOLO on the latest frame at ~1/interval fps when a viewer is connected. Optional: if the
+    NPU stack or model binary is missing, the detector stays disabled and the stream runs plain."""
+    import time
+    try:
+        from q6a_yolo import YoloDetector
+        det = YoloDetector()
+        print("YOLO detector loaded (NPU)", flush=True)
+    except Exception as e:
+        print(f"YOLO detector disabled: {e}", flush=True); return
+    while True:
+        if State.clients == 0 or State.rgb is None:
+            State.dets = []
+            State.wake.wait(0.5); continue
+        with State.lock:
+            rgb = State.rgb
+        try:
+            dets = det.infer(rgb)
+            with State.lock:
+                State.dets = dets
+        except Exception as e:
+            print("detect error:", e, flush=True); time.sleep(0.5)
+        time.sleep(interval)
 
 def capture_loop(rdi, full, batch=300):
     """Smooth continuous capture. v4l2-ctl --stream-count=0-to-pipe HANGS this CAMSS driver, and a
@@ -277,6 +321,7 @@ if __name__ == "__main__":
     ap.add_argument("--exposure", type=int, default=6000, help="sensor exposure (lines); higher=brighter+more motion blur")
     ap.add_argument("--gain", type=int, default=200, help="analogue gain 0..480 (0.1dB); higher=brighter+noisier")
     ap.add_argument("--calibrate", action="store_true", help="capture a flat-field color profile (aim at a white/gray surface)")
+    ap.add_argument("--no-yolo", action="store_true", help="disable the NPU YOLO detection overlay")
     args = ap.parse_args()
     if args.calibrate:
         calibrate(args.cam, args.exposure, args.gain)
@@ -286,5 +331,7 @@ if __name__ == "__main__":
     rdi = setup_pipeline(args.cam, args.exposure, args.gain)
     print(f"pipeline ready ({rdi}); starting capture + server", flush=True)
     threading.Thread(target=capture_loop, args=(rdi, not args.fast), daemon=True).start()
+    if not args.no_yolo:
+        threading.Thread(target=detector_loop, daemon=True).start()
     print(f"MJPEG stream on http://0.0.0.0:{args.port}/  (cam{args.cam})", flush=True)
     ThreadingHTTPServer(("0.0.0.0", args.port), Handler).serve_forever()
