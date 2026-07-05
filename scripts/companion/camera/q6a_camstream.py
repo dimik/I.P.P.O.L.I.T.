@@ -43,6 +43,12 @@ BLACK_RGB = None                              # per-channel black pedestal (R,G,
                                               # None -> use the single BLACK_LEVEL for all channels
 WB_R, WB_G, WB_B = 1.60, 1.00, 1.52          # raw per-channel gains -> neutral grey (AWB updates these at runtime)
 SHADE = None                                  # optional (H,W,3) radial colour-shading gain from --calibrate
+# How the calibrated shade map is post-processed before use -- LENS characteristics, set per-profile
+# ("shading" section). Defaults = pass the shade through unchanged (generic). imx296's fisheye needs taming.
+SHADE_CHROMA = 1.0                            # fraction of the per-channel COLOUR-shading kept (0 = luminance/vignetting only)
+SHADE_CHROMA_CLAMP = (0.0, 9.0)               # clamp the per-channel colour ratio (limits corner over-tint)
+SHADE_GAIN_CLAMP = (0.0, 9.0)                 # clamp the luminance (vignetting) gain (limits corner noise amplification)
+SHADE_SMOOTH = 0                              # box-blur radius on the shade grid (kills noisy per-cell corner spikes)
 GPU = None                                    # optional Adreno OpenCL ISP (q6a_gpu.GpuDemosaic)
 CAMERA_MODEL = "imx296"                        # profiles/<model>.json -> all sensor config (add a camera = add a file)
 CCM_CT = 3600                                  # colour temp (K) to interpolate the CCM to (indoor default)
@@ -101,6 +107,7 @@ def load_camera_profile(model):
     global W, H, STRIDE, FRAME, OUT_W, OUT_H, BAYER, RX, RY, BX, BY, MBUS_CODE, PIXFMT, ENTITY_MATCH
     global BLACK_LEVEL, WB_R, WB_G, WB_B, AE_TARGET, AE_MIN_EXP, AE_MAX_EXP, GAIN_MAX, GAIN_ANALOG_MAX, CCM_MATRICES, CCM_CT
     global AWB_RMIN, AWB_RMAX, AWB_BMIN, AWB_BMAX
+    global SHADE_CHROMA, SHADE_CHROMA_CLAMP, SHADE_GAIN_CLAMP, SHADE_SMOOTH
     path = os.path.join(PROFILES_DIR, f"{model}.json")
     if not os.path.exists(path):
         print(f"no camera profile {path}; using built-in defaults ({W}x{H} {BAYER})", flush=True); return False
@@ -122,6 +129,11 @@ def load_camera_profile(model):
     awb = p.get("awb", {})
     if "r_gain" in awb: AWB_RMIN, AWB_RMAX = (float(x) for x in awb["r_gain"])
     if "b_gain" in awb: AWB_BMIN, AWB_BMAX = (float(x) for x in awb["b_gain"])
+    sh = p.get("shading", {})              # lens shade-map post-processing (see load_profile)
+    SHADE_CHROMA = float(sh.get("chroma", SHADE_CHROMA))
+    if "chroma_clamp" in sh: SHADE_CHROMA_CLAMP = tuple(float(x) for x in sh["chroma_clamp"])
+    if "gain_clamp" in sh: SHADE_GAIN_CLAMP = tuple(float(x) for x in sh["gain_clamp"])
+    SHADE_SMOOTH = int(sh.get("smooth", SHADE_SMOOTH))
     ccm = p.get("ccm", {})
     if ccm.get("matrices"):
         CCM_MATRICES = sorted(((int(m["ct"]), list(m["ccm"])) for m in ccm["matrices"]), key=lambda e: e[0])
@@ -174,6 +186,20 @@ def _auto_scale_packed(buf):
     avg_wb = (WB_R + 2.0 * WB_G + WB_B) / 4.0
     return TARGET_MEAN / max(max(m, 0.0) * avg_wb, 1.0)
 PROFILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "imx296_wb.npz")
+def _process_shade(s):
+    """Apply the profile's shade-map post-processing (SHADE_* params) to the raw (h,w,3) calibrated grid.
+    Generic mechanism; the values are lens characteristics from profiles/<model>.json -> 'shading'."""
+    if SHADE_SMOOTH > 0:                    # box-blur the grid -> kill sharp noisy per-cell corner spikes
+        k = int(SHADE_SMOOTH); pad = np.pad(s, ((k, k), (k, k), (0, 0)), mode="edge"); acc = np.zeros_like(s)
+        for dy in range(-k, k + 1):
+            for dx in range(-k, k + 1):
+                acc += pad[k + dy:k + dy + s.shape[0], k + dx:k + dx + s.shape[1]]
+        s = acc / ((2 * k + 1) ** 2)
+    lum = s.mean(axis=2, keepdims=True)     # luminance (vignetting) x per-channel colour ratio
+    chroma = 1.0 + SHADE_CHROMA * (s / np.maximum(lum, 1e-3) - 1.0)   # keep this fraction of colour shading
+    chroma = np.clip(chroma, SHADE_CHROMA_CLAMP[0], SHADE_CHROMA_CLAMP[1])
+    return np.clip(lum, SHADE_GAIN_CLAMP[0], SHADE_GAIN_CLAMP[1]) * chroma
+
 def load_profile():
     global BLACK_LEVEL, BLACK_RGB, WB_R, WB_G, WB_B, SHADE
     if os.path.exists(PROFILE):
@@ -181,8 +207,13 @@ def load_profile():
         if "blk" in z.files:                   # per-channel black pedestal (dark-frame calibrated)
             BLACK_RGB = tuple(float(x) for x in z["blk"])
         msg = f"loaded WB profile: black={BLACK_LEVEL:.0f}" + (f" blk={tuple(round(x,1) for x in BLACK_RGB)}" if BLACK_RGB else "") + f" wb=({WB_R:.3f},{WB_G:.3f},{WB_B:.3f})"
-        if "shade" in z.files:                 # radial colour-shading gain grid (from --calibrate) -> full res
-            s = np.asarray(z["shade"], np.float32)
+        if "shade" in z.files:                 # radial shading gain grid (from --calibrate) -> full res
+            # Post-process the calibrated shade per the profile's "shading" section (all lens-specific tuning
+            # lives there, not here). A grey-card fit can OVER-correct at the extreme corners (diverges,
+            # amplifying dark/noisy corner pixels -> colour "trash"), so the profile can: smooth the grid
+            # (kill sharp per-cell spikes), attenuate the per-channel COLOUR part, and clamp both the colour
+            # ratio and the luminance (vignetting) gain. Defaults are no-ops -> a generic pass-through.
+            s = _process_shade(np.asarray(z["shade"], np.float32))
             SHADE = np.stack([np.asarray(Image.fromarray(s[..., c]).resize((W, H), Image.BILINEAR))
                               for c in range(3)], axis=2).astype(np.float32)
             msg += f" + shading map {z['shade'].shape[:2]}"

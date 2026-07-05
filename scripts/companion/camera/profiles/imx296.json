@@ -33,6 +33,14 @@
     "b_gain": [1.2, 4.2]
   },
 
+  "shading": {
+    "_comment": "Post-processing for the calibrated radial shade map (imx296_wb.npz -> 'shade'). This fisheye has heavy corner vignetting + colour shading; the grey-card fit over-corrects the dark noisy corners into blue/magenta 'trash'. Smooth the grid to kill per-cell spikes, keep 85% of the colour correction, and clamp both the colour ratio and the vignetting gain so no corner cell over-tints or over-amplifies. Omit this section for a generic pass-through.",
+    "smooth": 3,
+    "chroma": 0.85,
+    "chroma_clamp": [0.80, 1.25],
+    "gain_clamp": [0.6, 1.5]
+  },
+
   "ccm": {
     "_comment": "Lab-calibrated color-correction matrices from Raspberry Pi's IMX296 libcamera tuning (rpi.ccm, src/ipa/rpi/vc4/data/imx296.json). Interpolated to `ct` at load. Rows sum to ~1 (neutral-preserving).",
     "ct": 3600,
