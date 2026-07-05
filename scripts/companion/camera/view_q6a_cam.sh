@@ -67,9 +67,10 @@ ssh "$Q6A" "[ -f /etc/OpenCL/vendors/adreno.icd ] || (sudo mkdir -p /etc/OpenCL/
 # "start only if the port is free" logic silently kept a stale pre-calibration stream running -> made
 # calibration look like it did nothing (the running process never re-read the profile).
 stop_streamer
-# Clean standard ISP: demosaic(RGGB) + AWB + CCM + tonemap. (The long "colour cast" saga turned out to be a
-# red<->blue Bayer swap -- the profile said BGGR but the sensor delivers RGGB through this pipeline; fixing
-# that made all the compensation hacks unnecessary and they were removed.) --no-ccm / --no-awb to simplify.
+# Stable CPU-style ISP: demosaic(RGGB) + FIXED white balance + tonemap. AWB and CCM are OFF by default:
+# gray-world AWB slowly over-boosts R,B on a non-gray room -> the whole frame drifts magenta over minutes,
+# and the CCM crushes green toward magenta with high WB gains. Fixed WB is stable. (The 2-day colour saga
+# was a red<->blue Bayer swap -- profile said BGGR, sensor delivers RGGB.) Enable if wanted: --awb / --ccm.
 # PYOPENCL_NO_CACHE=1 + clear the cache: pyopencl's compiled-kernel cache was silently serving a STALE
 # binary across q6a_gpu.py edits (kernel changes had no effect until the cache was bypassed). Recompile
 # costs ~2-4 s at startup only. (The in-code os.environ set alone proved unreliable — set it here too.)

@@ -44,7 +44,9 @@ SHADE = None                                  # optional (H,W,3) radial colour-s
 GPU = None                                    # optional Adreno OpenCL ISP (q6a_gpu.GpuDemosaic)
 CAMERA_MODEL = "imx296"                        # profiles/<model>.json -> all sensor config (add a camera = add a file)
 CCM_CT = 3600                                  # colour temp (K) to interpolate the CCM to (indoor default)
-CCM_ON = True                                  # apply the ready-made color correction matrix (RPi IMX296 tuning)
+CCM_ON = False                                 # ready-made CCM (RPi IMX296 tuning), opt-in via --ccm. OFF by
+                                               # default: its aggressive green row crushes G toward magenta when
+                                               # WB gains are high, and it amplifies low-light chroma noise.
 DESTRIPE = False                              # optional FPN band removal; off by default
 BIN = False                                   # GPU digital 2x2 binning -> half-res, ~2x less noise + faster
 SENSOR_BIN = False                            # sensor 2x2 FD binning (charge-domain, cleaner): capture 728x544
@@ -59,9 +61,10 @@ AE_ON = True                                  # runtime sensor auto-exposure
 AE_TARGET = 70.0                              # target raw high-byte MEDIAN (robust to dark corners + bright window)
 AE_MIN_EXP = 30; AE_MAX_EXP = 3000            # exposure clamp (lines); VMAX fixed here -> ~32fps, no vblank churn; cap keeps fps >=~24 + out of the deep-noise regime
 # --- Auto white balance (damped, constrained gray-world) --- tracks the illuminant (day<->evening) so
-# color doesn't drift; adjusts the WB gains (software, GPU reads them next frame -> no glitch). Damped +
-# clamped so it doesn't flicker or over-correct on strongly-coloured scenes.
-AWB_ON = True
+# adjusts the WB gains (software, GPU reads them next frame -> no glitch). Opt-in via --awb, OFF by default:
+# gray-world assumes the scene averages neutral, but a warm/non-gray room makes it slowly over-boost R,B
+# (observed drifting 1.6->3.2 / 1.5->4.1 over minutes -> whole frame goes magenta). Fixed WB is stable.
+AWB_ON = False
 AWB_ALPHA = 0.05                              # WB gain smoothing per update (~1-2 s to track a light change)
 AWB_RMIN, AWB_RMAX = 1.2, 3.2                 # plausible R gain range (green-dominant raw); from the profile
 AWB_BMIN, AWB_BMAX = 1.2, 4.2                 # plausible B gain range
@@ -698,10 +701,10 @@ if __name__ == "__main__":
     ap.add_argument("--calibrate-dark", action="store_true", help="dark-frame black calibration (COVER THE LENS): measures per-channel black to fix the brightness-dependent color cast; then re-run --calibrate")
     ap.add_argument("--no-yolo", action="store_true", help="disable the NPU YOLO detection overlay")
     ap.add_argument("--no-ae", action="store_true", help="disable sensor auto-exposure (use the fixed --exposure/--gain). AE nudges real integration time so bright scenes don't clip; --exposure is just the starting point.")
-    ap.add_argument("--no-awb", action="store_true", help="disable auto white balance (use the profile/calibration WB fixed). AWB tracks the illuminant (day<->evening) so color doesn't drift; damped + clamped, no flicker.")
+    ap.add_argument("--awb", action="store_true", help="enable gray-world auto white balance (OFF by default). Tracks the illuminant, but on a non-gray room it slowly over-boosts R,B -> whole frame drifts magenta over minutes. Fixed profile WB is the stable default.")
     ap.add_argument("--camera-model", default="imx296", help="profiles/<model>.json to load all sensor config from (geometry, CFA, format, defaults, AE, CCM). Add a camera = add a profile.")
     ap.add_argument("--ccm-ct", type=int, default=None, help="override the profile's CCM colour temperature (K) (2500=warm .. 7400=daylight)")
-    ap.add_argument("--no-ccm", action="store_true", help="disable the ready-made color-correction matrix (RPi IMX296 tuning)")
+    ap.add_argument("--ccm", action="store_true", help="enable the ready-made color-correction matrix (RPi IMX296 tuning) (OFF by default: crushes green toward magenta with high WB gains + amplifies low-light noise)")
     ap.add_argument("--yolo-fps", type=float, default=10.0, help="cap YOLO to this detection rate (0=unlimited, ~26fps NPU max). Detections overlay persists between updates, so a low rate saves NPU heat/power with no visual loss on a slow robot.")
     ap.add_argument("--gpu", action="store_true", help="full-res ISP on the Adreno GPU (OpenCL) instead of CPU")
     ap.add_argument("--destripe", action="store_true", help="also remove static FPN column/row banding (luminance-only, fused)")
@@ -710,8 +713,8 @@ if __name__ == "__main__":
     args = ap.parse_args()
     DESTRIPE = args.destripe
     YOLO_FPS = args.yolo_fps
-    AE_ON = not args.no_ae; AWB_ON = not args.no_awb
-    CAMERA_MODEL = args.camera_model; CCM_ON = not args.no_ccm
+    AE_ON = not args.no_ae; AWB_ON = args.awb
+    CAMERA_MODEL = args.camera_model; CCM_ON = args.ccm
     load_camera_profile(CAMERA_MODEL)              # sets geometry/format/defaults/AE/CCM from profiles/<model>.json
     if args.ccm_ct is not None: CCM_CT = args.ccm_ct   # CLI colour-temp overrides the profile default
     BIN = args.bin
