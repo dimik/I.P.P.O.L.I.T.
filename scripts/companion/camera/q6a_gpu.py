@@ -81,10 +81,6 @@ __kernel void isp(__global const uchar* pk, __global const float* shade, __globa
     R = 255.0f*native_powr(clamp(R*scale/255.0f, 0.0f, 1.0f), 0.7f);   // tone map: scale to target + gamma
     G = 255.0f*native_powr(clamp(G*scale/255.0f, 0.0f, 1.0f), 0.7f);
     B = 255.0f*native_powr(clamp(B*scale/255.0f, 0.0f, 1.0f), 0.7f);
-    float mx = fmax(fmax(R,G),B);                                       // highlight desaturation (see isp_bin)
-    float t  = clamp((mx - 220.0f) * (1.0f/35.0f), 0.0f, 1.0f);
-    float lum = 0.299f*R + 0.587f*G + 0.114f*B;
-    R += (lum-R)*t; G += (lum-G)*t; B += (lum-B)*t;
     out[o]=(uchar)clamp(R+0.5f,0.0f,255.0f); out[o+1]=(uchar)clamp(G+0.5f,0.0f,255.0f); out[o+2]=(uchar)clamp(B+0.5f,0.0f,255.0f);
 }
 // 2x2 BINNED ISP: one output pixel per Bayer quad (uses real photosites, averages the 2 greens ->
@@ -119,13 +115,6 @@ __kernel void isp_bin(__global const uchar* pk, __global const float* shade, __g
         float dr = (drow[oy*3]+drow[oy*3+1]+drow[oy*3+2]) * 0.3333333f;
         ro -= dc+dr; go -= dc+dr; bo -= dc+dr;
     }
-    // Highlight desaturation: a blown region carries no real color (one channel clips before the others -
-    // here WB pushes R,B to 255 while G lags -> magenta walls/windows). Fade toward luma as the brightest
-    // channel approaches max so clipped highlights render neutral white instead of magenta.
-    float mx = fmax(fmax(ro, go), bo);
-    float t  = clamp((mx - 220.0f) * (1.0f/35.0f), 0.0f, 1.0f);
-    float lum = 0.299f*ro + 0.587f*go + 0.114f*bo;
-    ro += (lum-ro)*t; go += (lum-go)*t; bo += (lum-bo)*t;
     out[o]  =(uchar)clamp(ro+0.5f,0.0f,255.0f);
     out[o+1]=(uchar)clamp(go+0.5f,0.0f,255.0f);
     out[o+2]=(uchar)clamp(bo+0.5f,0.0f,255.0f);
@@ -163,34 +152,6 @@ __kernel void destripe_sub(__global uchar* im, __global const float* dcol, __glo
         im[o+c] = (uchar)clamp(v, 0.0f, 255.0f);
     }
 }
-// Chroma denoise: keep LUMA sharp, blur only the COLOUR (R-Y, B-Y) over a small anisotropic window.
-// This is the low-light fix for colour speckle + coloured horizontal row-noise lines: those live entirely
-// in chroma, so smoothing chroma while preserving luma detail removes them without softening the image.
-// A taller-than-wide window (ry>rx) averages across rows -> specifically crushes horizontal colour lines.
-__kernel void chroma_denoise(__global const uchar* src, __global uchar* dst,
-                             const int OW, const int OH, const int rx, const int ry){
-    int x = get_global_id(0), y = get_global_id(1);
-    if (x >= OW || y >= OH) return;
-    int o = (y*OW + x)*3;
-    float Y0 = 0.299f*src[o] + 0.587f*src[o+1] + 0.114f*src[o+2];
-    float cr = 0.0f, cb = 0.0f; int n = 0;
-    for (int dy = -ry; dy <= ry; dy++){
-        int yy = clamp(y+dy, 0, OH-1);
-        for (int dx = -rx; dx <= rx; dx++){
-            int xx = clamp(x+dx, 0, OW-1); int oo = (yy*OW + xx)*3;
-            float Y = 0.299f*src[oo] + 0.587f*src[oo+1] + 0.114f*src[oo+2];
-            cr += (float)src[oo]   - Y;                // R - Y
-            cb += (float)src[oo+2] - Y;                // B - Y
-            n++;
-        }
-    }
-    cr /= (float)n; cb /= (float)n;
-    float R = Y0 + cr, B = Y0 + cb;
-    float G = (Y0 - 0.299f*R - 0.114f*B) / 0.587f;     // recover G so the original luma is preserved exactly
-    dst[o]   = (uchar)clamp(R+0.5f, 0.0f, 255.0f);
-    dst[o+1] = (uchar)clamp(G+0.5f, 0.0f, 255.0f);
-    dst[o+2] = (uchar)clamp(B+0.5f, 0.0f, 255.0f);
-}
 '''
 
 
@@ -208,7 +169,6 @@ class GpuDemosaic:
         self.isp_bin_knl = cl.Kernel(self.prg, "isp_bin")
         self.col_sum_knl = cl.Kernel(self.prg, "col_sum")
         self.row_sum_knl = cl.Kernel(self.prg, "row_sum")
-        self.cd_knl = cl.Kernel(self.prg, "chroma_denoise")
         self.corr_knl = cl.Kernel(self.prg, "corr")
         self.destripe_knl = cl.Kernel(self.prg, "destripe_sub")
         mf = cl.mem_flags
@@ -216,9 +176,7 @@ class GpuDemosaic:
         self.d_in = cl.Buffer(self.ctx, mf.READ_ONLY, W * H * 2)
         self.d_out = cl.Buffer(self.ctx, mf.WRITE_ONLY, W * H * 3 * 4)
         self.d_u8 = cl.Buffer(self.ctx, mf.READ_WRITE, W * H * 3)         # RW: destripe edits in place
-        self.d_u8_2 = cl.Buffer(self.ctx, mf.READ_WRITE, W * H * 3)       # chroma-denoise scratch (ping-pong)
         self.d_u8_bin = cl.Buffer(self.ctx, mf.READ_WRITE, self.OW * self.OH * 3)
-        self.d_u8_bin2 = cl.Buffer(self.ctx, mf.READ_WRITE, self.OW * self.OH * 3)
         self.d_colsum = cl.Buffer(self.ctx, mf.READ_WRITE, W * 3 * 4)
         self.d_rowsum = cl.Buffer(self.ctx, mf.READ_WRITE, H * 3 * 4)
         self.d_dcol = cl.Buffer(self.ctx, mf.READ_ONLY, W * 3 * 4)
@@ -235,10 +193,6 @@ class GpuDemosaic:
         # destripe_sub). ~3x cheaper destripe with no visible difference. 1 = recompute every frame.
         self.destripe_period = 8
         self._dstr_ctr = 0
-        # Chroma denoise (low-light colour-noise / horizontal colour-line removal). Anisotropic window
-        # (taller than wide) targets row-correlated colour noise. Off unless enabled by the caller.
-        self.denoise = False
-        self.cd_rx, self.cd_ry = 3, 5
 
     def _apply_destripe(self, d_u8, ow, oh, win=41):
         """FPN destripe entirely on GPU: col/row sums -> corr (mean-smooth) -> subtract. No CPU round-trip.
@@ -284,12 +238,7 @@ class GpuDemosaic:
             self._dstr_ctr += 1
             if refresh:
                 self._refresh_destripe(self.d_u8_bin, self.OW, self.OH)   # for the next N frames
-        src = self.d_u8_bin
-        if self.denoise:                                                  # blur chroma, keep luma sharp
-            self.cd_knl(self.q, (self.OW, self.OH), None, self.d_u8_bin, self.d_u8_bin2,
-                        np.int32(self.OW), np.int32(self.OH), np.int32(self.cd_rx), np.int32(self.cd_ry))
-            src = self.d_u8_bin2
-        cl.enqueue_copy(self.q, self.u8_bin, src, is_blocking=False)
+        cl.enqueue_copy(self.q, self.u8_bin, self.d_u8_bin, is_blocking=False)
         self.q.finish()
         return self.u8_bin
 
@@ -325,12 +274,7 @@ class GpuDemosaic:
                      np.float32(scale), np.int32(use), cm, np.int32(use_cm))
         if destripe:
             self._apply_destripe(self.d_u8, self.W, self.H)
-        src = self.d_u8
-        if self.denoise:                                  # blur chroma, keep luma sharp
-            self.cd_knl(self.q, (self.W, self.H), None, self.d_u8, self.d_u8_2,
-                        np.int32(self.W), np.int32(self.H), np.int32(self.cd_rx), np.int32(self.cd_ry))
-            src = self.d_u8_2
-        cl.enqueue_copy(self.q, self.u8, src, is_blocking=False)
+        cl.enqueue_copy(self.q, self.u8, self.d_u8, is_blocking=False)
         self.q.finish()
         return self.u8
 

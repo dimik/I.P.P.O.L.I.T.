@@ -5,7 +5,7 @@
   "sensor": {
     "width": 1456,
     "height": 1088,
-    "bayer": "BGGR",
+    "bayer": "RGGB",
     "bits": 10,
     "mbus_code": "SBGGR10_1X10",
     "v4l2_pixelformat": "pBAA",

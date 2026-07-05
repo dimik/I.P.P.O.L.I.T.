@@ -105,18 +105,24 @@ CSIPHY/csid/rdi numbers above are the expected mapping, confirm with `media-ctl 
 
 ## Color pipeline (`q6a_camstream.py`)
 
-The IMX296 here is a **color BGGR Bayer** sensor (the two green Bayer phases match each other and read
-~1.6× red/blue — that is the colour-filter array + sensor QE, not a defect). Getting neutral colour is
-**deterministic**, not per-frame guessing:
+> **⚠️ CFA is RGGB, not BGGR (2026-07-05).** The mbus format is advertised `SBGGR10` (and that's fine to
+> keep — for RAW passthrough it's just the media-ctl link format), but the actual colour-filter phase this
+> sensor delivers through qcom-camss is **RGGB**. Our demosaic was assigning R↔B swapped for ~2 days →
+> blue skin, magenta highlights, a fake "magenta-top/green-bottom gradient". A **colour test chart** nailed it
+> (yellow→cyan, magenta-stable = R↔B swap). Fix = `profiles/imx296.json` `"bayer":"RGGB"`. See
+> `docs/q6a-camera-pipeline.md §12` for the full story and the pile of colour hacks it let us delete.
 
-- **Black level 56**, then **fixed raw white-balance gains R×1.60 / B×1.52 / G×1.0**, applied at the raw
-  Bayer level *before* demosaic. Measured from raw phase statistics; scene-independent. This alone moves
-  the centre from R/G 0.61 (green) to ~1.04 (neutral). These live as constants in `q6a_camstream.py`.
-- Residual **radial magenta-centre / green-edge** is genuine lens shading. `--calibrate` (aim at a
-  uniform, evenly-lit grey/white surface) fits a **smooth quadratic, green-relative** gain map (green
-  untouched → no vignette/noise amplification), saved to `imx296_wb.npz` and applied at load.
-- **Do not** reintroduce per-frame gray-world or a raw per-pixel flat-field — both are fragile and were
-  explicitly rejected. The fixed WB + optional smooth shading map is the whole story.
+The IMX296 here is a **color Bayer** sensor, CFA **RGGB** (the two green phases match and read ~1.6× red/blue
+— colour-filter array + sensor QE, not a defect). With the correct CFA the pipeline is a **clean standard
+ISP** — demosaic + black + WB/AWB + CCM (RPi IMX296 tuning) + tonemap — no per-unit colour hacks needed:
+
+- **AWB** (auto white balance, damped gray-world) tracks the illuminant; **CCM** does the spectral colour
+  correction. Both were previously fighting the R↔B swap and misbehaving; on correct channels they just work.
+- `--calibrate` (aim at a uniform grey/white surface) can fit a smooth radial **shading map** into
+  `imx296_wb.npz` for lens vignetting. (The pre-Bayer-fix `imx296_wb.npz` was calibrated on swapped channels
+  and was retired — regenerate it on RGGB.)
+- **Do not** reintroduce per-frame spatial gray-world, chroma-shade, chroma-denoise, or CCM softening — those
+  were all swap-compensation hacks and were removed once the CFA was fixed.
 
 Calibrate: `./view_q6a_cam.sh calibrate 2` (grey card) → writes/commits `imx296_wb.npz`.
 

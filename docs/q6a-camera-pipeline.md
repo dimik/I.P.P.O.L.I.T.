@@ -386,7 +386,13 @@ the light changed. Added a real AWB loop (`auto_wb()` in `q6a_camstream.py`, on 
   capture loop) — a throw must never trigger a camera reinit (that caused the §9 "snow every 2–3 s" stutter).
 - All AWB config lives in the camera profile (`profiles/imx296.json` → `awb`), keeping the scripts generic.
 
-## 11. Low-light colour cleanup (2026-07-05)
+## 11. Low-light colour cleanup (2026-07-05) — ⚠️ SUPERSEDED, see §12
+
+> **These §10–§11 colour "fixes" were chasing a symptom.** The real cause was a **red↔blue Bayer swap**
+> (§12): the profile said BGGR but the sensor delivers **RGGB** through this CAMSS pipeline, so every colour
+> the ISP produced had R and B swapped. AWB/CCM/shade/denoise/chroma-shade could never win against that.
+> Once the Bayer was fixed, **all of these hacks were removed** (ChromaShade, chroma-denoise, CCM softening,
+> shade chroma/clamp/smooth/flip, saturation boost, highlight desaturation). Kept below for history only.
 
 A dim, high-gain indoor scene (gain=240, exp≈1900) exposed several colour-domain problems on top of the raw
 grain. Fixed as a set (`q6a_gpu.py` kernels + `q6a_camstream.py` knobs), verified with a spatial high-frequency
@@ -442,3 +448,33 @@ chroma-noise metric (isolates noise from a moving scene; measured in a central p
   stay on. Residual in the default is the colour cast + luminance grain (both inherent to the low-light
   small-sensor regime); acceptable for a robot feed. If neutral colour at full fps is ever wanted, GPU-port
   `ChromaShade`.
+
+## 12. ROOT CAUSE of the whole colour saga: a red↔blue Bayer swap (2026-07-05)
+
+After ~2 days of colour tuning (§8's WB, §10 AWB, §11 CCM softening / shade attenuation / runtime spatial
+chroma-shade / denoise / saturation), a **colour test chart** settled it in one shot. The swatches (black,
+blue, magenta, yellow) rendered as **black, brown/red, violet, cyan** — i.e. **blue↔yellow swapped, magenta
+unchanged, black unchanged**. That signature (yellow→cyan, magenta stable) is a textbook **R↔B channel swap**.
+
+**Cause:** the profile declared the CFA as **BGGR**, but this IMX296 delivers **RGGB** through the mainline
+qcom-camss RDI path — so our GPU demosaic assigned R to the blue photosite and vice-versa. Every "cast" we
+fought (blue skin, magenta highlights, magenta-top/green-bottom "gradient") was that swap interacting with
+WB/CCM. No global or spatial colour correction can fix a channel swap — which is exactly why nothing converged.
+
+**Fix (one line):** `profiles/imx296.json` → `"bayer": "RGGB"` (drives the GPU demosaic's R/B pixel offsets).
+The `mbus_code`/`v4l2_pixelformat` stay `SBGGR10*` — for RAW passthrough they're just the media-ctl link
+format and the 10-bit packing, CFA-agnostic; only our demosaic's R/B positions matter. Colours immediately
+correct on the chart.
+
+**Cleanup (all §10–§11 compensation hacks removed):** with correct channels, AWB + the RPi CCM behave
+properly, so the improvised machinery was deleted — `ChromaShade` (runtime spatial chroma-shade), the
+`chroma_denoise` GPU kernel + `--denoise`, CCM softening (`--ccm-strength`), the shade-map chroma/clamp/smooth
+(`--shade-chroma`) and `SHADE_FLIP` diagnostic, the `--saturation` boost, and the highlight-desaturation
+kernel step. **The pipeline is now a clean standard ISP: demosaic(RGGB) + black + WB/AWB + CCM + tonemap**
+(`view_q6a_cam.sh` default `--gpu --bin`). The old `imx296_wb.npz` was calibrated on the swapped channels →
+**retired** (its WB/shade are invalid); black defaults to 60 and AWB owns WB. Recalibrate (`--calibrate`) on
+RGGB to regenerate a valid shading map if lens vignetting/shading correction is wanted.
+
+**Lessons:** (1) verify the CFA against a **known colour reference** before tuning colour — a chart would have
+saved two days. (2) yellow→cyan + magenta-stable ⇒ R↔B swap; a full hue rotation ⇒ phase shift (try the other
+Bayer phases). (3) don't pile compensations on an un-diagnosed root cause.
