@@ -75,7 +75,9 @@ echo "   stream: http://$HOST_IP:$PORT/stream   (log: ssh $Q6A 'tail -f ~/camstr
 # stops it. VLC/mpv render multipart/x-mixed-replace with bounded memory.
 echo "== open viewer on the Odyssey (VLC — Firefox OOMs on MJPEG) =="
 SURL="http://$HOST_IP:$PORT/stream"
-if command -v mpv >/dev/null; then mpv --profile=low-latency --no-cache "$SURL" >/dev/null 2>&1 &
+if command -v mpv >/dev/null; then mpv --profile=low-latency --no-cache --untimed --cache=no \
+    --demuxer-lavf-o=fflags=+nobuffer --demuxer-readahead-secs=0 --vd-lavc-threads=2 \
+    --no-correct-pts --framedrop=vo "$SURL" >/dev/null 2>&1 &
 elif command -v vlc >/dev/null; then vlc --network-caching=200 "$SURL" >/dev/null 2>&1 &
 elif command -v ffplay >/dev/null; then ffplay -fflags nobuffer "$SURL" >/dev/null 2>&1 &
 else echo "No mpv/vlc/ffplay — install one (avoid Firefox)."; fi
