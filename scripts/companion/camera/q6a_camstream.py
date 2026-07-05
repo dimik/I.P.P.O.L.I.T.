@@ -28,6 +28,8 @@ MBUS_CODE = "SBGGR10_1X10"    # sensor media-bus code for the media-ctl link (CF
 PIXFMT = "pBAA"          # V4L2 capture pixelformat (packed RAW10)
 ENTITY_MATCH = "imx296"  # substring to find the sensor subdev entity in the media graph
 GAIN_MAX = 480           # analogue_gain control max (ctrl units)
+GAIN_ANALOG_MAX = 240    # ctrl units that are still ANALOG gain (0..240 = 0..24dB); 240..480 is DIGITAL
+                         # (adds noise, no SNR gain) and shifts the calibration operating point -> AE caps here
 CCM_MATRICES = None      # [(ct, [9 floats]), ...] from the profile; interpolated to CCM_CT
 
 # --- Color pipeline: deterministic, measured from raw Bayer statistics (NOT per-frame guessing) ---
@@ -93,7 +95,7 @@ def load_camera_profile(model):
     camera-agnostic (adding a camera = adding a profile: geometry, CFA, MIPI format, colour defaults, AE
     bounds, and the ready-made CCM). Returns True if a profile was found."""
     global W, H, STRIDE, FRAME, OUT_W, OUT_H, BAYER, RX, RY, BX, BY, MBUS_CODE, PIXFMT, ENTITY_MATCH
-    global BLACK_LEVEL, WB_R, WB_G, WB_B, AE_TARGET, AE_MIN_EXP, AE_MAX_EXP, GAIN_MAX, CCM_MATRICES, CCM_CT
+    global BLACK_LEVEL, WB_R, WB_G, WB_B, AE_TARGET, AE_MIN_EXP, AE_MAX_EXP, GAIN_MAX, GAIN_ANALOG_MAX, CCM_MATRICES, CCM_CT
     global AWB_RMIN, AWB_RMAX, AWB_BMIN, AWB_BMAX
     path = os.path.join(PROFILES_DIR, f"{model}.json")
     if not os.path.exists(path):
@@ -112,6 +114,7 @@ def load_camera_profile(model):
     ae = p.get("ae", {})
     AE_TARGET = float(ae.get("target", AE_TARGET)); AE_MIN_EXP = int(ae.get("min_exposure", AE_MIN_EXP))
     AE_MAX_EXP = int(ae.get("max_exposure", AE_MAX_EXP)); GAIN_MAX = int(ae.get("gain_max", GAIN_MAX))
+    GAIN_ANALOG_MAX = int(ae.get("gain_analog_max", GAIN_ANALOG_MAX))
     awb = p.get("awb", {})
     if "r_gain" in awb: AWB_RMIN, AWB_RMAX = (float(x) for x in awb["r_gain"])
     if "b_gain" in awb: AWB_BMIN, AWB_BMAX = (float(x) for x in awb["b_gain"])
@@ -253,8 +256,11 @@ def auto_exposure(buf):
     if new_exp <= AE_MIN_EXP and mid > AE_TARGET and GAIN > 0:
         GAIN = max(0, GAIN - 48)                    # exposure floored but still bright -> drop gain
         subprocess.run(["v4l2-ctl", "-d", SENSOR_SD, "--set-ctrl", f"analogue_gain={GAIN}"], check=False)
-    elif new_exp >= AE_MAX_EXP and mid < AE_TARGET * 0.6 and GAIN < 480:
-        GAIN = min(480, GAIN + 48)                  # exposure maxed but dark -> add gain
+    elif new_exp >= AE_MAX_EXP and mid < AE_TARGET * 0.6 and GAIN < GAIN_ANALOG_MAX:
+        GAIN = min(GAIN_ANALOG_MAX, GAIN + 48)      # exposure maxed but dark -> add gain, but only up to the
+                                                    # ANALOG max (240): digital gain adds noise + row-lines and
+                                                    # shifts the calibration operating point (green drift). The
+                                                    # tone-map lifts dim scenes instead.
         subprocess.run(["v4l2-ctl", "-d", SENSOR_SD, "--set-ctrl", f"analogue_gain={GAIN}"], check=False)
     if new_exp != EXPOSURE:
         EXPOSURE = new_exp; _set_exposure(EXPOSURE)

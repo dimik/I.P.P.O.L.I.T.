@@ -22,7 +22,7 @@
     "_comment": "Sensor auto-exposure: median-metered, exposure-only (fixed VMAX). target = raw high-byte median.",
     "target": 70,
     "min_exposure": 30,
-    "max_exposure": 4500,
+    "max_exposure": 3000,
     "gain_max": 480,
     "gain_analog_max": 240
   },
