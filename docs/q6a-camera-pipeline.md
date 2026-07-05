@@ -481,14 +481,16 @@ Bayer phases). (3) don't pile compensations on an un-diagnosed root cause.
 
 ## 13. Two follow-ups: blown-highlight handling + the pyopencl stale-kernel-cache trap (2026-07-05)
 
-**Blown highlights (bright doorway → magenta).** After the §12 cleanup, a very bright clipping region (an
-open doorway/light source) rendered **magenta**. Cause: a blown region has no real colour, but the WB gains
-(AWB ~R×3.2/B×3.6 for this dim room) push R and B to clip (255) before G → magenta (not an AWB *bug* — AWB
-correctly neutralises the room; only the one clipping region colours). Fix = re-add **highlight
-desaturation** in the GPU kernel (`isp` + `isp_bin`): fade a pixel toward its luma as its brightest channel
-approaches clip, so blown highlights read neutral white. High threshold (**238→255**, `t=(mx-238)/17`) so
-only truly near-clipping pixels are touched — normal bright walls keep their colour (an earlier 190 threshold
-greyed mid-bright areas). This is standard ISP highlight handling, not a swap-era hack.
+**Blown highlights (bright doorway → magenta) — tried highlight desaturation, REVERTED (made it worse).**
+After the §12 cleanup, a very bright clipping region (an open doorway/light source) rendered **magenta**.
+Cause: a blown region has no real colour, but the WB gains (AWB ~R×3.2/B×3.6 for this dim room) push R and B
+to clip (255) before G → magenta (not an AWB *bug* — AWB correctly neutralises the room; only the one
+clipping region colours). Tried re-adding **highlight desaturation** (fade near-clip pixels toward luma,
+threshold 238→255) — but once the cache trap below was fixed so it *actually ran*, it made the overall image
+**worse**, so it was **reverted**. Decision: **accept the blown doorway** — it's a bright light source any
+camera blows, it's fine for a robot/YOLO feed, and the rest of the frame is good. The only real fix is
+lowering exposure (darkens the whole room for one bright region — a bad trade). Pipeline stays the clean ISP:
+demosaic+WB+AWB+CCM+tonemap.
 
 **⚠️ The pyopencl kernel cache silently served a STALE binary — kernel edits had no effect.** While iterating
 on `q6a_gpu.py`, deployed kernel changes (the destripe rewrite, denoise add/remove, the highlight fade)
