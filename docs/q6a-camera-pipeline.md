@@ -217,8 +217,14 @@ The IMX296 does **60 fps at full res** — our cap was never the sensor, it was 
 (noisier in dim light) — the fundamental light/speed trade.
 
 ### Format investigation — settled
-- **The sensor is 10-bit only** (`SBGGR10_1X10`; no 8-bit mode). So **BA81/8-bit is impossible** at the
-  sensor — not a driver bug.
+- **The sensor is 10-bit only** — confirmed by **Sony's IMX296LLR datasheet**: "10-bit A/D converter",
+  "CSI-2 ... RAW10 output", ADC=10 for all drive modes. So **BA81/8-bit is impossible** at the silicon,
+  and the mainline `imx296.c` (which exposes only `SBGGR10_1X10`) faithfully reflects that.
+  - **Untapped: the datasheet lists a hardware "2x2 Vertical FD binning" mode — 720x540 @ 120.8 fps, 10-bit.**
+    That is *charge-domain* binning (cleaner SNR than our digital GPU bin) + 2x fps + half the data, but the
+    mainline driver does NOT expose it (only all-pixel 1456x1088). Enabling it would need driver work.
+  - Analog gain is 0-24 dB only (ctrl 0-240); above that is digital gain (our gain=380 = 24 dB analog +
+    14 dB digital). For cleanest low light, keep analog <= 240 and add light/exposure.
 - **UYVY/YUV** need the ISP (demosaic) → unavailable on mainline (RDI is raw passthrough). Both hang.
 - **`pBAA` (packed RAW10) is the only capture format** — and we now **unpack it on the GPU** (`bget_packed`),
   so the packing costs nothing.
