@@ -158,13 +158,22 @@ class GpuDemosaic:
         self.u8_bin = np.empty((self.OH, self.OW, 3), np.uint8)
         self.d_shade = None
         self.dev_name = dev.name.strip()
+        # FPN (fixed-pattern column/row noise) is STATIC per sensor/gain, so the correction changes
+        # slowly. Recompute the col/row correction only every `destripe_period` frames (the expensive
+        # col_sum+row_sum+corr reductions) and just APPLY the cached correction every frame (cheap
+        # destripe_sub). ~3x cheaper destripe with no visible difference. 1 = recompute every frame.
+        self.destripe_period = 8
+        self._dstr_ctr = 0
 
     def _apply_destripe(self, d_u8, ow, oh, win=41):
-        """FPN destripe entirely on GPU: col/row sums -> corr (mean-smooth) -> subtract. No CPU round-trip."""
-        self.col_sum_knl(self.q, (ow, 3), None, d_u8, self.d_colsum, np.int32(ow), np.int32(oh))
-        self.row_sum_knl(self.q, (oh, 3), None, d_u8, self.d_rowsum, np.int32(ow), np.int32(oh))
-        self.corr_knl(self.q, (ow, 3), None, self.d_colsum, self.d_dcol, np.int32(ow), np.int32(oh), np.int32(win))
-        self.corr_knl(self.q, (oh, 3), None, self.d_rowsum, self.d_drow, np.int32(oh), np.int32(ow), np.int32(win))
+        """FPN destripe entirely on GPU: col/row sums -> corr (mean-smooth) -> subtract. No CPU round-trip.
+        The correction (d_dcol/d_drow) is cached and refreshed every destripe_period frames (static FPN)."""
+        if self._dstr_ctr % self.destripe_period == 0:
+            self.col_sum_knl(self.q, (ow, 3), None, d_u8, self.d_colsum, np.int32(ow), np.int32(oh))
+            self.row_sum_knl(self.q, (oh, 3), None, d_u8, self.d_rowsum, np.int32(ow), np.int32(oh))
+            self.corr_knl(self.q, (ow, 3), None, self.d_colsum, self.d_dcol, np.int32(ow), np.int32(oh), np.int32(win))
+            self.corr_knl(self.q, (oh, 3), None, self.d_rowsum, self.d_drow, np.int32(oh), np.int32(ow), np.int32(win))
+        self._dstr_ctr += 1
         self.destripe_knl(self.q, (ow, oh), None, d_u8, self.d_dcol, self.d_drow, np.int32(ow), np.int32(oh))
 
     def isp_bin(self, packed, stride, bl, wr, wg, wb, scale, destripe=False):

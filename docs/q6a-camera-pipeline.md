@@ -220,11 +220,12 @@ The IMX296 does **60 fps at full res** — our cap was never the sensor, it was 
 - **The sensor is 10-bit only** — confirmed by **Sony's IMX296LLR datasheet**: "10-bit A/D converter",
   "CSI-2 ... RAW10 output", ADC=10 for all drive modes. So **BA81/8-bit is impossible** at the silicon,
   and the mainline `imx296.c` (which exposes only `SBGGR10_1X10`) faithfully reflects that.
-  - **Untapped: the datasheet lists a hardware "2x2 Vertical FD binning" mode — 720x540 @ 120.8 fps, 10-bit.**
-    That is *charge-domain* binning (cleaner SNR than our digital GPU bin) + 2x fps + half the data, but the
-    mainline driver does NOT expose it (only all-pixel 1456x1088). Enabling it would need driver work.
-  - Analog gain is 0-24 dB only (ctrl 0-240); above that is digital gain (our gain=380 = 24 dB analog +
-    14 dB digital). For cleanest low light, keep analog <= 240 and add light/exposure.
+  - The datasheet lists a hardware "2x2 Vertical FD binning" mode (720x540 @ 120.8 fps, 10-bit, charge-domain).
+    **We chased it end-to-end and it does NOT work through mainline qcom-camss — see §7.** GPU digital `--bin`
+    stays the half-res path.
+  - Analog gain is 0-24 dB only (ctrl 0-240); above that is digital gain. Best-value default is **gain=240**
+    (max analog = the only stage that lowers input-referred read noise; digital gain is redundant with the ISP
+    tone-map and costs highlight range). Raise toward 480 (digital) only for genuinely dark scenes.
 - **UYVY/YUV** need the ISP (demosaic) → unavailable on mainline (RDI is raw passthrough). Both hang.
 - **`pBAA` (packed RAW10) is the only capture format** — and we now **unpack it on the GPU** (`bget_packed`),
   so the packing costs nothing.
@@ -242,3 +243,52 @@ The IMX296 does **60 fps at full res** — our cap was never the sensor, it was 
   at ~30 fps — a rewrite would gain ~nothing. The ceiling is the sensor/GPU, not the language.
 - **JPEG:** 3.9 ms (bin) / 13.6 ms (full). Small; hardware JPEG needs CAMX (unavailable), GPU JPEG is
   impractical (serial Huffman). libjpeg-turbo would ~halve it if ever needed.
+
+## 7. Sensor 2×2 FD binning — full investigation & why it's a dead end on qcom-camss (2026-07-05)
+
+The IMX296 datasheet advertises a hardware **2×2 Vertical FD binning** mode (720×540 @ 120.8 fps, charge-domain
+= cleaner SNR than our digital GPU bin, ¼ the MIPI data). We tried to enable it properly. Verdict: **the
+sensor bins, but its FD-binned pixel payload is invalid through mainline qcom-camss, and the real fix needs
+Sony's NDA register sequence.** GPU digital `--bin` remains the shipping half-res path (same 728×544, works,
+and is actually *faster* in the pipeline — its `isp_bin` kernel is ~2× lighter than a full demosaic).
+
+**The driver patch (necessary but not sufficient).** Mainline `imx296.c` *has* binning code (crop=full +
+half-size subdev format → `CTRL0D` `HADD_ON_BINNING | WINMODE_FD_BINNING`) but **never programs `MIPIC_AREA3W`
+(0x4182)** — the MIPI TX active-line count. It stays at the 1088 power-on default, so when FD binning emits
+544 lines, qcom-camss waits forever for frame-end → **STREAMON hangs**. Fix: write `MIPIC_AREA3W =
+format->height` in `imx296_setup` (correct for full-res=1088, crop, HADD, FD-bin=544). Reproducible via
+`scripts/companion/camera/build_imx296_fdbin.sh` + `imx296_fdbin.patch` (out-of-tree, on-board; gcc-13 +
+`linux-headers`, vermagic matches, unsigned insmod OK; stock `.ko` backed up to `~/imx296.ko.orig`). i2c
+readback confirmed the write landed (`i2ctransfer -f -y 18 w2@0x1a 0x41 0x82 r2` → `0x20 0x02` = 544).
+
+**After the patch: no hang, but empty frames.** Raw captures come back **uniformly 0xFF** (every byte, std 0.0,
+even at exposure=4 → not saturation). Axis isolation was decisive:
+| Mode | CTRL0D | Result |
+|---|---|---|
+| Full-res 1456×1088 | WINMODE_ALL | real data (std 55) ✓ |
+| **H-only HADD** 728×1088 | HADD | **real data (std 55) ✓** |
+| V-only FD 1456×544 | FD_BINNING | empty 0xFF ✗ |
+| 2×2 both 728×544 | HADD\|FD_BINNING | empty 0xFF ✗ |
+
+So **horizontal HADD works; only vertical FD binning fails.** The sensor *is* genuinely binning (frame timing
+halves — raw capture hits **162 fps binned vs 85 full-res** at short exposure, even above the datasheet's 120).
+
+**Debug-build proof it's not camss and not the patch.** Built the entire `qcom-camss.ko` (25 objs) out-of-tree
+on-board and hot-reloaded it (unbind imx296 → `rmmod qcom_camss` → `insmod` → imx296 re-binds via async).
+SoC = `qcom,sc7280-camss` → `vfe_ops_170` (`camss-vfe-17x.c`) + `csid_ops_gen2` (`camss-csid-gen2.c`). This
+kernel has **no ftrace/dyndbg** (compiled out), so `pr_err` was added to `csid_isr` + `vfe_isr` to dump the
+raw interrupt-status registers. **FD-binned and working full-res frames produce byte-for-byte identical IRQ
+status**: same VFE SOF (`s0=0x01000200`), same write-master done (`bus1=0x1`), same reg-update, and **CSID
+`rx=0x0` = zero CSI-2 RX errors** (no CRC/ECC/DT/line-length errors) in both. The VFE write-master is MIPI-RAW
+passthrough (`WM_BUFFER_HEIGHT_CFG=0` — it writes whatever arrives on the bus). So camss processes the FD frame
+exactly like a good one, with no complaint.
+
+**Conclusion.** The CSID/VFE aren't dropping anything — the sensor's FD-binned MIPI payload is itself invalid
+(all max-code 0x3FF, exposure-independent = a railed FD readout). The mainline/RPi drivers only flip the
+`CTRL0D` mode bits, which enable the binning *framing and timing* (hence 2× fps, no hang) but **not a valid
+vertical-FD readout** — that needs additional IMX296 readout-sequence registers (FD/VCUT/OB timing) that Sony
+keeps **NDA** and neither driver programs (matching the mainline author's own "this should be double-checked"
+comment). Web search for a public FD-binning register sequence turned up nothing beyond the `CTRL0D` bits.
+Not fixable without the confidential datasheet. **Investigation closed.** Stock camss restored; the imx296
+`MIPIC_AREA3W` patch is kept (inert for the non-binned modes we use). Debug artifacts remain on-board at
+`~/camss-build` should datasheet access ever appear.
