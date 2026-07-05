@@ -41,7 +41,7 @@ ssh "$Q6A" "[ -f /etc/OpenCL/vendors/adreno.icd ] || (sudo mkdir -p /etc/OpenCL/
   echo /usr/lib/aarch64-linux-gnu/libOpenCL_adreno.so.1 | sudo tee /etc/OpenCL/vendors/adreno.icd >/dev/null)" 2>/dev/null || true
 # --gpu falls back to --fast automatically if pyopencl/OpenCL is unavailable
 ssh "$Q6A" "ss -ltn 2>/dev/null | grep -q ":$PORT " || \
-  setsid python3 ~/q6a_camstream.py --cam $CAM --port $PORT --gpu </dev/null >~/camstream.log 2>&1 &" || true
+  setsid python3 ~/q6a_camstream.py --cam $CAM --port $PORT --gpu --bin --destripe </dev/null >~/camstream.log 2>&1 &" || true
 sleep 3
 echo "   stream: http://$HOST_IP:$PORT/stream   (log: ssh $Q6A 'tail -f ~/camstream.log')"
 
