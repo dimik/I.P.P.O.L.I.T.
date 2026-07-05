@@ -51,6 +51,8 @@ scp -q "$REPO_DIR/q6a_detector.py" "$Q6A:~/q6a_detector.py" # NPU YOLO (separate
 [ -f "$REPO_DIR/models/yolov8_det.bin" ] && scp -q "$REPO_DIR/models/yolov8_det.bin" "$Q6A:~/yolov8_det.bin" 2>/dev/null || true
 [ -f "$REPO_DIR/models/coco_labels.txt" ] && scp -q "$REPO_DIR/models/coco_labels.txt" "$Q6A:~/coco_labels.txt" 2>/dev/null || true
 [ -f "$REPO_DIR/imx296_wb.npz" ] && scp -q "$REPO_DIR/imx296_wb.npz" "$Q6A:~/imx296_wb.npz" 2>/dev/null || true
+ssh "$Q6A" 'mkdir -p ~/tuning' 2>/dev/null || true                        # ready-made per-camera color tuning (CCM)
+[ -d "$REPO_DIR/tuning" ] && scp -q "$REPO_DIR/tuning/"*.json "$Q6A:~/tuning/" 2>/dev/null || true
 
 echo "== start streamer on the Q6A (detached; --gpu = Adreno ISP, --bin = GPU digital 2x2 -> 728x544) =="
 # ensure the Adreno OpenCL driver is registered as an ICD (pyopencl's loader needs it); idempotent

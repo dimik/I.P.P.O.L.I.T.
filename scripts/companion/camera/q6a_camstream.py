@@ -9,7 +9,7 @@ serves multipart/x-mixed-replace MJPEG on :8092. View from the Odyssey with view
 Usage:  python3 q6a_camstream.py [--cam 2] [--port 8092] [--full]
   --full : full-res debayer (1456x1088, slower); default is fast half-res super-pixel (728x544).
 """
-import argparse, subprocess, threading, sys, os
+import argparse, subprocess, threading, sys, os, json
 import numpy as np
 from PIL import Image
 from io import BytesIO
@@ -32,6 +32,9 @@ BLACK_RGB = None                              # per-channel black pedestal (R,G,
 WB_R, WB_G, WB_B = 1.60, 1.00, 1.52          # raw per-channel gains -> neutral grey (measured)
 SHADE = None                                  # optional (H,W,3) radial COLOR-shading gain (green-relative)
 GPU = None                                    # optional Adreno OpenCL ISP (q6a_gpu.GpuDemosaic)
+CAMERA_MODEL = "imx296"                        # tuning/<model>.json -> ready-made CCM (add a camera = add a file)
+CCM_CT = 3600                                  # colour temp (K) to interpolate the CCM to (indoor default)
+CCM_ON = True                                  # apply the ready-made color correction matrix
 DESTRIPE = False                              # optional FPN band removal (CPU, ~32ms); off by default
 BIN = False                                   # GPU digital 2x2 binning -> half-res, ~2x less noise + faster
 SENSOR_BIN = False                            # sensor 2x2 FD binning (charge-domain, cleaner): capture 728x544
@@ -54,13 +57,38 @@ YOLO_FPS = 10                                   # cap NPU YOLO to this rate (0=u
                                                # doesn't need per-frame detection; boxes persist between updates,
                                                # so 10fps frees the NPU (~60% idle -> cooler, shares HTP w/ the LLM).
 LABELS = [str(i) for i in range(80)]
+TUNING_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tuning")
+def load_ccm(model, ct):
+    """Load the ready-made color correction matrix from tuning/<model>.json (Raspberry Pi libcamera tuning),
+    linearly interpolated to the target colour temperature `ct`. Returns a (3,3) float32, or None if absent.
+    This is the cross-channel colour science (fixes the residual spectral cast) — no per-unit guessing."""
+    path = os.path.join(TUNING_DIR, f"{model}.json")
+    if not os.path.exists(path):
+        print(f"no tuning file {path} -> CCM disabled", flush=True); return None
+    try:
+        d = json.load(open(path))
+        algos = {list(a)[0]: list(a.values())[0] for a in d["algorithms"]}
+        ccms = sorted(algos["rpi.ccm"]["ccms"], key=lambda e: e["ct"])
+        cts = [e["ct"] for e in ccms]
+        if ct <= cts[0]: m = ccms[0]["ccm"]
+        elif ct >= cts[-1]: m = ccms[-1]["ccm"]
+        else:
+            i = max(k for k in range(len(cts)) if cts[k] <= ct)
+            f = (ct - cts[i]) / (cts[i + 1] - cts[i])
+            m = [a + (b - a) * f for a, b in zip(ccms[i]["ccm"], ccms[i + 1]["ccm"])]
+        print(f"loaded CCM from tuning/{model}.json @ {ct}K (of {len(ccms)} CTs {cts[0]}-{cts[-1]})", flush=True)
+        return np.asarray(m, np.float32).reshape(3, 3)
+    except Exception as e:
+        print(f"CCM load failed ({e}); disabled", flush=True); return None
+
 def init_gpu():
     global GPU
     try:
         from q6a_gpu import GpuDemosaic
         GPU = GpuDemosaic(W, H)
         GPU.set_shade(SHADE)                   # upload color-shading map once (if a profile is loaded)
-        print(f"GPU ISP enabled: {GPU.dev_name} (full demosaic+WB+tonemap on GPU)", flush=True)
+        GPU.set_ccm(load_ccm(CAMERA_MODEL, CCM_CT) if CCM_ON else None)   # ready-made color matrix
+        print(f"GPU ISP enabled: {GPU.dev_name} (full demosaic+WB+CCM+tonemap on GPU)", flush=True)
     except Exception as e:
         GPU = None
         print(f"GPU unavailable ({e}); using CPU numpy demosaic", flush=True)
@@ -566,6 +594,9 @@ if __name__ == "__main__":
     ap.add_argument("--calibrate-dark", action="store_true", help="dark-frame black calibration (COVER THE LENS): measures per-channel black to fix the brightness-dependent color cast; then re-run --calibrate")
     ap.add_argument("--no-yolo", action="store_true", help="disable the NPU YOLO detection overlay")
     ap.add_argument("--no-ae", action="store_true", help="disable sensor auto-exposure (use the fixed --exposure/--gain). AE nudges real integration time so bright scenes don't clip; --exposure is just the starting point.")
+    ap.add_argument("--camera-model", default="imx296", help="tuning/<model>.json to load the ready-made color-correction matrix (CCM) from (default imx296)")
+    ap.add_argument("--ccm-ct", type=int, default=3600, help="colour temperature (K) to interpolate the CCM to (2500=warm .. 7400=daylight; 3600 indoor default)")
+    ap.add_argument("--no-ccm", action="store_true", help="disable the ready-made color-correction matrix")
     ap.add_argument("--yolo-fps", type=float, default=10.0, help="cap YOLO to this detection rate (0=unlimited, ~26fps NPU max). Detections overlay persists between updates, so a low rate saves NPU heat/power with no visual loss on a slow robot.")
     ap.add_argument("--gpu", action="store_true", help="full-res ISP on the Adreno GPU (OpenCL) instead of CPU")
     ap.add_argument("--destripe", action="store_true", help="also remove FPN column/row banding (CPU, ~32ms)")
@@ -575,6 +606,7 @@ if __name__ == "__main__":
     DESTRIPE = args.destripe
     YOLO_FPS = args.yolo_fps
     AE_ON = not args.no_ae
+    CAMERA_MODEL = args.camera_model; CCM_CT = args.ccm_ct; CCM_ON = not args.no_ccm
     BIN = args.bin
     if BIN:
         OUT_W, OUT_H = W // 2, H // 2

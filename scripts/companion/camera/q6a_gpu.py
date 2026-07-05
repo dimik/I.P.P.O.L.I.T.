@@ -56,7 +56,7 @@ __kernel void demosaic(__global const ushort* bayer, __global float* rgb,
 __kernel void isp(__global const uchar* pk, __global const float* shade, __global uchar* out,
                   const int W, const int H, const int S, const float blR, const float blG, const float blB,
                   const float wr, const float wg, const float wb,
-                  const float scale, const int use_shade){
+                  const float scale, const int use_shade, __global const float* ccm, const int use_ccm){
     int x = get_global_id(0), y = get_global_id(1);
     if (x >= W || y >= H) return;
     int bx = x & 1, by = y & 1;
@@ -74,6 +74,10 @@ __kernel void isp(__global const uchar* pk, __global const float* shade, __globa
     R*=wr; G*=wg; B*=wb;
     int o = (y*W + x)*3;
     if (use_shade){ R*=shade[o]; G*=shade[o+1]; B*=shade[o+2]; }
+    if (use_ccm){                                                      // color correction matrix (RPi IMX296)
+        float R2=ccm[0]*R+ccm[1]*G+ccm[2]*B, G2=ccm[3]*R+ccm[4]*G+ccm[5]*B, B2=ccm[6]*R+ccm[7]*G+ccm[8]*B;
+        R=fmax(R2,0.0f); G=fmax(G2,0.0f); B=fmax(B2,0.0f);
+    }
     R = 255.0f*native_powr(clamp(R*scale/255.0f, 0.0f, 1.0f), 0.7f);   // tone map: scale to target + gamma
     G = 255.0f*native_powr(clamp(G*scale/255.0f, 0.0f, 1.0f), 0.7f);
     B = 255.0f*native_powr(clamp(B*scale/255.0f, 0.0f, 1.0f), 0.7f);
@@ -89,6 +93,7 @@ __kernel void isp_bin(__global const uchar* pk, __global const float* shade, __g
                       const int W, const int H, const int OW, const int OH, const int S,
                       const float blR, const float blG, const float blB,
                       const float wr, const float wg, const float wb, const float scale, const int use_shade,
+                      __global const float* ccm, const int use_ccm,
                       __global const float* dcol, __global const float* drow, const int use_ds){
     int ox = get_global_id(0), oy = get_global_id(1);
     if (ox >= OW || oy >= OH) return;
@@ -98,6 +103,10 @@ __kernel void isp_bin(__global const uchar* pk, __global const float* shade, __g
     float R = bget_packed(pk, x+1, y+1, W, H, S, blR, blG, blB);
     R*=wr; G*=wg; B*=wb;
     if (use_shade){ int so=(y*W + x)*3; R*=shade[so]; G*=shade[so+1]; B*=shade[so+2]; }  // radial color-shading
+    if (use_ccm){                                                  // color correction matrix (RPi IMX296 tuning)
+        float R2=ccm[0]*R+ccm[1]*G+ccm[2]*B, G2=ccm[3]*R+ccm[4]*G+ccm[5]*B, B2=ccm[6]*R+ccm[7]*G+ccm[8]*B;
+        R=fmax(R2,0.0f); G=fmax(G2,0.0f); B=fmax(B2,0.0f);
+    }
     int o = (oy*OW + ox)*3;
     float ro=255.0f*native_powr(clamp(R*scale/255.0f,0.0f,1.0f),0.7f);
     float go=255.0f*native_powr(clamp(G*scale/255.0f,0.0f,1.0f),0.7f);
@@ -182,6 +191,7 @@ class GpuDemosaic:
         self.u8 = np.empty((H, W, 3), np.uint8)
         self.u8_bin = np.empty((self.OH, self.OW, 3), np.uint8)
         self.d_shade = None
+        self.d_ccm = None
         self.dev_name = dev.name.strip()
         # FPN (fixed-pattern column/row noise) is STATIC per sensor/gain, so the correction changes
         # slowly. Recompute the col/row correction only every `destripe_period` frames (the expensive
@@ -222,10 +232,13 @@ class GpuDemosaic:
         use_ds = 1 if (destripe and not refresh) else 0
         use_sh = 1 if self.d_shade is not None else 0
         sh = self.d_shade if use_sh else self.d_in         # dummy (unused) buffer when no shade map
+        use_cm = 1 if self.d_ccm is not None else 0
+        cm = self.d_ccm if use_cm else self.d_in
         self.isp_bin_knl(self.q, (self.OW, self.OH), None, self.d_in, sh, self.d_u8_bin,
                          np.int32(self.W), np.int32(self.H), np.int32(self.OW), np.int32(self.OH),
                          np.int32(stride), np.float32(blR), np.float32(blG), np.float32(blB),
                          np.float32(wr), np.float32(wg), np.float32(wb), np.float32(scale), np.int32(use_sh),
+                         cm, np.int32(use_cm),
                          self.d_dcol, self.d_drow, np.int32(use_ds))
         if destripe:
             self._dstr_ctr += 1
@@ -242,6 +255,15 @@ class GpuDemosaic:
         s = np.ascontiguousarray(shade, np.float32)
         self.d_shade = cl.Buffer(self.ctx, cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR, hostbuf=s)
 
+    def set_ccm(self, ccm):
+        """Upload a 3x3 color-correction matrix (row-major 9 floats) applied to WB'd linear RGB before the
+        tone map (or None to disable). This is the cross-channel color science (fixes the residual spectral
+        cast); use the ready-made Raspberry Pi IMX296 tuning matrix rather than per-unit guessing."""
+        if ccm is None:
+            self.d_ccm = None; return
+        c = np.ascontiguousarray(np.asarray(ccm, np.float32).ravel()[:9], np.float32)
+        self.d_ccm = cl.Buffer(self.ctx, cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR, hostbuf=c)
+
     def isp(self, packed, stride, bl, wr, wg, wb, scale, destripe=False):
         """Full ISP on the GPU from PACKED RAW10 bytes -> (H,W,3) uint8 (unpack+demosaic+WB+shade+tonemap)."""
         try: blR, blG, blB = bl                            # per-channel black (R,G,B), or a scalar for all
@@ -249,11 +271,13 @@ class GpuDemosaic:
         cl.enqueue_copy(self.q, self.d_in, np.frombuffer(packed, np.uint8), is_blocking=False)
         use = 1 if self.d_shade is not None else 0
         sh = self.d_shade if use else self.d_in           # dummy (unused) buffer when no shade
+        use_cm = 1 if self.d_ccm is not None else 0
+        cm = self.d_ccm if use_cm else self.d_in
         self.isp_knl(self.q, (self.W, self.H), None, self.d_in, sh, self.d_u8,
                      np.int32(self.W), np.int32(self.H), np.int32(stride),
                      np.float32(blR), np.float32(blG), np.float32(blB),
                      np.float32(wr), np.float32(wg), np.float32(wb),
-                     np.float32(scale), np.int32(use))
+                     np.float32(scale), np.int32(use), cm, np.int32(use_cm))
         if destripe:
             self._apply_destripe(self.d_u8, self.W, self.H)
         cl.enqueue_copy(self.q, self.u8, self.d_u8, is_blocking=False)
