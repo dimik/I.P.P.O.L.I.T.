@@ -1,0 +1,32 @@
+--- imx296_orig.c	2026-07-05 06:07:22.723846075 +0200
++++ imx296_618.c	2026-07-05 06:02:37.099436691 +0200
+@@ -42,6 +42,15 @@
+ #define IMX296_CTRL0D_WINMODE_FD_BINNING		(2 << 0)
+ #define IMX296_CTRL0D_HADD_ON_BINNING			BIT(5)
+ #define IMX296_CTRL0D_SAT_CNT				BIT(6)
++
++/*
++ * MIPI TX effective active-line count (0x4182). Mainline never programs it, so
++ * it stays at the 1088 power-on default. In 2x2 FD binning the sensor only emits
++ * format->height (544) active lines, so the CSI receiver (qcom-camss) waits
++ * forever for lines that never arrive -> STREAMON hangs. Program it to the real
++ * output height in every mode (RPi driver does this too; see imx296_setup).
++ */
++#define IMX296_MIPIC_AREA3W				IMX296_REG_16BIT(0x4182)
+ #define IMX296_CTRL0E					IMX296_REG_8BIT(0x300e)
+ #define IMX296_CTRL0E_VREVERSE				BIT(0)
+ #define IMX296_CTRL0E_HREVERSE				BIT(1)
+@@ -538,6 +547,13 @@
+ 		     &ret);
+ 
+ 	/*
++	 * Tell the MIPI TX how many active lines are actually output. Without
++	 * this, FD binning (format->height = crop->height / 2) leaves the MIPI
++	 * area at the 1088 default and camss never sees frame-end -> hang.
++	 */
++	imx296_write(sensor, IMX296_MIPIC_AREA3W, format->height, &ret);
++
++	/*
+ 	 * HMAX and VMAX configure horizontal and vertical blanking by
+ 	 * specifying the total line time and frame time respectively. The line
+ 	 * time is specified in operational clock units (which appears to be the

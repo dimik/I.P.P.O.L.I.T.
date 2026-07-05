@@ -31,7 +31,8 @@ WB_R, WB_G, WB_B = 1.60, 1.00, 1.52          # raw per-channel gains -> neutral 
 SHADE = None                                  # optional (H,W,3) radial COLOR-shading gain (green-relative)
 GPU = None                                    # optional Adreno OpenCL ISP (q6a_gpu.GpuDemosaic)
 DESTRIPE = False                              # optional FPN band removal (CPU, ~32ms); off by default
-BIN = False                                   # 2x2 binning -> half-res, ~2x less noise + faster
+BIN = False                                   # GPU digital 2x2 binning -> half-res, ~2x less noise + faster
+SENSOR_BIN = False                            # sensor 2x2 FD binning (charge-domain, cleaner): capture 728x544
 TARGET_MEAN = 95.0                            # tone-map target brightness
 # YOLO runs in a SEPARATE PROCESS (q6a_detector.py) sharing frames via shared memory. The Adreno (GPU
 # ISP) and Hexagon (NPU) crash if driven concurrently in ONE process (shared userspace allocator
@@ -60,7 +61,7 @@ def _auto_scale(px):
 
 def _auto_scale_packed(buf):
     """Auto-exposure scale from the packed RAW10 high bytes (~value>>2; avoids the CPU unpack)."""
-    a = np.frombuffer(buf, np.uint8)[:STRIDE * H].reshape(H, STRIDE)[:, :1820].reshape(H, 364, 5)
+    a = np.frombuffer(buf, np.uint8)[:STRIDE * H].reshape(H, STRIDE)[:, :W * 10 // 8].reshape(H, W // 4, 5)
     m = a[::4, ::4, :4].astype(np.float32).mean() * 4.0 - BLACK_LEVEL   # high bytes -> ~10-bit level
     avg_wb = (WB_R + 2.0 * WB_G + WB_B) / 4.0
     return TARGET_MEAN / max(max(m, 0.0) * avg_wb, 1.0)
@@ -88,7 +89,7 @@ def setup_pipeline(cam, exposure, gain):
     m = ["media-ctl", "-d", "/dev/media0"]
     subprocess.run(m + ["-l", f'"{phy}":1 -> "{csid}":0 [1]'], check=False)
     subprocess.run(m + ["-l", f'"{csid}":1 -> "{rdi}":0 [1]'], check=False)
-    fmt = "[fmt:SBGGR10_1X10/1456x1088]"
+    fmt = f"[fmt:SBGGR10_1X10/{W}x{H}]"   # W,H = 728x544 in --sensor-bin (driver enables 2x2 FD binning)
     # sensor entity name = "imx296 <cci-bus>-001a"; discover it from a link line in the topology
     top = subprocess.run(m + ["-p"], capture_output=True, text=True).stdout
     sensor = next((l.split('"')[1] for l in top.splitlines() if "imx296" in l and '"' in l), None)
@@ -109,7 +110,7 @@ def setup_pipeline(cam, exposure, gain):
 
 def unpack_raw10(buf):
     """MIPI RAW10 packed -> uint16 Bayer (H, W). 4px in 5 bytes; b4 holds the 4x2 LSBs."""
-    a = np.frombuffer(buf, np.uint8).reshape(H, STRIDE)[:, :1820].reshape(H, 364, 5)
+    a = np.frombuffer(buf, np.uint8).reshape(H, STRIDE)[:, :W * 10 // 8].reshape(H, W // 4, 5)
     hi = a[:, :, 0:4].astype(np.uint16) << 2
     lo = a[:, :, 4].astype(np.uint16)
     px = hi | ((lo[:, :, None] >> (2 * np.arange(4))) & 3)
@@ -442,20 +443,30 @@ if __name__ == "__main__":
     ap.add_argument("--port", type=int, default=8092)
     ap.add_argument("--fast", action="store_true", help="half-res debayer (faster, softer); default is full-res")
     ap.add_argument("--exposure", type=int, default=3000, help="sensor exposure (lines); LOWER=higher fps (frame length scales with exposure) but noisier in dim light. 3000~21fps, 6000~13fps")
-    ap.add_argument("--gain", type=int, default=380, help="analogue gain 0..480; higher=cleaner low-light (analog beats digital scaling) up to the noise floor")
+    ap.add_argument("--gain", type=int, default=240, help="sensor gain, ctrl 0..480 = 0..48dB (0.1dB/step). Per the IMX296 datasheet ONLY 0..240 (0..24dB) is ANALOG; 240..480 adds DIGITAL gain. Analog is the only stage that lowers input-referred read noise, so 240 (max analog) is the cleanest value + keeps full highlight range; the ISP tone-map handles brightness. Raise toward 480 (digital) or bump --exposure only for genuinely dark scenes.")
     ap.add_argument("--calibrate", action="store_true", help="capture a flat-field color profile (aim at a white/gray surface)")
     ap.add_argument("--no-yolo", action="store_true", help="disable the NPU YOLO detection overlay")
     ap.add_argument("--gpu", action="store_true", help="full-res ISP on the Adreno GPU (OpenCL) instead of CPU")
     ap.add_argument("--destripe", action="store_true", help="also remove FPN column/row banding (CPU, ~32ms)")
-    ap.add_argument("--bin", action="store_true", help="2x2 binning: half-res (728x544), ~2x less noise + faster")
+    ap.add_argument("--bin", action="store_true", help="GPU digital 2x2 binning: half-res (728x544), ~2x less noise + faster")
+    ap.add_argument("--sensor-bin", action="store_true", help="2x2 binning ON THE SENSOR (charge-domain FD binning -> 728x544): cleaner than --bin (combines charge before readout) + 1/4 the MIPI/GPU/JPEG load. Needs the FD-binning-patched imx296 driver (build_imx296_fdbin.sh).")
     args = ap.parse_args()
     DESTRIPE = args.destripe
     BIN = args.bin
     if BIN:
         OUT_W, OUT_H = W // 2, H // 2
     if args.calibrate:
-        calibrate(args.cam, args.exposure, args.gain)
+        calibrate(args.cam, args.exposure, args.gain)   # always full-res 1456x1088 (WB gains are mode-independent)
         sys.exit(0)
+    if args.sensor_bin:
+        # The sensor emits a 2x2-binned 728x544 Bayer frame; capture at that size and let the GPU do a
+        # plain demosaic (no GPU bin). Rebind the capture geometry BEFORE init_gpu/setup_pipeline read it.
+        SENSOR_BIN = True; BIN = False
+        W, H = 728, 544
+        STRIDE = 912                              # pBAA: 728*10/8=910, padded to 912 (v4l2 sizeimage 496128)
+        FRAME = STRIDE * H
+        OUT_W, OUT_H = W, H
+        print("sensor 2x2 FD binning: capture 728x544 (charge-domain, cleaner) -> GPU plain demosaic", flush=True)
     load_profile()
     if args.gpu:
         init_gpu()

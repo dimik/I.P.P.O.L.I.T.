@@ -35,13 +35,15 @@ scp -q "$REPO_DIR/q6a_detector.py" "$Q6A:~/q6a_detector.py" # NPU YOLO (separate
 [ -f "$REPO_DIR/models/coco_labels.txt" ] && scp -q "$REPO_DIR/models/coco_labels.txt" "$Q6A:~/coco_labels.txt" 2>/dev/null || true
 [ -f "$REPO_DIR/imx296_wb.npz" ] && scp -q "$REPO_DIR/imx296_wb.npz" "$Q6A:~/imx296_wb.npz" 2>/dev/null || true
 
-echo "== start streamer on the Q6A (detached; --gpu = full-res demosaic on the Adreno, ~23fps) =="
+echo "== start streamer on the Q6A (detached; --sensor-bin = charge-domain 2x2 FD binning on the IMX296) =="
 # ensure the Adreno OpenCL driver is registered as an ICD (pyopencl's loader needs it); idempotent
 ssh "$Q6A" "[ -f /etc/OpenCL/vendors/adreno.icd ] || (sudo mkdir -p /etc/OpenCL/vendors && \
   echo /usr/lib/aarch64-linux-gnu/libOpenCL_adreno.so.1 | sudo tee /etc/OpenCL/vendors/adreno.icd >/dev/null)" 2>/dev/null || true
 # --gpu falls back to --fast automatically if pyopencl/OpenCL is unavailable
+# --sensor-bin: the IMX296 does charge-domain 2x2 FD binning (cleaner than GPU --bin, 1/4 the MIPI data)
+# -> 728x544. Needs the FD-binning-patched imx296 driver (scripts/companion/camera/build_imx296_fdbin.sh).
 ssh "$Q6A" "ss -ltn 2>/dev/null | grep -q ":$PORT " || \
-  setsid python3 ~/q6a_camstream.py --cam $CAM --port $PORT --gpu --bin --destripe </dev/null >~/camstream.log 2>&1 &" || true
+  setsid python3 ~/q6a_camstream.py --cam $CAM --port $PORT --gpu --sensor-bin --destripe </dev/null >~/camstream.log 2>&1 &" || true
 sleep 3
 echo "   stream: http://$HOST_IP:$PORT/stream   (log: ssh $Q6A 'tail -f ~/camstream.log')"
 
