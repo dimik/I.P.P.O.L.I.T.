@@ -178,14 +178,16 @@ class GpuDemosaic:
 
     def isp_bin(self, packed, stride, bl, wr, wg, wb, scale, destripe=False):
         """2x2 binned ISP from PACKED RAW10 bytes -> (H/2,W/2,3) uint8 (unpack on GPU; lower noise)."""
-        cl.enqueue_copy(self.q, self.d_in, np.frombuffer(packed, np.uint8))
+        # non-blocking copies on the in-order queue (ordering guaranteed) + a single finish at the end:
+        # avoids two per-frame host<->device sync points (blocking is pyopencl's enqueue_copy default).
+        cl.enqueue_copy(self.q, self.d_in, np.frombuffer(packed, np.uint8), is_blocking=False)
         self.isp_bin_knl(self.q, (self.OW, self.OH), None, self.d_in, self.d_u8_bin,
                          np.int32(self.W), np.int32(self.H), np.int32(self.OW), np.int32(self.OH),
                          np.int32(stride), np.float32(bl),
                          np.float32(wr), np.float32(wg), np.float32(wb), np.float32(scale))
         if destripe:
             self._apply_destripe(self.d_u8_bin, self.OW, self.OH)
-        cl.enqueue_copy(self.q, self.u8_bin, self.d_u8_bin)
+        cl.enqueue_copy(self.q, self.u8_bin, self.d_u8_bin, is_blocking=False)
         self.q.finish()
         return self.u8_bin
 
@@ -198,7 +200,7 @@ class GpuDemosaic:
 
     def isp(self, packed, stride, bl, wr, wg, wb, scale, destripe=False):
         """Full ISP on the GPU from PACKED RAW10 bytes -> (H,W,3) uint8 (unpack+demosaic+WB+shade+tonemap)."""
-        cl.enqueue_copy(self.q, self.d_in, np.frombuffer(packed, np.uint8))
+        cl.enqueue_copy(self.q, self.d_in, np.frombuffer(packed, np.uint8), is_blocking=False)
         use = 1 if self.d_shade is not None else 0
         sh = self.d_shade if use else self.d_in           # dummy (unused) buffer when no shade
         self.isp_knl(self.q, (self.W, self.H), None, self.d_in, sh, self.d_u8,
@@ -207,7 +209,7 @@ class GpuDemosaic:
                      np.float32(scale), np.int32(use))
         if destripe:
             self._apply_destripe(self.d_u8, self.W, self.H)
-        cl.enqueue_copy(self.q, self.u8, self.d_u8)
+        cl.enqueue_copy(self.q, self.u8, self.d_u8, is_blocking=False)
         self.q.finish()
         return self.u8
 
