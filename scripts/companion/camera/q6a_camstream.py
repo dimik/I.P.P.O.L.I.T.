@@ -170,9 +170,8 @@ def _set_exposure(exp):
 _AE_N = 0
 def auto_exposure(buf):
     """Real sensor AE from the packed RAW10 high bytes (cheap, no unpack). Every ~8 frames, nudge the
-    sensor exposure (then gain at the floor/ceiling) so the raw is well-exposed with highlight headroom.
-    Damped (per-step change clamped) to avoid hunting; a saturated-pixel check cuts exposure hard when
-    highlights blow (mean-only AE gets fooled by a bright window)."""
+    sensor exposure toward a target MEDIAN brightness (robust to a dark surround or a bright window),
+    then gain only at the exposure floor/ceiling. Deadband + partial-step damping avoid hunting."""
     global EXPOSURE, GAIN, _AE_N
     if not AE_ON or SENSOR_SD is None:
         return
@@ -192,10 +191,10 @@ def auto_exposure(buf):
     target_exp = EXPOSURE * ratio                   # partial step toward target -> damped, no overshoot/chase
     new_exp = int(EXPOSURE + 0.4 * (target_exp - EXPOSURE))
     new_exp = int(min(max(new_exp, AE_MIN_EXP), AE_MAX_EXP))
-    if new_exp <= AE_MIN_EXP and (mean > AE_TARGET or sat > 0.03) and GAIN > 0:
+    if new_exp <= AE_MIN_EXP and mid > AE_TARGET and GAIN > 0:
         GAIN = max(0, GAIN - 48)                    # exposure floored but still bright -> drop gain
         subprocess.run(["v4l2-ctl", "-d", SENSOR_SD, "--set-ctrl", f"analogue_gain={GAIN}"], check=False)
-    elif new_exp >= AE_MAX_EXP and mean < AE_TARGET * 0.6 and GAIN < 480:
+    elif new_exp >= AE_MAX_EXP and mid < AE_TARGET * 0.6 and GAIN < 480:
         GAIN = min(480, GAIN + 48)                  # exposure maxed but dark -> add gain
         subprocess.run(["v4l2-ctl", "-d", SENSOR_SD, "--set-ctrl", f"analogue_gain={GAIN}"], check=False)
     if new_exp != EXPOSURE:
@@ -490,7 +489,10 @@ def capture_loop(rdi, full):
                 cam = V4l2Cam("/dev/video0", W, H); fails = 0
             data = cam.read_latest(timeout=1.0)  # drains to the freshest frame (low latency)
             if data is not None and len(data) == FRAME:
-                auto_exposure(data)              # nudge sensor exposure/gain (real AE, no-op if --no-ae)
+                try:
+                    auto_exposure(data)          # nudge sensor exposure/gain (real AE, no-op if --no-ae)
+                except Exception as e:
+                    print("AE error (non-fatal):", e, flush=True)   # never let AE crash the capture -> reinit
                 process(data, full)
                 _hbn += 1                        # heartbeat: server-side publish rate (server froze? -> 0)
                 if _t.time() - _hbt >= 2.0:
