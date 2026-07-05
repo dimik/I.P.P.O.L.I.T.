@@ -475,7 +475,8 @@ def capture_loop(rdi, full):
     except Exception as e:
         print(f"V4L2 mmap unavailable ({e}); using file-tail capture", flush=True)
         return _capture_loop_file(rdi, full)
-    cam = None; fails = 0
+    import time as _t
+    cam = None; fails = 0; _hbn = 0; _hbt = _t.time()
     while True:
         if State.clients == 0:                 # no viewer -> release camera, idle
             State.jpeg = None
@@ -488,6 +489,10 @@ def capture_loop(rdi, full):
             if data is not None and len(data) == FRAME:
                 auto_exposure(data)              # nudge sensor exposure/gain (real AE, no-op if --no-ae)
                 process(data, full)
+                _hbn += 1                        # heartbeat: server-side publish rate (server froze? -> 0)
+                if _t.time() - _hbt >= 2.0:
+                    print(f"[hb] publish {_hbn/(_t.time()-_hbt):.0f} fps jseq={State.jseq} clients={State.clients} jpeg={0 if State.jpeg is None else len(State.jpeg)//1024}KB", flush=True)
+                    _hbn = 0; _hbt = _t.time()
         except Exception as e:
             print("capture error (v4l2):", e, flush=True)
             if cam is not None:
