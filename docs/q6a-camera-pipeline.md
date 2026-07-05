@@ -232,9 +232,11 @@ The IMX296 does **60 fps at full res** — our cap was never the sensor, it was 
   so the packing costs nothing.
 
 ### Design questions
-- **Do we need destripe?** It removes real FPN column/row banding. After the GPU-only rewrite it's
-  **free (32 fps with or without it)**, so keep it on. (Binning alone reduces FPN ~2× but leaves residual
-  banding.) A one-time dark-frame calibration would be the "proper" FPN fix but isn't worth it now.
+- **Do we need destripe? NO — it's OFF by default (2026-07-05).** The scene-based column high-pass
+  subtracts a *per-channel* correction, so on real scenes with vertical structure it **injects magenta/green
+  color stripes**, and the fused every-8-frame refresh made them *blink*. The sensor's real residual FPN is
+  mild (~7% column deviation, barely visible). A proper fix needs a **dark-frame FPN calibration** (capture
+  lens-covered → pure column offsets); the `--destripe` flag remains but is unhelpful until that's built.
 - **More efficient binary ops for unpack/destripe?** No meaningful win. Unpack is per-pixel bit-shifts on
   the GPU (memory-bound; vectorised `uchar4` loads would be marginal). Destripe is GPU reductions + a
   box-corr kernel. Both are already off the CPU and fast.
