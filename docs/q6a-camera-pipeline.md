@@ -501,3 +501,15 @@ stayed magenta. Fixes: **`PYOPENCL_NO_CACHE=1`** in the launch env **and** clear
 proved unreliable on its own). Recompiling costs ~2-4 s at startup only. **Lesson: after any `q6a_gpu.py`
 kernel edit, assume the cache is stale — bypass/clear it, and verify the change actually took (e.g. measure a
 pixel the edit must change).** This likely muddied some earlier kernel A/B measurements too.
+
+**⚠️ AWB gray-world DRIFTS to magenta over minutes — now OFF by default.** A white paper (and then the whole
+frame) went **magenta after a couple of minutes** — a time-dependent drift, not a fixed cast. Cause: the
+gray-world AWB assumes the scene averages neutral, but this warm/non-gray room makes it keep over-boosting
+R,B; logged drifting from the fixed **1.60/1.52 → R3.17/B4.13** over ~2 min (B pinned at its 4.2 clamp). The
+aggressive RPi **CCM** then crushes green (its G row `−0.46·R+2.03·G−0.56·B` subtracts the boosted R,B) →
+whole frame magenta with green ~half of R,B. The **CPU-era pipeline had neither** (fixed WB, no CCM) — which
+is why it was stable, as the user recalled. Fix: **`--awb` and `--ccm` are now opt-in (OFF by default)**; the
+default is the stable fixed-WB ISP (`demosaic+WB+tonemap`, green no longer crushed, verified steady over 30 s,
+slight residual green tint like the CPU version). Lesson: gray-world AWB is unsafe as an always-on default on
+scenes that aren't ~neutral on average; prefer a fixed calibrated WB (or a proper illuminant estimator) and
+keep any adaptive gain clamped tight + slow, or off.
