@@ -157,12 +157,14 @@ def setup_pipeline(cam, exposure, gain):
 
 def _set_exposure(exp):
     """Set sensor integration time (lines) + track vblank so the frame length stays minimal (max fps).
-    Order: shrink exposure first to avoid a transient exposure>VMAX, then set vblank, then the real exposure."""
+    Set vblank (VMAX) THEN exposure in one call (v4l2-ctl applies left-to-right) so exposure never exceeds
+    VMAX. NB: do NOT stage a tiny exposure=100 first — that emits one near-black frame that the tone-map
+    amplifies into a full-screen 'snow' flash on every AE adjustment."""
     if SENSOR_SD is None:
         return
     vblank = max(30, exp - H + 64)
     subprocess.run(["v4l2-ctl", "-d", SENSOR_SD, "--set-ctrl",
-                    f"exposure=100,vertical_blanking={vblank},exposure={exp}"], check=False)
+                    f"vertical_blanking={vblank},exposure={exp}"], check=False)
 
 _AE_N = 0
 def auto_exposure(buf):
@@ -567,7 +569,15 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
         self.end_headers()
-        import time
+        import time, socket
+        # Low latency: a small send buffer + no Nagle means wfile.write() blocks after ~1 frame instead of
+        # letting the kernel queue SECONDS of frames ahead of a slow client. The serve loop below then reads
+        # the LATEST frame after each write (send-on-new), so it drops stale frames -> latency ~1 frame, not 3-5s.
+        try:
+            self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 96 * 1024)
+        except Exception:
+            pass
         with State.lock:
             State.clients += 1
         State.wake.set()                       # wake the capture loop
