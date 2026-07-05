@@ -108,6 +108,14 @@ __kernel void row_sum(__global const uchar* im, __global int* rs, const int OW, 
     for (int x = 0; x < OW; x++) s += im[(y*OW + x)*3 + c];
     rs[y*3 + c] = s;
 }
+// correction = (per-line mean) - (box-smoothed per-line mean), computed fully on GPU (no CPU round-trip)
+__kernel void corr(__global const int* sum, __global float* out, const int N, const int DIV, const int win){
+    int i = get_global_id(0), c = get_global_id(1);
+    if (i >= N || c >= 3) return;
+    int h = win/2; float s = 0.0f;
+    for (int k = -h; k <= h; k++){ int ii = clamp(i+k, 0, N-1); s += (float)sum[ii*3 + c]; }
+    out[i*3 + c] = ((float)sum[i*3 + c] - s/(float)(2*h+1)) / (float)DIV;   // high-freq part / DIV
+}
 __kernel void destripe_sub(__global uchar* im, __global const float* dcol, __global const float* drow,
                            const int OW, const int OH){
     int x = get_global_id(0), y = get_global_id(1);
@@ -133,6 +141,7 @@ class GpuDemosaic:
         self.isp_bin_knl = cl.Kernel(self.prg, "isp_bin")
         self.col_sum_knl = cl.Kernel(self.prg, "col_sum")
         self.row_sum_knl = cl.Kernel(self.prg, "row_sum")
+        self.corr_knl = cl.Kernel(self.prg, "corr")
         self.destripe_knl = cl.Kernel(self.prg, "destripe_sub")
         mf = cl.mem_flags
         self.OW, self.OH = W // 2, H // 2
@@ -150,22 +159,12 @@ class GpuDemosaic:
         self.d_shade = None
         self.dev_name = dev.name.strip()
 
-    @staticmethod
-    def _boxsmooth(v, win=41):
-        k = np.ones(win, np.float32) / win
-        return np.stack([np.convolve(v[:, c], k, mode="same") for c in range(3)], axis=1)
-
-    def _apply_destripe(self, d_u8, ow, oh):
-        """FPN destripe on a GPU uint8 image: col/row sums (GPU) -> smooth (CPU, tiny) -> subtract (GPU)."""
+    def _apply_destripe(self, d_u8, ow, oh, win=41):
+        """FPN destripe entirely on GPU: col/row sums -> corr (mean-smooth) -> subtract. No CPU round-trip."""
         self.col_sum_knl(self.q, (ow, 3), None, d_u8, self.d_colsum, np.int32(ow), np.int32(oh))
         self.row_sum_knl(self.q, (oh, 3), None, d_u8, self.d_rowsum, np.int32(ow), np.int32(oh))
-        cs = np.empty((ow, 3), np.int32); rs = np.empty((oh, 3), np.int32)
-        cl.enqueue_copy(self.q, cs, self.d_colsum); cl.enqueue_copy(self.q, rs, self.d_rowsum)
-        self.q.finish()
-        colmean = cs.astype(np.float32) / oh; rowmean = rs.astype(np.float32) / ow
-        dcol = np.ascontiguousarray(colmean - self._boxsmooth(colmean), np.float32)
-        drow = np.ascontiguousarray(rowmean - self._boxsmooth(rowmean), np.float32)
-        cl.enqueue_copy(self.q, self.d_dcol, dcol); cl.enqueue_copy(self.q, self.d_drow, drow)
+        self.corr_knl(self.q, (ow, 3), None, self.d_colsum, self.d_dcol, np.int32(ow), np.int32(oh), np.int32(win))
+        self.corr_knl(self.q, (oh, 3), None, self.d_rowsum, self.d_drow, np.int32(oh), np.int32(ow), np.int32(win))
         self.destripe_knl(self.q, (ow, oh), None, d_u8, self.d_dcol, self.d_drow, np.int32(ow), np.int32(oh))
 
     def isp_bin(self, packed, stride, bl, wr, wg, wb, scale, destripe=False):

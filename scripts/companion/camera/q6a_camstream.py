@@ -99,7 +99,10 @@ def setup_pipeline(cam, exposure, gain):
     if sensor:
         sd = subprocess.run(m + ["-e", sensor], capture_output=True, text=True).stdout.strip()
         if sd:
-            for c, v in [("vertical_blanking", exposure + 200), ("exposure", exposure),
+            # frame length = H + vblank must be >= exposure; use the MINIMUM -> max fps at this exposure
+            # (no noise cost). The old "exposure+200" padded the frame ~1.4x longer than needed.
+            vblank = max(30, exposure - H + 64)
+            for c, v in [("exposure", 100), ("vertical_blanking", vblank), ("exposure", exposure),
                          ("analogue_gain", gain)]:
                 subprocess.run(["v4l2-ctl", "-d", sd, "--set-ctrl", f"{c}={v}"], check=False)
     return rdi
@@ -250,6 +253,7 @@ def draw_overlay(rgb, dets=None):
 
 class State:
     jpeg = None
+    jseq = 0                    # bumped per new frame (serve loop sends each unique frame once)
     lock = threading.Lock()
     clients = 0                 # active /stream viewers
     wake = threading.Event()    # signalled when a viewer connects
@@ -266,7 +270,7 @@ def process(buf, full):
     rgb = draw_overlay(rgb, dets)                          # returns a new array (PIL) if dets else same
     bio = BytesIO(); Image.fromarray(rgb).save(bio, "JPEG", quality=80)
     with State.lock:
-        State.jpeg = bio.getvalue()
+        State.jpeg = bio.getvalue(); State.jseq += 1
 
 def _read_dets():
     n = int(DET["dcnt"][0])
@@ -415,14 +419,17 @@ class Handler(BaseHTTPRequestHandler):
         with State.lock:
             State.clients += 1
         State.wake.set()                       # wake the capture loop
+        last = -1
         try:
             while True:
                 with State.lock:
-                    j = State.jpeg
-                if j:
+                    j = State.jpeg; s = State.jseq
+                if j is not None and s != last:        # send each unique frame once, promptly
+                    last = s
                     self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\n"
                                      b"Content-Length: %d\r\n\r\n" % len(j) + j + b"\r\n")
-                time.sleep(0.04)
+                else:
+                    time.sleep(0.005)
         except (BrokenPipeError, ConnectionResetError):
             pass
         finally:
