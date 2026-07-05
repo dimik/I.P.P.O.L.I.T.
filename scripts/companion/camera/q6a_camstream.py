@@ -57,7 +57,8 @@ CCM_STRENGTH = 0.75                           # blend CCM toward identity: the R
                                               # colour. The chroma denoise + spatial chroma-shade now handle that
                                               # noise, so keep most of the CCM for saturation (0.75)
 DESTRIPE = False                              # optional FPN band removal (CPU, ~32ms); off by default
-DENOISE = True                                # chroma denoise: blur colour, keep luma sharp (low-light colour noise)
+DENOISE = False                               # chroma denoise: blur colour, keep luma sharp (low-light colour noise);
+                                              # opt-in (--denoise): CPU/GPU cost isn't needed for YOLO, off for speed
 DENOISE_RX, DENOISE_RY = 3, 5                 # chroma-blur window radii (taller -> kills horizontal colour lines)
 BIN = False                                   # GPU digital 2x2 binning -> half-res, ~2x less noise + faster
 SENSOR_BIN = False                            # sensor 2x2 FD binning (charge-domain, cleaner): capture 728x544
@@ -796,8 +797,8 @@ if __name__ == "__main__":
     ap.add_argument("--yolo-fps", type=float, default=10.0, help="cap YOLO to this detection rate (0=unlimited, ~26fps NPU max). Detections overlay persists between updates, so a low rate saves NPU heat/power with no visual loss on a slow robot.")
     ap.add_argument("--gpu", action="store_true", help="full-res ISP on the Adreno GPU (OpenCL) instead of CPU")
     ap.add_argument("--destripe", action="store_true", help="also remove static FPN column/row banding (luminance-only, fused)")
-    ap.add_argument("--no-denoise", action="store_true", help="disable GPU chroma denoise (blurs colour, keeps luma sharp; removes low-light colour speckle + coloured horizontal row-noise lines)")
-    ap.add_argument("--no-chroma-shade", action="store_true", help="disable the runtime spatial colour-shading correction (auto per-row/col chroma flatten). It fixes the intrinsic magenta-top/green-bottom gradient + coloured stripes; disable only if it desaturates a genuinely large uniform-colour scene.")
+    ap.add_argument("--denoise", action="store_true", help="[human-view polish; off by default for speed] GPU chroma denoise (blurs colour, keeps luma sharp; removes low-light colour speckle + coloured horizontal row-noise lines). Not needed for YOLO.")
+    ap.add_argument("--chroma-shade", action="store_true", help="[human-view polish; off by default for speed] runtime spatial colour-shading correction (auto per-row/col chroma flatten) that neutralizes the intrinsic magenta-top/green-bottom gradient. CPU per-frame (~5-10ms). Not needed for YOLO.")
     ap.add_argument("--chroma-shade-strength", type=float, default=0.9, help="strength of the runtime spatial colour-shading correction (0..1, default 0.9)")
     ap.add_argument("--saturation", type=float, default=1.25, help="colour saturation multiplier (1.0=neutral; low-light + softened CCM mute colour, so boost it a bit. default 1.25)")
     ap.add_argument("--denoise-radius", type=int, nargs=2, metavar=("RX","RY"), default=None, help="chroma-denoise window radii (default 2 3; larger RY kills horizontal colour lines harder, softer colour)")
@@ -811,9 +812,9 @@ if __name__ == "__main__":
     if args.ccm_strength is not None: CCM_STRENGTH = args.ccm_strength
     if args.shade_chroma is not None: SHADE_CHROMA = args.shade_chroma
     SHADE_FLIP = os.environ.get("SHADE_FLIP", "")
-    DENOISE = not args.no_denoise
+    DENOISE = args.denoise
     if args.denoise_radius is not None: DENOISE_RX, DENOISE_RY = args.denoise_radius
-    if not args.no_chroma_shade:
+    if args.chroma_shade:
         CHROMA_SHADE = ChromaShade(alpha=args.chroma_shade_strength, sat=args.saturation)
     load_camera_profile(CAMERA_MODEL)              # sets geometry/format/defaults/AE/CCM from profiles/<model>.json
     if args.ccm_ct is not None: CCM_CT = args.ccm_ct   # CLI colour-temp overrides the profile default

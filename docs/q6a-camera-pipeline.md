@@ -430,9 +430,15 @@ chroma-noise metric (isolates noise from a moving scene; measured in a central p
   off); the fused correction now subtracts the same per-row/col offset from all channels. Still off by default
   (`--destripe`) — the visible horizontal lines are per-frame row *read noise*, not static FPN, so the chroma
   denoise handles them; the static destripe only catches fixed-pattern banding.
-- **Net colour state:** AWB (global WB) + CCM 0.75 (spectral) + luminance-only shade (vignetting) + runtime
-  `ChromaShade` poly gradient-removal + saturation 1.25 (spatial colour) + chroma denoise (colour noise) →
-  neutral corner-to-corner on walls, real object colour preserved and lively, colour speckle ~1.4, horizontal
-  colour stripes low, at ~22 fps. Residual is luminance grain (inherent to the low-light small-sensor +
-  high-gain regime) — not colour. The `ChromaShade` per-frame CPU cost trends fps down (~27→22); GPU-ifying it
-  is the obvious next optimization if fps matters.
+- **DEFAULT = fast RGB, minimal colour (decided 2026-07-05).** After ~2 days of colour tuning we concluded the
+  colour polish is **for human viewing only — YOLO never needed it** (the detector reads the processed RGB at
+  `q6a_camstream.py:588` and detects fine through a colour cast; COCO models are colour-cast-robust). And
+  **grayscale would HURT YOLO** (COCO is trained on RGB with colour augmentation — gray removes information),
+  so B&W is not a detection win. Performance being the priority, the heavy polish is now **opt-in**: default is
+  `demosaic + WB + AWB + AE + in-kernel CCM (0.75) + luminance vignetting` → **32 fps** (the indoor
+  exposure ceiling), YOLO unaffected. Enable the polish for a nicer human view: `--chroma-shade` (neutralize the
+  magenta-top/green-bottom gradient, CPU ~5-10 ms/frame → ~22 fps), `--denoise` (chroma speckle + colour
+  stripes, GPU → ~27 fps), `--saturation`, `--chroma-shade-strength`. The CCM/AWB/AE/vignetting are ~free and
+  stay on. Residual in the default is the colour cast + luminance grain (both inherent to the low-light
+  small-sensor regime); acceptable for a robot feed. If neutral colour at full fps is ever wanted, GPU-port
+  `ChromaShade`.
