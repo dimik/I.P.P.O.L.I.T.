@@ -18,15 +18,42 @@ camera feeds live object detection (YOLOv8 / COCO) and a human-viewable MJPEG st
   (`192.168.20.0/24`, `ssh ippolit-lan`).
 - **OS:** Ubuntu 24.04 (Radxa `rsdk-r2`), `qcom` kernel 6.18, headless (auto-suspend masked).
 
-## 3. Why the whole ISP runs in userspace (central constraint)
-- The QCS6490 has a Spectra ISP + Venus encoder, but on **mainline `qcom-camss` the camera path is RDI-only**
-  — it delivers **packed raw Bayer** (`pBAA`, 10-bit) and nothing more. The Titan ISP pixel pipeline (HW
-  demosaic) is driven by an undocumented embedded-CPU firmware stream, out of mainline scope. Verified: the
-  `vfe_pix` pads enumerate but `STREAMON` hangs / yields 0 frames.
-- **CAMX** (vendor ISP path) needs a proprietary CHI-CDK IMX296 sensor bring-up (gated) and pulls a
-  conflicting fastrpc; the **Venus HW encoder hard-reboots this board** (TrustZone PIL gate). Both ruled out.
-- So: **capture raw → demosaic + ISP + encode in userspace**, exactly as the kernel maintainers prescribe.
-  GPU for the ISP, NPU for detection, CPU for glue.
+## 3. Why the whole ISP runs in userspace on the GPU (central decision)
+This is the load-bearing architectural decision. The QCS6490 has a **Spectra 570L ISP** (HW demosaic, tone,
+3A) and a **Venus** encoder — on paper you would let the ISP demosaic and Venus encode H.264, and the CPU/GPU
+do almost nothing. **Neither is usable on this board's mainline software stack**, established empirically:
+
+- **Mainline `qcom-camss` exposes only the RDI (Raw Dump Interface).** `/dev/video0` delivers **packed raw
+  Bayer** (`pBAA`, MIPI RAW10) and nothing else. The Titan ISP's pixel pipeline (demosaic/tone/3A) is driven
+  by an **undocumented embedded-CPU command stream** that Qualcomm deliberately keeps out of mainline. The
+  `vfe3_pix`/`vfe4_pix` pads *do* enumerate and *advertise* UYVY output, which is a trap — wiring them and
+  calling `STREAMON` **hangs the driver / yields 0 frames** (verified experiment). There is no mainline path
+  to the hardware demosaic.
+- **CAMX (the vendor camera stack, `qcom-camx` + `qtiqmmfsrc`) is the only route to the ISP, and it is
+  triple-blocked:** (a) it needs a **proprietary CHI-CDK sensor bring-up for the IMX296** — the PPA ships only
+  the *compiled* `com.qti.sensormodule.*.bin`, no XML / `buildbins` / source, so you cannot add a sensor;
+  (b) `qcom-camx` pulls **`qcom-fastrpc`, which conflicts with Radxa's fastrpc fork** (the same clash that
+  blocked a full QAIRT 2.46 apt migration — see §9); (c) it targets the **Venus encoder, which reboots the
+  board** (below).
+- **The Venus HW encoder (`/dev/video17`, H.264/HEVC) HARD-REBOOTS this board.** The driver enumerates NV12→
+  H264 and looks healthy, but starting an encode **instantly power-cycles the board** (uptime went 17374 s →
+  135 s; last log `qcom-venus: non legacy binding`). Root cause: on sc7280/QCS6490 non-ChromeOS boards Venus
+  firmware loads via a **TrustZone secure PIL** and encode-start trips a hypervisor gate → reset. Fixing it
+  needs **physical UEFI access** (SPI fw ≥ `6.0.260120` **and** UEFI → *Hypervisor Override = Enabled*), and
+  even then it is a *bandwidth* win, not latency/fps. So: no HW H.264.
+- **There is no HW JPEG anywhere on mainline** either (not in Venus, camss, GPU or DSP), so the encode is
+  libjpeg-turbo on the CPU.
+
+**Conclusion (matches what the kernel/linux-media maintainers prescribe):** capture RDI raw, then do
+**unpack + demosaic + white-balance + tone-map + encode in userspace**. Then the choice was *where*:
+- **CPU (numpy):** correct but **~3 fps at 79 °C** — the demosaic alone is ~290 ms/frame. Unusable.
+- **GPU (Adreno OpenCL):** the whole ISP as one kernel → **~16–19 fps**, CPU nearly idle. **Chosen.** It also
+  contradicts the common community claim that "the Adreno is unusable on Q6A Ubuntu, only the NPU works" —
+  the proprietary `qcom-adreno-cl` driver works on the stock `msm` kernel via dma-heap, no KGSL swap.
+- **NPU:** wrong tool for a demosaic (it is a fixed-function tensor engine); reserved for YOLO.
+
+So the pipeline is a direct consequence of the hardware/software reality, not a preference: **RDI raw → GPU
+ISP → NPU detection → CPU JPEG/serve.**
 
 ## 4. Pipeline architecture (two processes, no lock)
 ```
@@ -118,7 +145,86 @@ capture → GPU demosaic → shm → YOLO unconditionally.
   WB + demosaic + tonemap (≈free).
 - Launch: `python3 q6a_camstream.py --cam 2 --gpu --bin --headless` (AWB/CCM already opt-in → off).
 
-## 9. Areas to challenge (for the reviewer)
+## 9. Dead ends hit & hardware/software limitations
+Every rejected path below was tried and failed empirically — listed so the reviewer can judge whether any
+deserves revisiting and understands the constraints the design works within.
+
+### Sensor bring-up / kernel
+- **Nothing shipped working.** No `imx296.ko` and no working overlay existed for this board; both were built
+  from scratch. Overlay gotchas that each cost a boot-loop or 0-frames:
+  - **Radxa's stock camera overlays BOOT-LOOP the board** — the overlay's `linux,cma` reserved-memory node
+    collides with the `cdsp`/`video`/`zap` firmware reservations → kernel can't reserve them → loop. Fix:
+    **strip the `linux,cma` fragment** (CAMSS uses system CMA). This was ahead of the community — nobody had a
+    working setup.
+  - **`data-lanes=<1>`** — IMX296 is 1-lane MIPI; 2 lanes → **0 frames**.
+  - **`clock-names="inck"`** + 37.125 MHz mclk (driver requirement).
+  - **en7581 DTB trap** — enabling an overlay can trigger a BLS-entry regen that picks the wrong DTB
+    (`en7581-evb.dtb`, a MediaTek board — the kernel ships all vendors' DTBs) → won't boot. Must pin
+    `/etc/kernel/devicetree`.
+  - Boot backend is **embloader (systemd-boot/EDK2), not extlinux** — overlays enable via a
+    `devicetree-overlay` line in the BLS entry, not the usual extlinux.conf.
+- **Recovery:** a camera-overlay brick is a boot-config problem, **not** fs corruption — recover via microSD +
+  mount NVMe + remove the overlay line. No data-wiping reflash needed. (One `dd`-clone left the SD & NVMe with
+  duplicate FS/PART UUIDs — never boot both inserted.)
+- **`BG10` (unpacked RAW10) → `STREAMON` EPIPE.** Must use **`pBAA`** (packed) at the video node.
+
+### Sensor 2×2 FD binning — investigated deeply, abandoned
+Goal was charge-domain 2×2 binning (cleaner SNR + ¼ MIPI). The mainline `imx296.c` *has* binning code
+(crop=full + half-size subdev fmt → `CTRL0D` HADD|FD_BINNING) but **never programs `MIPIC_AREA3W` (0x4182)**,
+the MIPI TX active-line count → camss hangs waiting for frame-end. A one-line driver patch stops the hang, but
+then **frames come back EMPTY (all 0xFF)** — the binned pixel payload never lands. Confirmed via an
+instrumented **`qcom-camss` debug build** that the CSID (`rx=0x0`, zero CSI-2 errors) and VFE IRQ status are
+**byte-for-byte identical to a working full-res frame** — camss isn't dropping anything; the **sensor's
+FD-binned MIPI payload itself is invalid** (railed at max-code 0x3FF, exposure-independent). It needs Sony's
+NDA FD-readout registers (VCUTMODE/OB/sequence) that neither mainline nor RPi's driver program. **Verdict:
+non-functional through mainline qcom-camss; GPU digital `--bin` gives the same 728×544, works, and is faster.**
+
+### Accelerator / model limits
+- **GPU + NPU concurrently in one PROCESS segfaults** — they corrupt the shared userspace dma-heap/rpcmem
+  allocator (no traceback; the board survives). Forced the **two-process** architecture (§4). GPU-alone or
+  NPU-alone are fine.
+- **YOLOv11/YOLOv10 do NOT run on v68 — at ANY QNN version.** Their attention `MatMul` (C2PSA/PSA) requires
+  HTP arch **≥73**; v68 is rejected (`incorrect Value 68, expected >= 73`), confirmed locally *and* by AI
+  Hub's own cloud compile failing (`exit code 14`). → forced **YOLOv8** (no attention).
+- **QAIRT version maze.** AI Hub only builds **2.45/2.46/2.47**; the board runs **2.42**; a 2.45 artifact
+  won't load (`dlc handle code 1002`); the pip `qai_appbuilder` caps at 2.40. The working recipe: export a
+  **w8a16 QDQ ONNX** from AI Hub → convert **ONNX→2.42 DLC** with the x86 `qairt-converter` on the Odyssey →
+  `qnn-context-binary-generator` on the Q6A for the v68 binary. Note the **x86 `qairt-quantizer` SIGILLs on
+  the Odyssey's Celeron J4125 (no AVX2)** — quantization can't run on the host; only the *converter* (no AVX2
+  needed) does. A full **QAIRT 2.46 apt migration was abandoned** — blocked by the Radxa-vs-qcom fastrpc fork
+  clash, and buys no capability.
+- **`PYOPENCL_NO_CACHE` trap:** the pyopencl compiled-kernel cache **silently served stale binaries** across
+  `q6a_gpu.py` edits — kernel changes had *no effect* until the cache was bypassed. Cost real debugging time;
+  now forced off + cache dirs cleared on launch.
+
+### Colour pipeline dead ends (the 2-day saga, condensed)
+The root cause was a **red↔blue Bayer swap** (profile said BGGR, sensor delivers **RGGB**) — every "cast" we
+chased was that swap × WB/CCM, and no colour correction can fix a channel swap. Diagnosed only when a
+**colour test chart** made it unambiguous (yellow→cyan, magenta-stable). Along the way, each of these was
+tried and reverted because it was treating the symptom, not the cause:
+- **Gray-world AWB** → tints neutral walls green on a non-gray room (→ replaced by white-patch).
+- **Neutral-weighted AWB** (first white-patch attempt) → chicken-and-egg: judging "neutral" via the *current*
+  WB locked onto warm surfaces that looked grey at the wrong WB. Fixed by selecting on **brightness (G)**,
+  which is WB-independent.
+- **Highlight desaturation, chroma denoise, per-row/col chroma-flatten, CCM softening, shade chroma clamp/
+  smooth/flip, saturation boost** — all added to fight the swap, all removed after the RGGB fix.
+- **Grey-card calibration mismatch:** a paper held near the camera is lit differently than the room, so its
+  WB doesn't transfer; and **WB is brightness-dependent** (fixed black over-subtracts weak R,B at low signal),
+  so the paper (bright) and walls (dim) want different WB. Root-fixed with a **dark-frame black calibration**
+  (true per-channel pedestal) + white-patch AWB. **Mixed room lighting** (warm doorway vs green-ambient walls)
+  is an unsolvable-with-one-WB residual — physics.
+
+### Hardware/software ceilings the design lives within
+- **Passive cooling, enclosed compartment** → sustained GPU+NPU load sits ~72–74 °C (90 °C hot-trip). Heavy
+  sustained compute (e.g. a 3B GPU LLM) has thermally shut the board down; the NPU is the coolest path.
+- **Robot↔host link: USB-gadget ethernet ~11–12 MB/s** (a hard `sw_udc` DMA ceiling, not the bus) — fine for
+  compressed MJPEG/H.264 + ROS topics, **not** raw frames.
+- **Fixed VMAX** ties frame rate to `max_exposure` (6000 → ~16 fps; 3000 → ~32 fps) — the low-light/fps knob.
+- **Small 1/2.9" sensor at high analog gain** → a real low-light luminance-noise floor; exposure is the only
+  clean lever (no HW denoise; digital gain 240→480 adds noise for no SNR).
+- **v68 NPU tops out at ~1B LLMs** and YOLOv8-class detectors — no 3B / attention path on this chip.
+
+## 10. Areas to challenge (for the reviewer)
 1. **Two-process shm seqlock** vs a proper double-buffer/atomic — is the single-writer seqlock airtight under
    the detector's read cadence, and is a torn read truly impossible (vs merely skipped)?
 2. **White-patch AWB robustness** — fails if the brightest surface is a coloured light (excluded via a clip
