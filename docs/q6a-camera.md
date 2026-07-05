@@ -144,3 +144,31 @@ HTP contexts are fine). `--no-yolo` disables it.
 
 Rebuild the model end-to-end: `./build_yolo.sh yolov8_det` (Odyssey). Turnkey deploy of the prebuilt
 `models/yolov8_det.bin` happens automatically via `./view_q6a_cam.sh`.
+
+## Hardware camera acceleration on the Q6A — investigated, and why it's CPU/GPU (2026-07-05)
+
+The software ISP (demosaic+destripe+tone-map in numpy) costs **~342 ms/frame full-res (~3 fps)**; `--fast`
+half-res is ~52 ms (~19 fps). We deep-investigated using the hardware ISP/encoder and it is **not
+available to us on mainline** — the documented path is RDI raw + demosaic in userspace on CPU/GPU.
+
+- **The QCS6490 has a Spectra 570L ISP + Venus encoder** (`platform:acb3000.isp`, `platform:qcom-venus`,
+  `/dev/video17`). But on **mainline `qcom-camss` it is RDI (raw Bayer) only.** The Titan ISP pixel
+  pipeline (demosaic/AWB/tone) is driven by an **embedded CPU fed an undocumented, proprietary command
+  stream** — kernel docs state supporting it "is beyond the current scope of CAMSS due to the amount of
+  work... and the lack of documentation for the CPU command stream," and recommend userspace CPU/GPU
+  post-processing. `camss-vfe-480.c`/`-680.c` (our Titan VFE) are RDI-only (`MODE_MIPI_RAW` hardcoded).
+  The `msm_vfe3_pix`/`vfe4_pix` pads *enumerate* and even advertise UYVY, but `STREAMON` **hangs / yields
+  0 frames** (verified experiment) — the pixel pipeline can't be programmed. Ref:
+  [kernel camss docs](https://docs.kernel.org/admin-guide/media/qcom_camss.html),
+  [sc7280 support (LWN)](https://lwn.net/Articles/1001452/).
+- **The only route to the hardware ISP is CAMX** (`qcom-camx` + `qtiqmmfsrc`/QMMF, the Titan command-stream
+  provider). Ruled out for us: (1) it needs a **proprietary CHI-CDK sensor bring-up for the IMX296** — the
+  PPA ships only compiled `com.qti.sensormodule.*.bin` (imx415/476/481/519/577/586/686/766, ov9282, s5k*),
+  no editable XML/`buildbins`, and the source CHI-CDK is gated; (2) the **Venus encoder reboots this board**
+  on our firmware (`6.0.251230`; needs UEFI *Hypervisor Override* + fw ≥`6.0.260120`, ≤720p) —
+  [Radxa forum](https://forum.radxa.com/t/gstreamer-encoder-usage-reboot-the-board/29828); (3) `qcom-camx`
+  pulls `qcom-fastrpc`, which **conflicts with Radxa's `fastrpc`** (the same clash that forced our fsck).
+- **Conclusion: demosaic in userspace (kernel-blessed path). Move the CPU-heavy demosaic to the Adreno GPU
+  via OpenCL** (the stack already used for llama.cpp) → full-res at speed, no vendor stack, no board risk.
+- **Viewer note:** view the MJPEG stream with **VLC/mpv, NOT Firefox** — snap Firefox leaks decoded frames
+  into shmem (~800 MB) and the OOM killer stops it (kernel `oom-kill … task=snap.firefox`, ~845 MB shmem).

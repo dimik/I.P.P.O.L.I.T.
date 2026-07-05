@@ -32,15 +32,18 @@ scp -q "$REPO_DIR/q6a_yolo.py" "$Q6A:~/q6a_yolo.py"
 [ -f "$REPO_DIR/models/coco_labels.txt" ] && scp -q "$REPO_DIR/models/coco_labels.txt" "$Q6A:~/coco_labels.txt" 2>/dev/null || true
 [ -f "$REPO_DIR/imx296_wb.npz" ] && scp -q "$REPO_DIR/imx296_wb.npz" "$Q6A:~/imx296_wb.npz" 2>/dev/null || true
 
-echo "== start streamer on the Q6A (detached; harmless if already running) =="
+echo "== start streamer on the Q6A (detached; --fast = half-res demosaic, ~6x faster) =="
 ssh "$Q6A" "ss -ltn 2>/dev/null | grep -q ":$PORT " || \
-  setsid python3 ~/q6a_camstream.py --cam $CAM --port $PORT </dev/null >~/camstream.log 2>&1 &" || true
+  setsid python3 ~/q6a_camstream.py --cam $CAM --port $PORT --fast </dev/null >~/camstream.log 2>&1 &" || true
 sleep 3
-echo "   stream: http://$HOST_IP:$PORT/   (log: ssh $Q6A 'tail -f ~/camstream.log')"
+echo "   stream: http://$HOST_IP:$PORT/stream   (log: ssh $Q6A 'tail -f ~/camstream.log')"
 
-echo "== open viewer on the Odyssey =="
-URL="http://$HOST_IP:$PORT/"
-if command -v firefox >/dev/null; then firefox --new-window "$URL" >/dev/null 2>&1 &
-elif command -v vlc >/dev/null; then vlc "${URL}stream" >/dev/null 2>&1 &
-else xdg-open "$URL" >/dev/null 2>&1 & fi
-echo "Viewer opened. Stop the stream: ssh $Q6A 'sudo pkill -f q6a_camstream.py'"
+# DO NOT use Firefox: it leaks decoded MJPEG frames into shmem (~800MB) and the OOM killer
+# stops it. VLC/mpv render multipart/x-mixed-replace with bounded memory.
+echo "== open viewer on the Odyssey (VLC — Firefox OOMs on MJPEG) =="
+SURL="http://$HOST_IP:$PORT/stream"
+if command -v mpv >/dev/null; then mpv --profile=low-latency --no-cache "$SURL" >/dev/null 2>&1 &
+elif command -v vlc >/dev/null; then vlc --network-caching=200 "$SURL" >/dev/null 2>&1 &
+elif command -v ffplay >/dev/null; then ffplay -fflags nobuffer "$SURL" >/dev/null 2>&1 &
+else echo "No mpv/vlc/ffplay — install one (avoid Firefox)."; fi
+echo "Viewer opened (VLC). Stop the stream: ssh $Q6A 'pkill -f \"[q]6a_camstream.py\"'"

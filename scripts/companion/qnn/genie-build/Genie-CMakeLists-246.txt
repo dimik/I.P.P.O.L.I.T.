@@ -1,0 +1,127 @@
+cmake_minimum_required(VERSION 3.14)
+project(genie)
+
+# Set the C++ standard
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_C_STANDARD 17)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+add_compile_definitions(qualla_EXPORTS)
+
+# Include directories
+set(GENIE_ENGINES_CPU_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/src/qualla/engines/qnn-cpu)
+set(GENIE_ENGINES_GPU_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/src/qualla/engines/qnn-gpu)
+set(GENIE_ENGINES_API_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/src/qualla/engines/qnn-api
+                              ${CMAKE_CURRENT_SOURCE_DIR}/src/qualla/engines/qnn-api/config
+                              ${CMAKE_CURRENT_SOURCE_DIR}/src/qualla/engines/qnn-api/buffer)
+set(GENIE_ENGINES_HTP_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/src/qualla/engines/qnn-htp
+                              ${CMAKE_CURRENT_SOURCE_DIR}/src/qualla/engines/qnn-htp/nsp-utils
+                              ${CMAKE_CURRENT_SOURCE_DIR}/src/qualla/engines/qnn-htp/KVCache)
+set(GENIE_ADAPTORS_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/src/qualla/adaptors)
+set(GENIE_DIALOGS_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/src/qualla/dialogs)
+set(GENIE_ENGINES_TOKENIZERS_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/src/qualla/tokenizers)
+set(GENIE_QUALLA_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/src/qualla/include)
+set(GENIE_QUALLA_MMAPPEDFILE_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/src/qualla/MmappedFile/include)
+set(GENIE_INCLUDE include src)
+set(GENIE_PIPELINE_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/src/pipeline)
+set(GENIE_TRACE_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/src/trace/include)
+set(GENIE_QUANT_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/src/quantization/include)
+set(GENIE_RESOURCE_MANAGER_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/src/resource-manager/include)
+set(QNN_API_INCLUDE ../../../include/QNN)
+set(QNN_API_HTP_INCLUDE ${QNN_API_INCLUDE}/HTP)
+set(GENIE_C_API_HEADERS_INCLUDE ../../../include/Genie)
+
+# Set the target directory
+set(TARGET_DIR ${CMAKE_CURRENT_BINARY_DIR}/lib)
+file(MAKE_DIRECTORY ${TARGET_DIR})
+
+# Define source files
+file(GLOB_RECURSE SOURCES_GENIE_CPP "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
+set(RUST_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/qualla/tokenizers/rust)
+
+# --- LINUX/aarch64 build: exclude Windows PAL + DMA allocators (need dmabufheap); keep linux/ PAL ---
+set(GENIE_CPP_EXCLUDE
+    "DmaAllocator.cpp"
+    "DmaRegs.cpp"
+    "DmaBufAllocator.cpp"
+    "PAL/windows/")
+list(JOIN GENIE_CPP_EXCLUDE "|" RE_GENIE_CPP_EXCLUDE)
+list(FILTER SOURCES_GENIE_CPP EXCLUDE REGEX "${RE_GENIE_CPP_EXCLUDE}")
+
+# Compiler and linker flags
+set(COMMON_CFLAGS "${CMAKE_C_FLAGS}")
+set(COMMON_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+
+# Definitions
+set(QUALLA_ENABLE_ENGINE_QNN_HTP TRUE)
+set(QUALLA_ENABLE_ENGINE_QNN_GPU FALSE)
+set(QUALLA_ENABLE_ENGINE_QNN_CPU TRUE)
+
+if(QUALLA_ENABLE_ENGINE_QNN_HTP)
+    add_compile_definitions(QUALLA_ENGINE_QNN_HTP)
+endif()
+
+get_directory_property(defs COMPILE_DEFINITIONS)
+list(FILTER defs EXCLUDE REGEX "QNN_API.*")
+list(APPEND defs "GENIE_API=")
+list(APPEND defs
+    QUALLA_ENABLE_ENGINE_QNN_CPU=${QUALLA_ENABLE_ENGINE_QNN_CPU}
+    QUALLA_ENABLE_ENGINE_QNN_HTP=${QUALLA_ENABLE_ENGINE_QNN_HTP}
+    QUALLA_ENABLE_ENGINE_QNN_GPU=${QUALLA_ENABLE_ENGINE_QNN_GPU}
+    NOMINMAX
+    NOGDI
+    SPILLFILL
+    QUALLA_APPS=OFF
+    FMT_HEADER_ONLY=1
+    GENIE_SSD_FEATURE
+    GENIE_SPD_FEATURE
+    GENIE_LADE_FEATURE
+    GENIE_MULTISTREAM_FEATURE
+    GENIE_LORA_FEATURE
+    JSON_HAS_THREE_WAY_COMPARISON=0)
+set_directory_properties(PROPERTIES COMPILE_DEFINITIONS "${defs}")
+
+# Reuse the prebuilt aarch64-linux rust tokenizer libs from the working 2.42 build (identical C API).
+set(TARGET_ARCH "aarch64-unknown-linux-gnu")
+set(TK42 /home/radxa/qairt_2.42.0.251225/examples/Genie/Genie/src/qualla/tokenizers/rust/target/aarch64-unknown-linux-gnu/release)
+set(STATIC_LIB_TOKENIZERS ${TK42}/libtokenizers_capi.a)
+set(STATIC_LIB_ONIG ${TK42}/build/onig_sys-06cd7c1ecea835cd/out/libonig.a)
+
+# Define the target library
+add_library(Genie SHARED ${SOURCES_GENIE_CPP})
+target_sources(Genie PUBLIC ${SOURCES_GENIE_CPP})
+
+# Add include directories
+target_include_directories(Genie PUBLIC
+    ${GENIE_ENGINES_CPU_INCLUDE}
+    ${GENIE_ENGINES_GPU_INCLUDE}
+    ${GENIE_ENGINES_API_INCLUDE}
+    ${GENIE_ENGINES_HTP_INCLUDE}
+    ${GENIE_ADAPTORS_INCLUDE}
+    ${GENIE_DIALOGS_INCLUDE}
+    ${GENIE_ENGINES_TOKENIZERS_INCLUDE}
+    ${GENIE_QUALLA_INCLUDE}
+    ${GENIE_QUALLA_MMAPPEDFILE_INCLUDE}
+    ${GENIE_INCLUDE}
+    ${QNN_API_INCLUDE}
+    ${QNN_API_HTP_INCLUDE}
+    ${GENIE_C_API_HEADERS_INCLUDE}
+    ${GENIE_PIPELINE_INCLUDE}
+    ${GENIE_TRACE_INCLUDE}
+    ${GENIE_QUANT_INCLUDE}
+    ${GENIE_RESOURCE_MANAGER_INCLUDE})
+
+set_target_properties(Genie PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_compile_definitions(Genie PUBLIC ${defs})
+
+# Link rust tokenizer + its transitive deps (Linux)
+target_link_libraries(Genie PUBLIC
+    ${STATIC_LIB_TOKENIZERS}
+    ${STATIC_LIB_ONIG}
+    gcc_s util rt pthread m dl)
+
+# Output directories
+set_target_properties(Genie PROPERTIES
+    ARCHIVE_OUTPUT_DIRECTORY ${TARGET_DIR}
+    LIBRARY_OUTPUT_DIRECTORY ${TARGET_DIR}
+    RUNTIME_OUTPUT_DIRECTORY ${TARGET_DIR})
