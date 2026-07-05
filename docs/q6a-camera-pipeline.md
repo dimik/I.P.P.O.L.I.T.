@@ -168,3 +168,24 @@ A double-buffered zero-copy shm would close most of it (not yet done — diminis
 - **Firefox OOMs on MJPEG** (shmem leak) — view with VLC/mpv.
 - **Board is fragile:** NPU restart-storming wedges the cdsp (→ reboot); a hard power-cut while writing
   corrupts the ext4 root (→ initramfs; recover with `e2fsck -y /dev/nvme0n1p3`).
+
+---
+
+## 5. Update — entire ISP on the GPU, CPU near-idle (2026-07-05)
+After the two-process split, three more efficiency moves put the *whole* ISP on the Adreno:
+- **GPU RAW10 unpack** — the kernels (`isp`/`isp_bin`) take the **packed pBAA buffer + stride** and unpack
+  on-device (`bget_packed`); the ~12 ms CPU `unpack_raw10` is gone. Auto-exposure reads the packed high
+  bytes (`_auto_scale_packed`).
+- **GPU destripe** — `col_sum`/`row_sum` reduction kernels + `destripe_sub` (CPU only smooths the tiny
+  (W,3)/(H,3) correction vectors). Replaces the ~11 ms CPU `_destripe_u8`. `--destripe` now runs on GPU.
+- **Analog gain 200→380** — cleaner low light (analog gain beats digital tone-map scaling).
+
+**Net:** unpack + demosaic/bin + WB + shading + tone-map + destripe **all run on the Adreno**. The CPU does
+only auto-exposure (~1 ms) + JPEG (~4 ms in bin) + the shm copy + HTTP serve. **CPU load ~1.3 → 0.42**,
+**temp 57 → 55 °C**, fps **~21.5 (sensor-limited at exp 3000)** — the camera, not the SoC, is now the cap.
+What the sensor exposes that is *not* usable: 8-bit/YUV video formats (advertised but hang — RDI is
+packed-10-bit only; needs the ISP). Only lever left for more fps is lower exposure (noisier).
+
+**Default run config:** `--gpu --bin --destripe --gain 380` (via `view_q6a_cam.sh`). Remaining known item:
+the cyan/green cast is the room illuminant — fix with a grey-card `./view_q6a_cam.sh calibrate` (needs a
+person to aim the camera at a uniform surface).
