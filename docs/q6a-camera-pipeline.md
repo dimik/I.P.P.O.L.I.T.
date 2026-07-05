@@ -189,3 +189,50 @@ packed-10-bit only; needs the ISP). Only lever left for more fps is lower exposu
 **Default run config:** `--gpu --bin --destripe --gain 380` (via `view_q6a_cam.sh`). Remaining known item:
 the cyan/green cast is the room illuminant — fix with a grey-card `./view_q6a_cam.sh calibrate` (needs a
 person to aim the camera at a uniform surface).
+
+---
+
+## 6. Efficiency deep-dive & final numbers (2026-07-05)
+
+### Performance table (full arc, live fps with YOLO)
+| Stage | fps | temp | notes |
+|---|---:|---:|---|
+| CPU numpy full-res ISP | ~3 | 79 °C | everything on CPU |
+| Lean full-GPU ISP → uint8 | ~8.6 | 52 °C | demosaic+WB+tonemap on GPU |
+| + V4L2 mmap capture | ~16 | 52 °C | drain-to-latest |
+| + two-process (no lock) | ~19 | 62 °C | GPU ∥ NPU |
+| + GPU unpack + gain 380 | ~21 | 57 °C | RAW10 unpack on GPU; CPU freed |
+| + GPU destripe (round-trip) | ~22 | 55 °C | all ISP on GPU, but stalled on readback |
+| **+ vblank fix + GPU-only destripe** | **~32** | 56 °C | **frame timing + no round-trip** |
+| `--gpu --bin` (no destripe) | 32.2 | 47 °C | fastest/coolest |
+| `--gpu` (full-res, no destripe) | 22.0 | 49 °C | full 1456×1088 |
+
+**~3 → ~32 fps** live, full detection, CPU near-idle (load 0.15). Default: `--gpu --bin --destripe --gain 380`.
+
+### The vblank win (biggest free gain)
+The IMX296 does **60 fps at full res** — our cap was never the sensor, it was `frame_length`. Frame length =
+`H + vblank` must be ≥ exposure; the old `vblank = exposure+200` padded it ~1.4× longer than needed. Setting
+`vblank = max(30, exposure − H + 64)` (minimum for the exposure) gives **+45% fps at the SAME exposure**
+(same brightness, same noise): exp=3000 went 22 → 32 fps. To go faster still, only shorter exposure helps
+(noisier in dim light) — the fundamental light/speed trade.
+
+### Format investigation — settled
+- **The sensor is 10-bit only** (`SBGGR10_1X10`; no 8-bit mode). So **BA81/8-bit is impossible** at the
+  sensor — not a driver bug.
+- **UYVY/YUV** need the ISP (demosaic) → unavailable on mainline (RDI is raw passthrough). Both hang.
+- **`pBAA` (packed RAW10) is the only capture format** — and we now **unpack it on the GPU** (`bget_packed`),
+  so the packing costs nothing.
+
+### Design questions
+- **Do we need destripe?** It removes real FPN column/row banding. After the GPU-only rewrite it's
+  **free (32 fps with or without it)**, so keep it on. (Binning alone reduces FPN ~2× but leaves residual
+  banding.) A one-time dark-frame calibration would be the "proper" FPN fix but isn't worth it now.
+- **More efficient binary ops for unpack/destripe?** No meaningful win. Unpack is per-pixel bit-shifts on
+  the GPU (memory-bound; vectorised `uchar4` loads would be marginal). Destripe is GPU reductions + a
+  box-corr kernel. Both are already off the CPU and fast.
+- **Rewrite to C/Rust?** **Not worth it.** The heavy compute already runs native — the ISP on the Adreno
+  (OpenCL) and detection on the Hexagon (QNN). The CPU is idle (load 0.15); its only jobs are auto-exposure
+  (~1 ms), JPEG (~4 ms, native libjpeg under PIL), the shm copy, and HTTP I/O. Python is just orchestration
+  at ~30 fps — a rewrite would gain ~nothing. The ceiling is the sensor/GPU, not the language.
+- **JPEG:** 3.9 ms (bin) / 13.6 ms (full). Small; hardware JPEG needs CAMX (unavailable), GPU JPEG is
+  impractical (serial Huffman). libjpeg-turbo would ~halve it if ever needed.
