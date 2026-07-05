@@ -355,9 +355,15 @@ in daytime). Added a real AE loop (`auto_exposure()` in `q6a_camstream.py`, on b
 disable):
 - Measures raw brightness + saturated-pixel fraction from the packed RAW10 **high bytes** (cheap, no unpack),
   every ~8 frames (~4 Hz).
-- Nudges the sensor **exposure** toward a target raw mean (headroom for highlights), with a **deadband**
-  (hold when within ±25%) + **partial-step damping** (move 40%/step) to avoid feedback oscillation (the
-  sensor latches exposure a frame or two late). `vblank` tracks exposure so frame length stays minimal
-  (lower exposure → higher fps). Drops to **gain** only at the exposure floor (too bright) or ceiling (dark).
-- Result: bright daytime drops exposure ~3000 → ~290 lines (≈10×) → no saturation; converges in ~2–3 s and
-  holds. Calibration is unaffected (it runs a fixed exposure outside the capture loop).
+- Meters the raw high-byte **median** (robust to BOTH a dark surround and a bright window/lamp; a mean is
+  fooled by either — window-dominated mean crushes exposure → black subject + amplified row-noise stripes;
+  dark-surround mean chases exposure to the ceiling → pure noise). The tone-map normalizes DISPLAY brightness
+  separately, so AE only keeps the raw in a sane band (no clip, low noise).
+- **Deadband** (hold within ±25% of target) + **partial-step damping** (40%/step) kill feedback oscillation
+  (the sensor latches exposure ~1–2 frames late). `vblank` tracks exposure so frame length stays minimal.
+  Exposure clamped to [30, 4000] lines (keeps fps ≥~24 and out of the deep-noise regime); gain only at the
+  clamp ends.
+- Result: bright daytime drops exposure to a few hundred lines (no saturation); a dark backlit room settles
+  at a balanced ~2500 lines (subject visible, no stripes) instead of going black or to noise. Converges in
+  ~2–3 s and holds. Calibration is unaffected (fixed exposure, outside the capture loop). Residual color cast
+  in mixed light (room vs window) is a separate white-balance limit, not exposure.

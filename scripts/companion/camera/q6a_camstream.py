@@ -41,8 +41,8 @@ TARGET_MEAN = 95.0                            # tone-map target brightness (DISP
 SENSOR_SD = None                              # sensor subdev path (discovered in setup_pipeline)
 EXPOSURE = 3000; GAIN = 240                   # current sensor exposure (lines) / gain (ctrl); AE updates these
 AE_ON = True                                  # runtime sensor auto-exposure
-AE_TARGET = 90.0                              # target raw high-byte mean (~raw 360/1023 -> ~2.8x highlight headroom)
-AE_MIN_EXP = 30; AE_MAX_EXP = 8000            # exposure clamp (lines)
+AE_TARGET = 70.0                              # target raw high-byte MEDIAN (robust to dark corners + bright window)
+AE_MIN_EXP = 30; AE_MAX_EXP = 4000            # exposure clamp (lines); cap keeps fps >=~24 + out of the deep-noise regime
 # YOLO runs in a SEPARATE PROCESS (q6a_detector.py) sharing frames via shared memory. The Adreno (GPU
 # ISP) and Hexagon (NPU) crash if driven concurrently in ONE process (shared userspace allocator
 # corruption) but run fine across processes -> no lock, true concurrency. shm layout <-> q6a_detector.py.
@@ -145,12 +145,13 @@ def auto_exposure(buf):
     if _AE_N % 8:                                  # ~4 Hz at 31 fps
         return
     a = np.frombuffer(buf, np.uint8)[:STRIDE * H].reshape(H, STRIDE)[:, :W * 10 // 8].reshape(H, W // 4, 5)
-    hi = a[::4, ::4, :4]                            # high-byte subsample (raw >> 2, 0..255)
-    mean = float(hi.mean()); sat = float((hi >= 250).mean())
-    ratio = AE_TARGET / max(mean, 1.0)
-    if sat > 0.03:                                  # blown highlights -> cut exposure hard (beats deadband)
-        ratio = min(ratio, 0.6)
-    elif 0.75 < ratio < 1.30:
+    hi = a[::4, ::4, :4].astype(np.float32)         # high-byte subsample (raw >> 2, 0..255)
+    # Median brightness: robust to BOTH a dark surround (which pulls the mean down → overexpose to noise)
+    # AND a bright window/lamp (which pulls the mean up → crush exposure → dark subject). The tone-map
+    # normalizes DISPLAY brightness separately; AE just keeps the raw in a sane band (no clip, low noise).
+    mid = float(np.median(hi))
+    ratio = AE_TARGET / max(mid, 1.0)
+    if 0.75 < ratio < 1.30:
         return                                      # within deadband -> hold steady (no hunting)
     ratio = min(max(ratio, 0.5), 2.0)
     target_exp = EXPOSURE * ratio                   # partial step toward target -> damped, no overshoot/chase
