@@ -161,8 +161,11 @@ def init_gpu():
         GPU.set_ccm(load_ccm(CCM_CT) if CCM_ON else None)   # ready-made color matrix (profile)
         GPU.denoise = DENOISE                  # chroma denoise (colour-noise / horizontal colour lines)
         GPU.cd_rx, GPU.cd_ry = DENOISE_RX, DENOISE_RY
-        print(f"GPU ISP enabled: {GPU.dev_name} (demosaic+WB+CCM+tonemap"
-              + (f"+chroma-denoise {2*DENOISE_RX+1}x{2*DENOISE_RY+1}" if DENOISE else "") + " on GPU)", flush=True)
+        stages = "demosaic+WB" + ("+AWB" if AWB_ON else "") + ("+CCM" if CCM_ON else "") \
+            + ("+shade" if SHADE is not None else "") + "+tonemap" \
+            + (f"+denoise{2*DENOISE_RX+1}x{2*DENOISE_RY+1}" if DENOISE else "") \
+            + ("+chroma-shade" if CHROMA_SHADE is not None else "")
+        print(f"GPU ISP enabled: {GPU.dev_name} ({stages} on GPU)", flush=True)
     except Exception as e:
         GPU = None
         print(f"GPU unavailable ({e}); using CPU numpy demosaic", flush=True)

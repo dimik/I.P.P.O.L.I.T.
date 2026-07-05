@@ -67,7 +67,12 @@ ssh "$Q6A" "[ -f /etc/OpenCL/vendors/adreno.icd ] || (sudo mkdir -p /etc/OpenCL/
 # "start only if the port is free" logic silently kept a stale pre-calibration stream running -> made
 # calibration look like it did nothing (the running process never re-read the profile).
 stop_streamer
-ssh "$Q6A" "setsid python3 ~/q6a_camstream.py --cam $CAM --port $PORT --gpu --bin </dev/null >~/camstream.log 2>&1 &" || true
+# Plain, fast view: demosaic + fixed WB + tonemap only. The colour "corrections" (CCM/AWB/shade/denoise/
+# chroma-shade) fought tonight's mixed lamp+room lighting and looked worse than raw, so they're OFF here and
+# YOLO doesn't need them. Add them back for a nicer human view: --ccm-strength 1 --shade-chroma 1 (drop
+# --no-awb --no-ccm), plus --chroma-shade for mixed-illuminant neutrality. Proper colour wants a fresh
+# calibration under representative light, not live knob-twiddling.
+ssh "$Q6A" "setsid python3 ~/q6a_camstream.py --cam $CAM --port $PORT --gpu --bin --no-ccm --no-awb </dev/null >~/camstream.log 2>&1 &" || true
 sleep 3
 echo "   stream: http://$HOST_IP:$PORT/stream   (log: ssh $Q6A 'tail -f ~/camstream.log')"
 
