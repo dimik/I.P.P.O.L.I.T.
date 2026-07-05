@@ -74,7 +74,11 @@ __kernel void isp(__global const uchar* pk, __global const float* shade, __globa
     R = 255.0f*native_powr(clamp(R*scale/255.0f, 0.0f, 1.0f), 0.7f);   // tone map: scale to target + gamma
     G = 255.0f*native_powr(clamp(G*scale/255.0f, 0.0f, 1.0f), 0.7f);
     B = 255.0f*native_powr(clamp(B*scale/255.0f, 0.0f, 1.0f), 0.7f);
-    out[o]=(uchar)(R+0.5f); out[o+1]=(uchar)(G+0.5f); out[o+2]=(uchar)(B+0.5f);
+    float mx = fmax(fmax(R,G),B);                                       // highlight desaturation (see isp_bin)
+    float t  = clamp((mx - 190.0f) * (1.0f/65.0f), 0.0f, 1.0f);
+    float lum = 0.299f*R + 0.587f*G + 0.114f*B;
+    R += (lum-R)*t; G += (lum-G)*t; B += (lum-B)*t;
+    out[o]=(uchar)clamp(R+0.5f,0.0f,255.0f); out[o+1]=(uchar)clamp(G+0.5f,0.0f,255.0f); out[o+2]=(uchar)clamp(B+0.5f,0.0f,255.0f);
 }
 // 2x2 BINNED ISP: one output pixel per Bayer quad (uses real photosites, averages the 2 greens ->
 // ~2x less noise, no demosaic interpolation) + WB + tone map. Output is half-res (OW=W/2, OH=H/2).
@@ -99,6 +103,13 @@ __kernel void isp_bin(__global const uchar* pk, __global const float* shade, __g
         go -= dcol[ox*3+1]+drow[oy*3+1];
         bo -= dcol[ox*3+2]+drow[oy*3+2];
     }
+    // Highlight desaturation: a blown region carries no real color (one channel clips before the others -
+    // here WB pushes R,B to 255 while G lags -> magenta walls/windows). Fade toward luma as the brightest
+    // channel approaches max so clipped highlights render neutral white instead of magenta.
+    float mx = fmax(fmax(ro, go), bo);
+    float t  = clamp((mx - 190.0f) * (1.0f/65.0f), 0.0f, 1.0f);
+    float lum = 0.299f*ro + 0.587f*go + 0.114f*bo;
+    ro += (lum-ro)*t; go += (lum-go)*t; bo += (lum-bo)*t;
     out[o]  =(uchar)clamp(ro+0.5f,0.0f,255.0f);
     out[o+1]=(uchar)clamp(go+0.5f,0.0f,255.0f);
     out[o+2]=(uchar)clamp(bo+0.5f,0.0f,255.0f);
