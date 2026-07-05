@@ -555,10 +555,14 @@ noise). YOLOv8 NPU ~**37–44 ms/infer**, capped to **10 fps** (`--yolo-fps`). B
   trained with heavy colour augmentation and is robust to casts (it detected fine even through the R↔B swap).
   Dropping them saves a little CPU/GPU and removes all the tuning surface. Keep a **fixed WB + demosaic +
   tonemap** (≈free, gives YOLO a normal gamma-encoded RGB). Grayscale would HURT YOLO (removes info) — don't.
-- **Bigger win than the colour stuff: skip the MJPEG server + JPEG encode** when there's no viewer (~10 ms
-  CPU/frame + the HTTP thread). The detector reads the demosaiced RGB straight from shm; the JPEG/HTTP path is
-  only for human viewing. (A `--headless` flag that runs capture→demosaic→shm→detector without the server
-  would be the clean way; not yet implemented.)
-- Practical minimal launch today: `--gpu --bin` (AWB/CCM already opt-in, so off) + a profile with
-  `shadow_tint` r=b=0 and no `shading` (or accept their ~1 ms cost). Keep `--bin` (728×544 is plenty for the
-  640×640 YOLO letterbox). Net: AE-controlled, cast-tolerant, fastest path to the detector.
+- **Bigger win than the colour stuff: `--headless`** (implemented) — skips the MJPEG server, JPEG encode and
+  overlay draw; capture→GPU demosaic→shm→detector runs unconditionally (no client-gating). The detector reads
+  the demosaiced RGB straight from shm. **Measured (same board/ambient, `--gpu --bin`, gain 240):** the
+  `q6a_camstream` process drops from **~51 %CPU (server, 1 client) → ~27 %CPU headless** — roughly half, i.e.
+  ~a quarter-core freed (the JPEG encode + overlay + HTTP serve). fps unchanged at ~16 (VMAX/max_exposure-
+  limited, not compute-limited — drop max_exposure to 3000 for ~32 fps); detector ~36–44 %CPU either way;
+  board ~72–74 °C both. So headless buys **CPU headroom/power** (for ROS/nav), not fps, at this exposure.
+- Production launch: `python3 q6a_camstream.py --cam 2 --gpu --bin --headless` (AWB/CCM already opt-in, so off;
+  AE on, gain capped 240). For zero colour-comp cost use a profile with `shadow_tint` r=b=0 and no `shading`
+  (or accept their ~1 ms). Keep `--bin` (728×544 covers the 640×640 YOLO letterbox). Net: AE-controlled,
+  cast-tolerant, minimal-CPU path to the detector.

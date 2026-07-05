@@ -57,6 +57,8 @@ CCM_ON = False                                 # ready-made CCM (RPi IMX296 tuni
                                                # WB gains are high, and it amplifies low-light chroma noise.
 DESTRIPE = False                              # optional FPN band removal; off by default
 BIN = False                                   # GPU digital 2x2 binning -> half-res, ~2x less noise + faster
+HEADLESS = False                              # production: capture -> demosaic -> shm -> YOLO only; no MJPEG
+                                              # server / JPEG encode / overlay draw. Capture runs unconditionally.
 SENSOR_BIN = False                            # sensor 2x2 FD binning (charge-domain, cleaner): capture 728x544
 TARGET_MEAN = 95.0                            # tone-map target brightness (DISPLAY, digital — see AE below)
 TONEMAP_GAMMA = 0.7                           # tone-curve gamma (single source of truth; profile "tonemap.gamma",
@@ -576,11 +578,12 @@ class State:
 
 def process(buf, full):
     rgb = debayer(buf, full)                                # packed RAW10 in -> (H,W,3) uint8 (GPU unpacks)
-    dets = None
     if DET is not None:
         DET["frame"][:] = rgb                              # publish latest frame to the detector (shm)
         DET["fseq"][0] += 1
-        dets = _read_dets()                                # newest detections (lag ~1 inference)
+    if HEADLESS:                                           # production: feed YOLO only, no human-view work
+        return                                             # skip overlay draw + JPEG encode (saves ~10 ms/frame)
+    dets = _read_dets() if DET is not None else None       # newest detections (lag ~1 inference)
     rgb = draw_overlay(rgb, dets)                          # returns a new array (PIL) if dets else same
     bio = BytesIO(); Image.fromarray(rgb).save(bio, "JPEG", quality=80)
     with State.lock:
@@ -647,7 +650,7 @@ def capture_loop(rdi, full):
     import time as _t
     cam = None; fails = 0; _hbn = 0; _hbt = _t.time()
     while True:
-        if State.clients == 0:                 # no viewer -> release camera, idle
+        if State.clients == 0 and not HEADLESS:   # no viewer -> release camera, idle (headless runs always)
             State.jpeg = None
             if cam is not None: cam.close(); cam = None
             State.wake.wait(); State.wake.clear(); continue
@@ -687,7 +690,7 @@ def _capture_loop_file(rdi, full, batch=300):
     tmp = "/dev/shm/q6a_cap.raw"
     subprocess.run(["pkill", "-9", "-f", "v4l2-ctl"], check=False)  # clear orphans once at startup
     while True:
-        if State.clients == 0:                 # no viewer -> stop capturing (camera + CPU idle)
+        if State.clients == 0 and not HEADLESS:   # no viewer -> stop capturing (headless runs always)
             State.jpeg = None
             subprocess.run(["pkill", "-9", "-f", "v4l2-ctl"], check=False)
             State.wake.wait(); State.wake.clear()
@@ -788,9 +791,11 @@ if __name__ == "__main__":
     ap.add_argument("--gpu", action="store_true", help="full-res ISP on the Adreno GPU (OpenCL) instead of CPU")
     ap.add_argument("--destripe", action="store_true", help="also remove static FPN column/row banding (luminance-only, fused)")
     ap.add_argument("--bin", action="store_true", help="GPU digital 2x2 binning: half-res (728x544), ~2x less noise + faster")
+    ap.add_argument("--headless", action="store_true", help="production/no-viewer: capture -> GPU demosaic -> shm -> YOLO only. Skips the MJPEG HTTP server, JPEG encode and overlay draw (~10ms/frame CPU); capture runs unconditionally (no client-gating). AE stays on; add --no-awb-equivalent by just not passing --awb.")
     ap.add_argument("--sensor-bin", action="store_true", help="[EXPERIMENTAL / NON-FUNCTIONAL] 2x2 binning on the IMX296 (charge-domain FD binning -> 728x544). The imx296 MIPIC_AREA3W patch stops the STREAMON hang but mainline qcom-camss still delivers EMPTY (0xFF) buffers - the binned pixel payload never lands (no kernel error). Use --bin (GPU digital) instead; it gives the same 728x544 and is faster.")
     args = ap.parse_args()
     DESTRIPE = args.destripe
+    HEADLESS = args.headless
     YOLO_FPS = args.yolo_fps
     AE_ON = not args.no_ae; AWB_ON = args.awb
     CAMERA_MODEL = args.camera_model; CCM_ON = args.ccm
@@ -821,9 +826,13 @@ if __name__ == "__main__":
             args.fast = True         # GPU unavailable -> half-res CPU (fast) instead of slow full-res CPU
     print("start: setting up pipeline...", flush=True)
     rdi = setup_pipeline(args.cam, args.exposure, args.gain)
-    print(f"pipeline ready ({rdi}); starting capture + server", flush=True)
     if not args.no_yolo:
         init_detector()                        # spawn q6a_detector.py (NPU) + set up shared memory
-    threading.Thread(target=capture_loop, args=(rdi, not args.fast), daemon=True).start()
-    print(f"MJPEG stream on http://0.0.0.0:{args.port}/  (cam{args.cam})", flush=True)
-    ThreadingHTTPServer(("0.0.0.0", args.port), Handler).serve_forever()
+    if HEADLESS:                               # production: no HTTP server; capture->demosaic->shm->YOLO
+        print(f"pipeline ready ({rdi}); HEADLESS: capture -> shm -> YOLO (no MJPEG server)", flush=True)
+        capture_loop(rdi, not args.fast)       # runs in the main thread, unconditionally (no client gating)
+    else:
+        print(f"pipeline ready ({rdi}); starting capture + server", flush=True)
+        threading.Thread(target=capture_loop, args=(rdi, not args.fast), daemon=True).start()
+        print(f"MJPEG stream on http://0.0.0.0:{args.port}/  (cam{args.cam})", flush=True)
+        ThreadingHTTPServer(("0.0.0.0", args.port), Handler).serve_forever()
