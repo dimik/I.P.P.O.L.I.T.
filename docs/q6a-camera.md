@@ -195,3 +195,25 @@ WB + full-res bilinear BGGR demosaic in one kernel; the CPU keeps the cheap dest
   fine; only concurrent use crashes.
 - Correctness: GPU demosaic matches the numpy path except at a few edge/dark pixels (max abs diff ~680 on
   0–1600 range) — visually identical, full detail. Kernel is built once (`cl.Kernel`), reused per frame.
+
+## Performance — final pipeline (2026-07-05)
+Full arc from the naive CPU pipeline to the optimized one, all at **full 1456×1088 with YOLO**:
+
+| Pipeline | live fps | temp |
+|---|---|---|
+| CPU full-res numpy ISP | ~3 | 79 °C |
+| GPU demosaic only (CPU `_post`) | ~4.7 | 79 °C |
+| **Lean full-GPU ISP** (demosaic+WB+shade+gamma in one kernel → uint8) | ~8.6 | **52 °C** |
+| + exposure 6000→3000 (sensor 13→21 fps) | ~12.6 | 53 °C |
+| **+ direct V4L2 mmap capture** (`q6a_v4l2.py`) | **~16.0** | 52 °C |
+
+Per-frame processing went 211 ms → 42 ms. Key moves:
+- **GPU ISP** (`q6a_gpu.py isp()`): one OpenCL kernel does the whole ISP → uint8 (small readback); CPU
+  only unpacks + JPEG-encodes. Auto-exposure from a cheap raw subsample (`_auto_scale`). Destripe optional.
+- **V4L2 mmap capture** (`q6a_v4l2.py`): proper multiplanar MMAP DQBUF-drain-to-latest; replaces the
+  `v4l2-ctl`→file→tail hack (16.8→23 fps capture). Falls back to file-tail if it can't init.
+- **exposure sets the sensor frame rate** here (frame length ∝ exposure): 6000≈13 fps, 3000≈21 fps,
+  2000≈27 fps — lower = faster but noisier in dim light. Default 3000 (matches the ~23 fps GPU ceiling).
+- **Remaining limiter: the GPU/NPU ACCEL lock** — YOLO (~55 ms every 0.25 s) serializes against the GPU
+  ISP, costing ~25% (capture-only would be ~23 fps). Raise the YOLO interval to trade detection latency
+  for fps. libjpeg-turbo would shave the 10 ms JPEG.
