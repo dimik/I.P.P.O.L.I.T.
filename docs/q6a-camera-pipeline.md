@@ -403,11 +403,19 @@ chroma-noise metric (isolates noise from a moving scene; measured in a central p
   noise and row-FPN into colour. Blend it toward identity: `--ccm-strength` (default **0.5**, L2 2.11→1.53).
   Also relevant: the *full* CCM partially masks the top warm cast (its off-diagonals subtract red), so
   softening trades a slightly warmer top for a cleaner image — the right call for a noisy low-light stream.
-- **Shade map = the edge rainbow.** The grey-card shading fit diverges to ±2× per-channel gain at the extreme
-  frame border → a magenta(left)/green(right) rainbow along the top edge. **Don't** drop it to luminance-only
-  (that removes real lens colour-shading correction and leaves a warm edge cast). Instead keep the colour part
-  but **attenuate + clamp** it: `SHADE_CHROMA` (default 0.7) × `SHADE_CHROMA_CLAMP` (±0.12) → moderate mid-field
-  correction retained, the ±2× border outliers clamped → rainbow gone. `--shade-chroma`.
+- **Runtime spatial colour-shading correction (the real fix for the magenta-top/green-bottom gradient).**
+  The IMX296+lens has a strong *intrinsic* smooth vertical chroma gradient — raw TOP R-G/B-G ≈ **+38/+40**
+  (magenta) → neutral centre → lower third **−12** (green). Confirmed it's intrinsic: present with the colour
+  shade map disabled, and the grey-card shade map **can't fix it in any orientation** (its fit is far too weak;
+  flipping v/h barely moves the result — so the map is now **luminance-only**, `SHADE_CHROMA=0`, vignetting
+  only). The fix is a **runtime, self-calibrating** corrector (`ChromaShade` in `q6a_camstream.py`, on by
+  default; `--no-chroma-shade`, `--chroma-shade-strength`): enforce **spatial gray-world** — subtract each
+  ROW's and each COLUMN's chroma bias so every line averages neutral. Two tricks keep it safe against real
+  colour: (1) **median** across the line (an object filling <50% barely moves it), (2) **temporal EMA** of the
+  per-row/col bias (moving content averages out → converges to the *static* shading; same assumption as
+  gray-world AWB). Preserves luma exactly. Result: the ±40 gradient → within **±5** everywhere. **Bonus:**
+  subtracting per-row chroma also removes the coloured **horizontal row-noise stripes** (per-column the vertical
+  ones) — stripe amplitude 4 → **0.4**. ~4 ms/frame on the 728×544 output.
 - **Highlight-desat threshold.** The blown-highlight→luma fade started at mx=190, so a merely mid-bright wall
   got crushed toward flat grey ("grey hole, single tone"). Raised the ramp to **220→255** so only true near-clip
   neutralizes; mid-bright surfaces keep their colour/texture.
@@ -415,6 +423,7 @@ chroma-noise metric (isolates noise from a moving scene; measured in a central p
   off); the fused correction now subtracts the same per-row/col offset from all channels. Still off by default
   (`--destripe`) — the visible horizontal lines are per-frame row *read noise*, not static FPN, so the chroma
   denoise handles them; the static destripe only catches fixed-pattern banding.
-- **Known residual:** a smooth **warm cast along the top** of the frame (warm ceiling light + lens colour
-  shading). Global AWB/CCM can't correct a spatial gradient; a proper per-CT lens-shading calibration would,
-  but that needs a controlled rig. The objectionable *rainbow* is gone; the residual is closer to faithful.
+- **Net colour state:** with AWB (global WB) + softened CCM (spectral) + luminance-only shade (vignetting) +
+  runtime `ChromaShade` (spatial colour) + chroma denoise (colour noise), the frame is neutral corner-to-corner
+  (all bands within ±5 R-G/B-G), colour speckle ~1.4, horizontal colour stripes ~0.4, at ~27 fps. Residual is
+  luminance grain (inherent to the low-light small-sensor + high-gain regime) — not colour.
