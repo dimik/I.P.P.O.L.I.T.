@@ -413,9 +413,16 @@ chroma-noise metric (isolates noise from a moving scene; measured in a central p
   ROW's and each COLUMN's chroma bias so every line averages neutral. Two tricks keep it safe against real
   colour: (1) **median** across the line (an object filling <50% barely moves it), (2) **temporal EMA** of the
   per-row/col bias (moving content averages out → converges to the *static* shading; same assumption as
-  gray-world AWB). Preserves luma exactly. Result: the ±40 gradient → within **±5** everywhere. **Bonus:**
-  subtracting per-row chroma also removes the coloured **horizontal row-noise stripes** (per-column the vertical
-  ones) — stripe amplitude 4 → **0.4**. ~4 ms/frame on the 728×544 output.
+  gray-world AWB), and critically (3) the bias is a **low-order polynomial fit** (deg 3) of the per-row/col
+  median — a smooth global curve **cannot** represent a localized real-colour object (a shelf, skin, the floor),
+  so only the frame-spanning gradient is removed and object colour is **preserved**. (An earlier version
+  subtracted the raw per-row/col median at strength 0.9 → it also flattened real large colour regions to grey;
+  the poly fit fixed that.) Preserves luma exactly. Result: the ±40 gradient → within ~±5 on neutral walls,
+  while real colour survives. `--chroma-shade-strength`, `--no-chroma-shade`.
+- **Saturation + CCM.** Low light + a softened CCM mute colour, so (a) the CCM is back up to **0.75** (chroma
+  denoise + chroma-shade now handle the noise it amplifies) and (b) `ChromaShade` applies a **saturation**
+  multiplier (default **1.25**, `--saturation`) after neutralizing the gradient → wood/skin/floor read as colour,
+  not grey (mean |chroma| ~14.6 → ~17.4).
 - **Highlight-desat threshold.** The blown-highlight→luma fade started at mx=190, so a merely mid-bright wall
   got crushed toward flat grey ("grey hole, single tone"). Raised the ramp to **220→255** so only true near-clip
   neutralizes; mid-bright surfaces keep their colour/texture.
@@ -423,7 +430,9 @@ chroma-noise metric (isolates noise from a moving scene; measured in a central p
   off); the fused correction now subtracts the same per-row/col offset from all channels. Still off by default
   (`--destripe`) — the visible horizontal lines are per-frame row *read noise*, not static FPN, so the chroma
   denoise handles them; the static destripe only catches fixed-pattern banding.
-- **Net colour state:** with AWB (global WB) + softened CCM (spectral) + luminance-only shade (vignetting) +
-  runtime `ChromaShade` (spatial colour) + chroma denoise (colour noise), the frame is neutral corner-to-corner
-  (all bands within ±5 R-G/B-G), colour speckle ~1.4, horizontal colour stripes ~0.4, at ~27 fps. Residual is
-  luminance grain (inherent to the low-light small-sensor + high-gain regime) — not colour.
+- **Net colour state:** AWB (global WB) + CCM 0.75 (spectral) + luminance-only shade (vignetting) + runtime
+  `ChromaShade` poly gradient-removal + saturation 1.25 (spatial colour) + chroma denoise (colour noise) →
+  neutral corner-to-corner on walls, real object colour preserved and lively, colour speckle ~1.4, horizontal
+  colour stripes low, at ~22 fps. Residual is luminance grain (inherent to the low-light small-sensor +
+  high-gain regime) — not colour. The `ChromaShade` per-frame CPU cost trends fps down (~27→22); GPU-ifying it
+  is the obvious next optimization if fps matters.

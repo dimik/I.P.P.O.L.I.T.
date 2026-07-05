@@ -52,9 +52,10 @@ GPU = None                                    # optional Adreno OpenCL ISP (q6a_
 CAMERA_MODEL = "imx296"                        # profiles/<model>.json -> all sensor config (add a camera = add a file)
 CCM_CT = 3600                                  # colour temp (K) to interpolate the CCM to (indoor default)
 CCM_ON = True                                  # apply the ready-made color correction matrix
-CCM_STRENGTH = 0.5                            # blend CCM toward identity: the RPi CCM has ~2x gain + big
+CCM_STRENGTH = 0.75                           # blend CCM toward identity: the RPi CCM has ~2x gain + big
                                               # off-diagonals -> amplifies low-light chroma noise / row-FPN into
-                                              # colour; 0.5 halves that (a little less saturated, much cleaner)
+                                              # colour. The chroma denoise + spatial chroma-shade now handle that
+                                              # noise, so keep most of the CCM for saturation (0.75)
 DESTRIPE = False                              # optional FPN band removal (CPU, ~32ms); off by default
 DENOISE = True                                # chroma denoise: blur colour, keep luma sharp (low-light colour noise)
 DENOISE_RX, DENOISE_RY = 3, 5                 # chroma-blur window radii (taller -> kills horizontal colour lines)
@@ -366,9 +367,10 @@ class ChromaShade:
         static shading; only persistent, frame-spanning colour is affected (same assumption as gray-world AWB).
     Bonus: subtracting per-row chroma also removes the coloured HORIZONTAL row-noise stripes (per-column the
     vertical ones). Preserves luma exactly (recovers G from the corrected R,B). ~4 ms/frame on the 728x544 out."""
-    def __init__(self, alpha=0.9, beta=0.15, every=6):
-        self.a = alpha; self.b = beta; self.every = every; self.n = 0
+    def __init__(self, alpha=0.9, beta=0.15, every=6, deg=3, sat=1.25):
+        self.a = alpha; self.b = beta; self.every = every; self.deg = deg; self.sat = sat; self.n = 0
         self.cr_row = self.cb_row = self.cr_col = self.cb_col = None
+        self._yy = self._xx = None
 
     def __call__(self, img):
         f = img.astype(np.float32)
@@ -378,15 +380,24 @@ class ChromaShade:
         if self.cr_row is None:
             self.cr_row = np.zeros(H, np.float32); self.cb_row = np.zeros(H, np.float32)
             self.cr_col = np.zeros(W, np.float32); self.cb_col = np.zeros(W, np.float32)
+            self._yy = np.linspace(-1, 1, H); self._xx = np.linspace(-1, 1, W)
         if self.n % self.every == 0:                                 # refresh the bias estimate (EMA)
-            rr = np.median(cr, axis=1); rb = np.median(cb, axis=1)   # per-row median chroma (robust)
-            cc = np.median(cr - rr[:, None], axis=0)                 # per-col median of row-corrected chroma
-            cbc = np.median(cb - rb[:, None], axis=0)
+            # Fit a SMOOTH low-order polynomial to the per-row/col median chroma. This captures ONLY the broad
+            # shading gradient -- a localized real-colour object (shelf, skin) can't fit a global curve, so its
+            # colour is preserved; only the frame-spanning cast is removed. Median = robust to the object too.
+            def fit(med, ax):
+                m = np.median(med, axis=ax)
+                t = self._yy if ax == 1 else self._xx
+                return np.polyval(np.polyfit(t, m, self.deg), t).astype(np.float32)
+            rr = fit(cr, 1); rb = fit(cb, 1)
+            cc = fit(cr - rr[:, None], 0); cbc = fit(cb - rb[:, None], 0)
             self.cr_row += self.b * (rr - self.cr_row); self.cb_row += self.b * (rb - self.cb_row)
             self.cr_col += self.b * (cc - self.cr_col); self.cb_col += self.b * (cbc - self.cb_col)
         self.n += 1
         cr -= self.a * (self.cr_row[:, None] + self.cr_col[None, :])
         cb -= self.a * (self.cb_row[:, None] + self.cb_col[None, :])
+        if self.sat != 1.0:                                          # saturation boost (colour is muted in
+            cr *= self.sat; cb *= self.sat                          # low light + softened CCM; noise is handled)
         R = Y + cr; B = Y + cb; G = (Y - 0.299 * R - 0.114 * B) / 0.587   # preserve luma exactly
         out = np.empty_like(img)
         out[..., 0] = np.clip(R + 0.5, 0, 255); out[..., 1] = np.clip(G + 0.5, 0, 255); out[..., 2] = np.clip(B + 0.5, 0, 255)
@@ -788,6 +799,7 @@ if __name__ == "__main__":
     ap.add_argument("--no-denoise", action="store_true", help="disable GPU chroma denoise (blurs colour, keeps luma sharp; removes low-light colour speckle + coloured horizontal row-noise lines)")
     ap.add_argument("--no-chroma-shade", action="store_true", help="disable the runtime spatial colour-shading correction (auto per-row/col chroma flatten). It fixes the intrinsic magenta-top/green-bottom gradient + coloured stripes; disable only if it desaturates a genuinely large uniform-colour scene.")
     ap.add_argument("--chroma-shade-strength", type=float, default=0.9, help="strength of the runtime spatial colour-shading correction (0..1, default 0.9)")
+    ap.add_argument("--saturation", type=float, default=1.25, help="colour saturation multiplier (1.0=neutral; low-light + softened CCM mute colour, so boost it a bit. default 1.25)")
     ap.add_argument("--denoise-radius", type=int, nargs=2, metavar=("RX","RY"), default=None, help="chroma-denoise window radii (default 2 3; larger RY kills horizontal colour lines harder, softer colour)")
     ap.add_argument("--bin", action="store_true", help="GPU digital 2x2 binning: half-res (728x544), ~2x less noise + faster")
     ap.add_argument("--sensor-bin", action="store_true", help="[EXPERIMENTAL / NON-FUNCTIONAL] 2x2 binning on the IMX296 (charge-domain FD binning -> 728x544). The imx296 MIPIC_AREA3W patch stops the STREAMON hang but mainline qcom-camss still delivers EMPTY (0xFF) buffers - the binned pixel payload never lands (no kernel error). Use --bin (GPU digital) instead; it gives the same 728x544 and is faster.")
@@ -802,7 +814,7 @@ if __name__ == "__main__":
     DENOISE = not args.no_denoise
     if args.denoise_radius is not None: DENOISE_RX, DENOISE_RY = args.denoise_radius
     if not args.no_chroma_shade:
-        CHROMA_SHADE = ChromaShade(alpha=args.chroma_shade_strength)
+        CHROMA_SHADE = ChromaShade(alpha=args.chroma_shade_strength, sat=args.saturation)
     load_camera_profile(CAMERA_MODEL)              # sets geometry/format/defaults/AE/CCM from profiles/<model>.json
     if args.ccm_ct is not None: CCM_CT = args.ccm_ct   # CLI colour-temp overrides the profile default
     BIN = args.bin
