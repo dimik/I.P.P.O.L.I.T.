@@ -77,15 +77,17 @@ AE_DAMP = 0.4                                 # partial step toward the target e
 AE_GAIN_STEP = 48                             # analogue_gain ctrl step when exposure is floored/ceilinged (~4.8 dB)
 AE_DARK_FRAC = 0.6                            # "still too dark" when median < AE_TARGET*this (at the exposure ceiling -> add gain)
 # --- Auto white balance (damped, constrained gray-world) --- tracks the illuminant (day<->evening) so
-# adjusts the WB gains (software, GPU reads them next frame -> no glitch). ANCHORED gray-world: opt-in via
-# --awb. Unbounded gray-world runs away to magenta on a non-gray room (observed 1.6->3.2/1.5->4.1); this
-# version is CLAMPED to +-AWB_ANCHOR_MARGIN around the loaded calibration WB, so it can only make small
-# corrections (tracks the sensor's thermal drift + modest light changes) and PHYSICALLY cannot reach magenta.
+# adjusts the WB gains (software, GPU reads them next frame -> no glitch). WHITE-PATCH: opt-in via --awb.
+# Plain gray-world tints neutral walls green on a non-gray room; white-patch references the bright (white)
+# surfaces instead -- see auto_wb. Bounded to the profile's plausible R/B gain range (awb.r_gain/b_gain).
 AWB_ON = False
 AWB_ALPHA = 0.05                              # WB gain smoothing per update (slow, flicker-free)
-AWB_ANCHOR_MARGIN = 0.10                      # AWB may move each gain only +-10% from the calibration anchor
-                                              # (covers the ~8% thermal drift; tight enough to stay near neutral)
-_AWB_ANCHOR_R = _AWB_ANCHOR_B = None          # captured from the loaded WB on the first AWB update
+AWB_BRIGHT_FRAC = 0.30                        # WHITE-PATCH: balance the brightest this-fraction of (non-clipped)
+                                              # blocks -- bright surfaces (walls/ceiling/door) are ~always white,
+                                              # so this references neutrals, ignores the darker coloured content
+                                              # (wood/furniture), and selection uses G (WB-independent -> stable).
+AWB_Y_HI = 950                                # exclude near-clipped blocks (~10-bit) from the white-patch (a blown
+                                              # warm doorway/lamp must not be taken as the white reference)
 AWB_RMIN, AWB_RMAX = 1.2, 3.2                 # (legacy absolute range; the anchor clamp below is tighter)
 AWB_BMIN, AWB_BMAX = 1.2, 4.2
 # YOLO runs in a SEPARATE PROCESS (q6a_detector.py) sharing frames via shared memory. The Adreno (GPU
@@ -313,33 +315,46 @@ def auto_exposure(buf):
 
 _AWB_N = 0
 def auto_wb(buf):
-    """ANCHORED gray-world AWB from the packed RAW10 high bytes. Every ~8 frames, estimate the per-Bayer-channel
-    MEDIANS (robust to bright/coloured spots), take the gray-world WB that equalises them, and move WB_R/WB_B
-    a small fraction toward it -- but CLAMPED to +-AWB_ANCHOR_MARGIN around the loaded calibration WB. This
-    tracks the sensor's thermal drift + modest light changes yet physically cannot run away to magenta (which
-    unbounded gray-world does on a non-gray room). WB is a software gain the GPU reads each frame -> no glitch."""
-    global WB_R, WB_B, _AWB_N, _AWB_ANCHOR_R, _AWB_ANCHOR_B
+    """WHITE-PATCH AWB. Plain gray-world equalises the whole-scene AVERAGE, so a room with warm content
+    (wood/skin/furniture) makes it tint the neutral walls GREEN (the complement) to force the average neutral --
+    overriding a fair calibration. Instead, reference the illuminant to the BRIGHTEST surfaces (walls, ceiling,
+    door), which are almost always white: balance the top AWB_BRIGHT_FRAC of non-clipped blocks to neutral.
+    Brightness is measured on G (the WB reference) so the SELECTION is WB-independent -- no chicken-and-egg
+    (unlike judging 'neutral' via the current WB, which can lock onto warm surfaces that look grey at the wrong
+    WB). Ignores the darker coloured content, tracks the illuminant, anchored+clamped as a backstop."""
+    global WB_R, WB_B, _AWB_N
     if not AWB_ON:
         return
-    if _AWB_ANCHOR_R is None:                       # anchor to the calibrated WB loaded at startup
-        _AWB_ANCHOR_R, _AWB_ANCHOR_B = WB_R, WB_B
     _AWB_N += 1
     if _AWB_N % AE_UPDATE_EVERY:
         return
+    # co-located R,G,B per 2x2 block from the packed RAW10 high bytes (~10-bit), black-subtracted
     a = np.frombuffer(buf, np.uint8)[:STRIDE * H].reshape(H, STRIDE)[:, :W * 10 // 8].reshape(H, W // 4, 5)
-    h = a[:, ::4, :4].astype(np.float32) * 4.0     # subsample groups -> ~10-bit level per pixel (high byte<<2)
+    img = (a[:, :, :4].astype(np.float32) * 4.0).reshape(H, W)      # high-byte image, ~10-bit
     bR = BLACK_RGB[0] if BLACK_RGB else BLACK_LEVEL
     bG = BLACK_RGB[1] if BLACK_RGB else BLACK_LEVEL
     bB = BLACK_RGB[2] if BLACK_RGB else BLACK_LEVEL
-    Rm = float(np.median(h[RY::2][:, :, RX::2])) - bR       # per-channel medians by CFA position
-    Bm = float(np.median(h[BY::2][:, :, BX::2])) - bB
-    Gm = (float(np.median(h[BY::2][:, :, RX::2])) + float(np.median(h[RY::2][:, :, BX::2]))) / 2 - bG
-    if Gm < 8 or Rm < 4 or Bm < 4:                 # too dark to estimate WB reliably -> hold
+    R = np.clip(img[RY::2, RX::2] - bR, 0, None)                    # (H/2, W/2), co-located per block
+    B = np.clip(img[BY::2, BX::2] - bB, 0, None)
+    G = np.clip(0.5 * (img[RY::2, BX::2] + img[BY::2, RX::2]) - bG, 0, None)
+    # white-patch: the brightest non-clipped blocks (bright surfaces = ~white). G is the WB reference so this
+    # selection is WB-independent (stable). Gray-world over just those blocks -> balances the bright neutrals.
+    Gf = G[G < AWB_Y_HI]                            # unclipped blocks only
+    if Gf.size < 200:
         return
-    m = AWB_ANCHOR_MARGIN                           # clamp targets to +-m around the calibration anchor
-    tR = min(max(Gm / Rm, _AWB_ANCHOR_R * (1 - m)), _AWB_ANCHOR_R * (1 + m))
-    tB = min(max(Gm / Bm, _AWB_ANCHOR_B * (1 - m)), _AWB_ANCHOR_B * (1 + m))
-    WB_R += AWB_ALPHA * (tR - WB_R)                # slow, flicker-free (no fast-lock: starts at the calibration)
+    thr = np.percentile(Gf, 100.0 * (1.0 - AWB_BRIGHT_FRAC))
+    sel = (G >= thr) & (G < AWB_Y_HI)
+    if sel.sum() < 50:                             # not enough bright surface -> hold
+        return
+    Rm = float(R[sel].mean()); Gm = float(G[sel].mean()); Bm = float(B[sel].mean())
+    if Gm < 8 or Rm < 4 or Bm < 4:                 # too dark to estimate reliably -> hold
+        return
+    # White-patch is robust (references bright neutrals), so it needs only a plausible-illuminant clamp
+    # (profile awb.r_gain/b_gain), NOT a tight leash to the calibration -- the calibration light rarely
+    # matches the scene, and a tight clamp would leave the walls cast (e.g. blue-starved under warm light).
+    tR = min(max(Gm / Rm, AWB_RMIN), AWB_RMAX)
+    tB = min(max(Gm / Bm, AWB_BMIN), AWB_BMAX)
+    WB_R += AWB_ALPHA * (tR - WB_R)                # slow, flicker-free
     WB_B += AWB_ALPHA * (tB - WB_B)
 
 def unpack_raw10(buf):
