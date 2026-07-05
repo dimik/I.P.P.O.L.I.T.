@@ -28,17 +28,28 @@ FRAME = STRIDE * H       # 1,984,512 bytes/frame (v4l2 sizeimage)
 BLACK_LEVEL = 56.0
 WB_R, WB_G, WB_B = 1.60, 1.00, 1.52          # raw per-channel gains -> neutral grey (measured)
 SHADE = None                                  # optional (H,W,3) radial COLOR-shading gain (green-relative)
-GPU = None                                    # optional Adreno OpenCL demosaic (q6a_gpu.GpuDemosaic)
+GPU = None                                    # optional Adreno OpenCL ISP (q6a_gpu.GpuDemosaic)
+DESTRIPE = False                              # optional FPN band removal (CPU, ~32ms); off by default
+TARGET_MEAN = 95.0                            # tone-map target brightness
 ACCEL = threading.Lock()                       # serialize GPU (Adreno) and NPU (Hexagon) — concurrent use crashes
 def init_gpu():
     global GPU
     try:
         from q6a_gpu import GpuDemosaic
         GPU = GpuDemosaic(W, H)
-        print(f"GPU demosaic enabled: {GPU.dev_name}", flush=True)
+        GPU.set_shade(SHADE)                   # upload color-shading map once (if a profile is loaded)
+        print(f"GPU ISP enabled: {GPU.dev_name} (full demosaic+WB+tonemap on GPU)", flush=True)
     except Exception as e:
         GPU = None
-        print(f"GPU demosaic unavailable ({e}); using CPU numpy demosaic", flush=True)
+        print(f"GPU unavailable ({e}); using CPU numpy demosaic", flush=True)
+
+def _auto_scale(px):
+    """Brightness scale for the tone-map, from a cheap raw subsample (auto-exposure). Odd stride
+    cycles the Bayer phases; CFA-weighted mean gain approximates the demosaiced brightness."""
+    sub = px[::3, ::3].astype(np.float32) - BLACK_LEVEL
+    np.clip(sub, 0, None, out=sub)
+    avg_wb = (WB_R + 2.0 * WB_G + WB_B) / 4.0          # BGGR: 1 B, 2 G, 1 R per 2x2
+    return TARGET_MEAN / max(sub.mean() * avg_wb, 1.0)
 PROFILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "imx296_wb.npz")
 def load_profile():
     global BLACK_LEVEL, WB_R, WB_G, WB_B, SHADE
@@ -118,17 +129,26 @@ def demosaic_bggr(px):
 def debayer(px, full=True):
     """BGGR Bayer -> full-res RGB uint8: black-level + raw WB -> demosaic -> destripe -> tone map."""
     if GPU is not None and full:
+        scale = _auto_scale(px)              # cheap CPU auto-exposure metric from the raw subsample
         with ACCEL:                          # serialize GPU vs NPU — concurrent Adreno+Hexagon crashes
-            out = GPU.demosaic(px, BLACK_LEVEL, WB_R, WB_G, WB_B)    # black-level+WB+demosaic on the Adreno
-    else:
-        px = px.astype(np.float32) - BLACK_LEVEL
-        np.clip(px, 0, None, out=px)
-        px[1::2, 1::2] *= WB_R                # R sites   (raw white balance, per Bayer position)
-        px[0::2, 0::2] *= WB_B                # B sites   (G sites keep WB_G=1)
-        out = _debayer_cpu(px, full)
+            out = GPU.isp(px, BLACK_LEVEL, WB_R, WB_G, WB_B, scale)  # full ISP on GPU -> uint8
+        return _destripe_u8(out) if DESTRIPE else out
+    # CPU fallback: black+WB+demosaic + shade + destripe + tone map
+    px = px.astype(np.float32) - BLACK_LEVEL
+    np.clip(px, 0, None, out=px)
+    px[1::2, 1::2] *= WB_R                    # R sites   (raw white balance, per Bayer position)
+    px[0::2, 0::2] *= WB_B                    # B sites   (G sites keep WB_G=1)
+    out = _debayer_cpu(px, full)
     if SHADE is not None and SHADE.shape == out.shape:
         out *= SHADE                          # radial color-shading correction (magenta centre -> green edge)
     return _post(out)
+
+def _destripe_u8(u8):
+    """Optional FPN destripe on the GPU-produced uint8 frame (col/row high-pass)."""
+    out = u8.astype(np.float32)
+    col = out.mean(0); out -= (col - _smooth(col, 41))[None, :, :]
+    row = out.mean(1); out -= (row - _smooth(row, 41))[:, None, :]
+    return np.clip(out, 0, 255).astype(np.uint8)
 
 def _debayer_cpu(px, full):
     if full:
@@ -343,8 +363,10 @@ if __name__ == "__main__":
     ap.add_argument("--gain", type=int, default=200, help="analogue gain 0..480 (0.1dB); higher=brighter+noisier")
     ap.add_argument("--calibrate", action="store_true", help="capture a flat-field color profile (aim at a white/gray surface)")
     ap.add_argument("--no-yolo", action="store_true", help="disable the NPU YOLO detection overlay")
-    ap.add_argument("--gpu", action="store_true", help="full-res demosaic on the Adreno GPU (OpenCL) instead of CPU")
+    ap.add_argument("--gpu", action="store_true", help="full-res ISP on the Adreno GPU (OpenCL) instead of CPU")
+    ap.add_argument("--destripe", action="store_true", help="also remove FPN column/row banding (CPU, ~32ms)")
     args = ap.parse_args()
+    DESTRIPE = args.destripe
     if args.calibrate:
         calibrate(args.cam, args.exposure, args.gain)
         sys.exit(0)

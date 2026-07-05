@@ -41,6 +41,33 @@ __kernel void demosaic(__global const ushort* bayer, __global float* rgb,
     int o = (y*W + x)*3;
     rgb[o]=R*wr; rgb[o+1]=G*wg; rgb[o+2]=B*wb;
 }
+// full ISP: demosaic + WB + optional shading + tone map (scale to target + gamma 0.7) -> uint8 RGB
+__kernel void isp(__global const ushort* bayer, __global const float* shade, __global uchar* out,
+                  const int W, const int H, const float bl,
+                  const float wr, const float wg, const float wb,
+                  const float scale, const int use_shade){
+    int x = get_global_id(0), y = get_global_id(1);
+    if (x >= W || y >= H) return;
+    int bx = x & 1, by = y & 1;
+    float C = bget(bayer, x, y, W, H, bl), R, G, B;
+    float g4 = 0.25f*(bget(bayer,x-1,y,W,H,bl)+bget(bayer,x+1,y,W,H,bl)
+                     +bget(bayer,x,y-1,W,H,bl)+bget(bayer,x,y+1,W,H,bl));
+    float d4 = 0.25f*(bget(bayer,x-1,y-1,W,H,bl)+bget(bayer,x+1,y-1,W,H,bl)
+                     +bget(bayer,x-1,y+1,W,H,bl)+bget(bayer,x+1,y+1,W,H,bl));
+    float hh = 0.5f*(bget(bayer,x-1,y,W,H,bl)+bget(bayer,x+1,y,W,H,bl));
+    float vv = 0.5f*(bget(bayer,x,y-1,W,H,bl)+bget(bayer,x,y+1,W,H,bl));
+    if (by==0 && bx==0){ B=C; G=g4; R=d4; }
+    else if (by==1 && bx==1){ R=C; G=g4; B=d4; }
+    else if (by==0 && bx==1){ G=C; B=hh; R=vv; }
+    else { G=C; R=hh; B=vv; }
+    R*=wr; G*=wg; B*=wb;
+    int o = (y*W + x)*3;
+    if (use_shade){ R*=shade[o]; G*=shade[o+1]; B*=shade[o+2]; }
+    R = 255.0f*pow(clamp(R*scale/255.0f, 0.0f, 1.0f), 0.7f);   // tone map: scale to target + gamma
+    G = 255.0f*pow(clamp(G*scale/255.0f, 0.0f, 1.0f), 0.7f);
+    B = 255.0f*pow(clamp(B*scale/255.0f, 0.0f, 1.0f), 0.7f);
+    out[o]=(uchar)(R+0.5f); out[o+1]=(uchar)(G+0.5f); out[o+2]=(uchar)(B+0.5f);
+}
 '''
 
 
@@ -52,11 +79,36 @@ class GpuDemosaic:
         self.q = cl.CommandQueue(self.ctx)
         self.prg = cl.Program(self.ctx, _SRC).build()
         self.knl = cl.Kernel(self.prg, "demosaic")     # build once, reuse (avoid per-call retrieval)
+        self.isp_knl = cl.Kernel(self.prg, "isp")
         mf = cl.mem_flags
         self.d_in = cl.Buffer(self.ctx, mf.READ_ONLY, W * H * 2)
         self.d_out = cl.Buffer(self.ctx, mf.WRITE_ONLY, W * H * 3 * 4)
+        self.d_u8 = cl.Buffer(self.ctx, mf.WRITE_ONLY, W * H * 3)
         self.out = np.empty((H, W, 3), np.float32)
+        self.u8 = np.empty((H, W, 3), np.uint8)
+        self.d_shade = None
         self.dev_name = dev.name.strip()
+
+    def set_shade(self, shade):
+        """Upload a (H,W,3) float32 color-shading gain map to the GPU once (or None to disable)."""
+        if shade is None:
+            self.d_shade = None; return
+        s = np.ascontiguousarray(shade, np.float32)
+        self.d_shade = cl.Buffer(self.ctx, cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR, hostbuf=s)
+
+    def isp(self, px, bl, wr, wg, wb, scale):
+        """Full ISP on the GPU: px (H,W) uint16 -> (H,W,3) uint8 (demosaic+WB+shade+tonemap)."""
+        px = np.ascontiguousarray(px, np.uint16)
+        cl.enqueue_copy(self.q, self.d_in, px)
+        use = 1 if self.d_shade is not None else 0
+        sh = self.d_shade if use else self.d_in           # dummy (unused) buffer when no shade
+        self.isp_knl(self.q, (self.W, self.H), None, self.d_in, sh, self.d_u8,
+                     np.int32(self.W), np.int32(self.H), np.float32(bl),
+                     np.float32(wr), np.float32(wg), np.float32(wb),
+                     np.float32(scale), np.int32(use))
+        cl.enqueue_copy(self.q, self.u8, self.d_u8)
+        self.q.finish()
+        return self.u8
 
     def demosaic(self, px, bl, wr, wg, wb):
         """px: (H,W) uint16 Bayer -> (H,W,3) float32 RGB (black-level + WB + demosaic on the GPU)."""
