@@ -15,7 +15,7 @@
   "color_defaults": {
     "_comment": "Fixed WB fallbacks (a grey-card --calibrate overrides them). 1.60/1.52 under-corrected (residual green, and blue is the more deficient channel); nudged to 1.80/1.95 to neutralise under indoor light. Fixed WB is stable (AWB drifts magenta on non-gray rooms); a small sensor thermal-warmup drift remains.",
     "black_level": 60,
-    "wb_rgb": [2.05, 1.0, 2.20]
+    "wb_rgb": [2.4, 1.0, 2.15]
   },
 
   "ae": {
