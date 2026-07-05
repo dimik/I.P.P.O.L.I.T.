@@ -40,11 +40,19 @@ BLACK_RGB = None                              # per-channel black pedestal (R,G,
                                               # None -> use the single BLACK_LEVEL for all channels
 WB_R, WB_G, WB_B = 1.60, 1.00, 1.52          # raw per-channel gains -> neutral grey (measured)
 SHADE = None                                  # optional (H,W,3) radial COLOR-shading gain (green-relative)
+SHADE_CHROMA = 0.7                            # fraction of the shade map's per-channel COLOUR-shading kept
+SHADE_CHROMA_CLAMP = 0.12                     # ...clamped to +-12% so an extreme-edge cell can't inject a
+                                              # magenta/green rainbow (the raw grey-card fit diverges to 2x at the border)
 GPU = None                                    # optional Adreno OpenCL ISP (q6a_gpu.GpuDemosaic)
 CAMERA_MODEL = "imx296"                        # profiles/<model>.json -> all sensor config (add a camera = add a file)
 CCM_CT = 3600                                  # colour temp (K) to interpolate the CCM to (indoor default)
 CCM_ON = True                                  # apply the ready-made color correction matrix
+CCM_STRENGTH = 0.5                            # blend CCM toward identity: the RPi CCM has ~2x gain + big
+                                              # off-diagonals -> amplifies low-light chroma noise / row-FPN into
+                                              # colour; 0.5 halves that (a little less saturated, much cleaner)
 DESTRIPE = False                              # optional FPN band removal (CPU, ~32ms); off by default
+DENOISE = True                                # chroma denoise: blur colour, keep luma sharp (low-light colour noise)
+DENOISE_RX, DENOISE_RY = 3, 5                 # chroma-blur window radii (taller -> kills horizontal colour lines)
 BIN = False                                   # GPU digital 2x2 binning -> half-res, ~2x less noise + faster
 SENSOR_BIN = False                            # sensor 2x2 FD binning (charge-domain, cleaner): capture 728x544
 TARGET_MEAN = 95.0                            # tone-map target brightness (DISPLAY, digital — see AE below)
@@ -131,8 +139,11 @@ def load_ccm(ct):
         i = max(k for k in range(len(cts)) if cts[k] <= ct)
         f = (ct - cts[i]) / (cts[i + 1] - cts[i])
         m = [a + (b - a) * f for a, b in zip(CCM_MATRICES[i][1], CCM_MATRICES[i + 1][1])]
-    print(f"CCM @ {ct}K (of {len(cts)} CTs {cts[0]}-{cts[-1]})", flush=True)
-    return np.asarray(m, np.float32).reshape(3, 3)
+    M = np.asarray(m, np.float32).reshape(3, 3)
+    if CCM_STRENGTH != 1.0:                     # blend toward identity -> less chroma-noise amplification
+        M = np.eye(3, dtype=np.float32) + CCM_STRENGTH * (M - np.eye(3, dtype=np.float32))
+    print(f"CCM @ {ct}K (of {len(cts)} CTs {cts[0]}-{cts[-1]}) strength={CCM_STRENGTH:g}", flush=True)
+    return M
 
 def init_gpu():
     global GPU
@@ -141,7 +152,10 @@ def init_gpu():
         GPU = GpuDemosaic(W, H, bayer=(RX, RY, BX, BY))
         GPU.set_shade(SHADE)                   # upload color-shading map once (if a profile is loaded)
         GPU.set_ccm(load_ccm(CCM_CT) if CCM_ON else None)   # ready-made color matrix (profile)
-        print(f"GPU ISP enabled: {GPU.dev_name} (full demosaic+WB+CCM+tonemap on GPU)", flush=True)
+        GPU.denoise = DENOISE                  # chroma denoise (colour-noise / horizontal colour lines)
+        GPU.cd_rx, GPU.cd_ry = DENOISE_RX, DENOISE_RY
+        print(f"GPU ISP enabled: {GPU.dev_name} (demosaic+WB+CCM+tonemap"
+              + (f"+chroma-denoise {2*DENOISE_RX+1}x{2*DENOISE_RY+1}" if DENOISE else "") + " on GPU)", flush=True)
     except Exception as e:
         GPU = None
         print(f"GPU unavailable ({e}); using CPU numpy demosaic", flush=True)
@@ -162,17 +176,26 @@ def _auto_scale_packed(buf):
     return TARGET_MEAN / max(max(m, 0.0) * avg_wb, 1.0)
 PROFILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "imx296_wb.npz")
 def load_profile():
-    global BLACK_LEVEL, BLACK_RGB, WB_R, WB_G, WB_B, SHADE
+    global BLACK_LEVEL, BLACK_RGB, WB_R, WB_G, WB_B, SHADE, SHADE_CHROMA
     if os.path.exists(PROFILE):
         z = np.load(PROFILE); BLACK_LEVEL = float(z["black"]); WB_R, WB_G, WB_B = (float(x) for x in z["wb"])
         if "blk" in z.files:                   # per-channel black pedestal (dark-frame calibrated)
             BLACK_RGB = tuple(float(x) for x in z["blk"])
         msg = f"loaded WB profile: black={BLACK_LEVEL:.0f}" + (f" blk={tuple(round(x,1) for x in BLACK_RGB)}" if BLACK_RGB else "") + f" wb=({WB_R:.3f},{WB_G:.3f},{WB_B:.3f})"
         if "shade" in z.files:                 # small green-relative gain grid -> upscale to full res
-            s = z["shade"]
+            s = np.asarray(z["shade"], np.float32)
+            # Keep the shade's real COLOUR-shading correction but CLAMP its extreme-edge divergence: the
+            # grey-card fit runs wild at the very border (per-channel gains up to 2x -> a magenta/green
+            # rainbow). Split into luminance (vignetting) x chroma (per-channel colour ratio), attenuate the
+            # chroma by SHADE_CHROMA, then clamp it to +-SHADE_CHROMA_CLAMP so no single edge cell can inject
+            # a strong cast. SHADE_CHROMA=0 -> luminance-only; 1 -> full (still clamped).
+            lum = s.mean(axis=2, keepdims=True)
+            chroma = 1.0 + SHADE_CHROMA * (s / np.maximum(lum, 1e-3) - 1.0)
+            chroma = np.clip(chroma, 1.0 - SHADE_CHROMA_CLAMP, 1.0 + SHADE_CHROMA_CLAMP)
+            s = lum * chroma
             SHADE = np.stack([np.asarray(Image.fromarray(s[..., c]).resize((W, H), Image.BILINEAR))
                               for c in range(3)], axis=2).astype(np.float32)
-            msg += f" + shading map {s.shape[:2]}"
+            msg += f" + shading map {z['shade'].shape[:2]} (chroma x{SHADE_CHROMA:g})"
         print(msg, flush=True)
     else:
         print(f"using default WB: black={BLACK_LEVEL:.0f} wb=({WB_R:.3f},{WB_G:.3f},{WB_B:.3f}) (no shading map)", flush=True)
@@ -699,9 +722,13 @@ if __name__ == "__main__":
     ap.add_argument("--camera-model", default="imx296", help="profiles/<model>.json to load all sensor config from (geometry, CFA, format, defaults, AE, CCM). Add a camera = add a profile.")
     ap.add_argument("--ccm-ct", type=int, default=None, help="override the profile's CCM colour temperature (K) (2500=warm .. 7400=daylight)")
     ap.add_argument("--no-ccm", action="store_true", help="disable the ready-made color-correction matrix")
+    ap.add_argument("--ccm-strength", type=float, default=None, help="blend CCM toward identity (0=off/neutral .. 1=full RPi CCM). Lower reduces low-light chroma-noise/row-FPN colour amplification (default 0.5).")
+    ap.add_argument("--shade-chroma", type=float, default=None, help="keep this fraction of the shade map's COLOUR component (0=luminance/vignetting only .. 1=full per-channel). Its colour part rainbows the frame edges (default 0).")
     ap.add_argument("--yolo-fps", type=float, default=10.0, help="cap YOLO to this detection rate (0=unlimited, ~26fps NPU max). Detections overlay persists between updates, so a low rate saves NPU heat/power with no visual loss on a slow robot.")
     ap.add_argument("--gpu", action="store_true", help="full-res ISP on the Adreno GPU (OpenCL) instead of CPU")
-    ap.add_argument("--destripe", action="store_true", help="also remove FPN column/row banding (CPU, ~32ms)")
+    ap.add_argument("--destripe", action="store_true", help="also remove static FPN column/row banding (luminance-only, fused)")
+    ap.add_argument("--no-denoise", action="store_true", help="disable GPU chroma denoise (blurs colour, keeps luma sharp; removes low-light colour speckle + coloured horizontal row-noise lines)")
+    ap.add_argument("--denoise-radius", type=int, nargs=2, metavar=("RX","RY"), default=None, help="chroma-denoise window radii (default 2 3; larger RY kills horizontal colour lines harder, softer colour)")
     ap.add_argument("--bin", action="store_true", help="GPU digital 2x2 binning: half-res (728x544), ~2x less noise + faster")
     ap.add_argument("--sensor-bin", action="store_true", help="[EXPERIMENTAL / NON-FUNCTIONAL] 2x2 binning on the IMX296 (charge-domain FD binning -> 728x544). The imx296 MIPIC_AREA3W patch stops the STREAMON hang but mainline qcom-camss still delivers EMPTY (0xFF) buffers - the binned pixel payload never lands (no kernel error). Use --bin (GPU digital) instead; it gives the same 728x544 and is faster.")
     args = ap.parse_args()
@@ -709,6 +736,10 @@ if __name__ == "__main__":
     YOLO_FPS = args.yolo_fps
     AE_ON = not args.no_ae; AWB_ON = not args.no_awb
     CAMERA_MODEL = args.camera_model; CCM_ON = not args.no_ccm
+    if args.ccm_strength is not None: CCM_STRENGTH = args.ccm_strength
+    if args.shade_chroma is not None: SHADE_CHROMA = args.shade_chroma
+    DENOISE = not args.no_denoise
+    if args.denoise_radius is not None: DENOISE_RX, DENOISE_RY = args.denoise_radius
     load_camera_profile(CAMERA_MODEL)              # sets geometry/format/defaults/AE/CCM from profiles/<model>.json
     if args.ccm_ct is not None: CCM_CT = args.ccm_ct   # CLI colour-temp overrides the profile default
     BIN = args.bin

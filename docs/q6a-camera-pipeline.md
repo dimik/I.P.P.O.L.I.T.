@@ -385,3 +385,36 @@ the light changed. Added a real AWB loop (`auto_wb()` in `q6a_camstream.py`, on 
   when the light shifts instead of drifting. AE errors and AWB errors are both **non-fatal** (wrapped in the
   capture loop) — a throw must never trigger a camera reinit (that caused the §9 "snow every 2–3 s" stutter).
 - All AWB config lives in the camera profile (`profiles/imx296.json` → `awb`), keeping the scripts generic.
+
+## 11. Low-light colour cleanup (2026-07-05)
+
+A dim, high-gain indoor scene (gain=240, exp≈1900) exposed several colour-domain problems on top of the raw
+grain. Fixed as a set (`q6a_gpu.py` kernels + `q6a_camstream.py` knobs), verified with a spatial high-frequency
+chroma-noise metric (isolates noise from a moving scene; measured in a central patch):
+
+- **Chroma denoise (the big one).** Low-light colour shows up as *chroma* speckle + **coloured horizontal
+  row-noise lines** (per-row CMOS read noise, independent per Bayer channel, amplified into colour by the WB
+  gains + CCM). Added a GPU `chroma_denoise` kernel: keep the per-pixel **luma sharp**, blur only the colour
+  (R−Y, B−Y) over an **anisotropic window taller than wide** (default 7×11, `--denoise-radius RX RY`) so
+  row-correlated colour noise is averaged across rows. Chroma blur is perceptually cheap (human chroma acuity
+  is low — it's exactly what JPEG 4:2:0 does). Measured: R-G noise **12.3→1.9**, B-G **8.3→1.7**, luma detail
+  preserved; costs ~32→25 fps (naive KxK; could be made separable). On by default; `--no-denoise`.
+- **CCM softening.** The RPi CCM has ~2× gain with big off-diagonals (R-row L2 = 2.11×) → it amplifies chroma
+  noise and row-FPN into colour. Blend it toward identity: `--ccm-strength` (default **0.5**, L2 2.11→1.53).
+  Also relevant: the *full* CCM partially masks the top warm cast (its off-diagonals subtract red), so
+  softening trades a slightly warmer top for a cleaner image — the right call for a noisy low-light stream.
+- **Shade map = the edge rainbow.** The grey-card shading fit diverges to ±2× per-channel gain at the extreme
+  frame border → a magenta(left)/green(right) rainbow along the top edge. **Don't** drop it to luminance-only
+  (that removes real lens colour-shading correction and leaves a warm edge cast). Instead keep the colour part
+  but **attenuate + clamp** it: `SHADE_CHROMA` (default 0.7) × `SHADE_CHROMA_CLAMP` (±0.12) → moderate mid-field
+  correction retained, the ±2× border outliers clamped → rainbow gone. `--shade-chroma`.
+- **Highlight-desat threshold.** The blown-highlight→luma fade started at mx=190, so a merely mid-bright wall
+  got crushed toward flat grey ("grey hole, single tone"). Raised the ramp to **220→255** so only true near-clip
+  neutralizes; mid-bright surfaces keep their colour/texture.
+- **Destripe is now luminance-only.** The old per-channel FPN destripe injected *colour* stripes (why it was
+  off); the fused correction now subtracts the same per-row/col offset from all channels. Still off by default
+  (`--destripe`) — the visible horizontal lines are per-frame row *read noise*, not static FPN, so the chroma
+  denoise handles them; the static destripe only catches fixed-pattern banding.
+- **Known residual:** a smooth **warm cast along the top** of the frame (warm ceiling light + lens colour
+  shading). Global AWB/CCM can't correct a spatial gradient; a proper per-CT lens-shading calibration would,
+  but that needs a controlled rig. The objectionable *rainbow* is gone; the residual is closer to faithful.
