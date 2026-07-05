@@ -15,14 +15,14 @@
   "color_defaults": {
     "_comment": "Fixed WB fallbacks (a grey-card --calibrate overrides them). 1.60/1.52 under-corrected (residual green, and blue is the more deficient channel); nudged to 1.80/1.95 to neutralise under indoor light. Fixed WB is stable (AWB drifts magenta on non-gray rooms); a small sensor thermal-warmup drift remains.",
     "black_level": 60,
-    "wb_rgb": [1.80, 1.0, 1.95]
+    "wb_rgb": [2.05, 1.0, 2.20]
   },
 
   "ae": {
     "_comment": "Sensor auto-exposure: median-metered, exposure-only (fixed VMAX). target = raw high-byte median.",
     "target": 70,
     "min_exposure": 30,
-    "max_exposure": 3000,
+    "max_exposure": 4500,
     "gain_max": 480,
     "gain_analog_max": 240
   },
