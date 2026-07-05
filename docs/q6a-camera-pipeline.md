@@ -292,3 +292,37 @@ comment). Web search for a public FD-binning register sequence turned up nothing
 Not fixable without the confidential datasheet. **Investigation closed.** Stock camss restored; the imx296
 `MIPIC_AREA3W` patch is kept (inert for the non-binned modes we use). Debug artifacts remain on-board at
 `~/camss-build` should datasheet access ever appear.
+
+## 8. Pipeline optimization — demosaic + JPEG wall (2026-07-05)
+
+Profiled the GPU-bin pipeline per stage (728×544 out) to attack the throughput ceiling:
+
+| Stage | Before | After | note |
+|---|---:|---:|---|
+| GPU `isp_bin` (demosaic+WB+tonemap) | 10.3 ms | 10.2 ms | latency-bound (see below) |
+| GPU destripe (FPN col/row) | 4.9 ms | **0.76 ms** | amortized — recompute correction every 8 frames |
+| shm frame memcpy | 0.09 ms | 0.09 ms | negligible |
+| JPEG encode (libjpeg-turbo, q75) | 2.7–3.2 ms | 2.7 ms | already NEON SIMD |
+| **serial total** | **18.5 ms (54 fps)** | **13.5 ms (74 fps)** | |
+
+**Destripe amortization (shipped).** FPN column/row banding is *static* per sensor/gain, so the correction
+barely changes frame-to-frame. `GpuDemosaic` now recomputes the col/row correction (the expensive
+`col_sum`+`row_sum`+`corr` reductions) only every `destripe_period` (=8) frames and applies the cached
+correction (`destripe_sub`) every frame → **destripe 4.9 → 0.76 ms**, verified no brightness pumping
+(per-frame mean std 0.23 over 20 frames).
+
+**The `isp_bin` 10 ms is submission latency, not compute.** Micro-profiling the sub-steps *pipelined* (tight
+loop, one `finish` at the end) gives: upload packed 1.98 MB = 1.4 ms, kernel = 1.4 ms, readback 1.19 MB =
+0.7 ms → **~3.4 ms of real work**. The per-frame figure is ~10 ms because the Adreno **power-gates between
+frames** at 32 fps (≈21 ms idle gap) and pays a wakeup/submit latency on each `q.finish()`. Consequences:
+- **fp16 and zero-copy have low ROI here** — they'd shave the 3.4 ms compute, not the ~7 ms wakeup latency.
+  They only help when the GPU is kept busy (bright light / higher fps), where the per-frame amortizes toward
+  3.4 ms. Keeping the GPU warm with filler work would cut latency but *raise* heat — wrong trade for a
+  passively-cooled robot. So the latency is accepted; it's invisible indoors (exposure-limited to 32 fps,
+  and the pipeline ceiling is now 74 fps — 2× headroom).
+- Made the host↔device copies non-blocking (`is_blocking=False`) + a single `finish`/frame (tiny win).
+
+**JPEG is already optimal on CPU.** Pillow here links **libjpeg-turbo** (NEON SIMD) → 2.7 ms for 728×544;
+not worth replacing. The real encode lever is the **Venus H.264 hardware encoder** (`/dev/video17`) — it
+would remove JPEG from the CPU entirely *and* cut stream bandwidth ~10× (MJPEG ~60 KB/frame vs H.264
+~a few KB) — see the Venus investigation below.
