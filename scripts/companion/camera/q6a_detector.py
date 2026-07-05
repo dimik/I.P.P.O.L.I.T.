@@ -32,11 +32,18 @@ def main():
             time.sleep(0.1)
     if fshm is None:
         print("[detector] shm not found; exiting", flush=True); return
-    frame = np.ndarray((H, W, 3), np.uint8, buffer=fshm.buf)
     fseq = np.ndarray((1,), np.uint64, buffer=cshm.buf, offset=0)
     dseq = np.ndarray((1,), np.uint64, buffer=cshm.buf, offset=8)
     dcnt = np.ndarray((1,), np.int32, buffer=cshm.buf, offset=16)
+    ow_a = np.ndarray((1,), np.uint16, buffer=cshm.buf, offset=24)
+    oh_a = np.ndarray((1,), np.uint16, buffer=cshm.buf, offset=26)
     dbuf = np.ndarray((MAX_DET, 6), np.float32, buffer=cshm.buf, offset=CTRL_OFF)
+    for _ in range(300):                       # wait for the streamer to publish output dims
+        if int(ow_a[0]) > 0 and int(oh_a[0]) > 0: break
+        time.sleep(0.05)
+    ow, oh = int(ow_a[0]) or W, int(oh_a[0]) or H
+    frame = np.ndarray((oh, ow, 3), np.uint8, buffer=fshm.buf)
+    print(f"[detector] frame {ow}x{oh}", flush=True)
 
     det = YoloDetector()
     labels = det.labels

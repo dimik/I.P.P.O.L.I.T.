@@ -18,6 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 W, H = 1456, 1088
 STRIDE = 1824            # bytes/line for pBAA (1456*10/8=1820, padded to 1824)
 FRAME = STRIDE * H       # 1,984,512 bytes/frame (v4l2 sizeimage)
+OUT_W, OUT_H = W, H      # output (displayed/detected) resolution; halved by --bin
 
 # --- Color pipeline: deterministic, measured from raw Bayer statistics (NOT per-frame guessing) ---
 # A raw Bayer sensor needs black-level subtraction + fixed white-balance gains. On this IMX296 the two
@@ -30,6 +31,7 @@ WB_R, WB_G, WB_B = 1.60, 1.00, 1.52          # raw per-channel gains -> neutral 
 SHADE = None                                  # optional (H,W,3) radial COLOR-shading gain (green-relative)
 GPU = None                                    # optional Adreno OpenCL ISP (q6a_gpu.GpuDemosaic)
 DESTRIPE = False                              # optional FPN band removal (CPU, ~32ms); off by default
+BIN = False                                   # 2x2 binning -> half-res, ~2x less noise + faster
 TARGET_MEAN = 95.0                            # tone-map target brightness
 # YOLO runs in a SEPARATE PROCESS (q6a_detector.py) sharing frames via shared memory. The Adreno (GPU
 # ISP) and Hexagon (NPU) crash if driven concurrently in ONE process (shared userspace allocator
@@ -135,7 +137,10 @@ def debayer(px, full=True):
     """BGGR Bayer -> full-res RGB uint8: black-level + raw WB -> demosaic -> destripe -> tone map."""
     if GPU is not None and full:
         scale = _auto_scale(px)              # cheap CPU auto-exposure metric from the raw subsample
-        out = GPU.isp(px, BLACK_LEVEL, WB_R, WB_G, WB_B, scale)  # full ISP on GPU -> uint8 (no lock: NPU is a separate process)
+        if BIN:
+            out = GPU.isp_bin(px, BLACK_LEVEL, WB_R, WB_G, WB_B, scale)  # 2x2 bin -> half-res, low noise
+        else:
+            out = GPU.isp(px, BLACK_LEVEL, WB_R, WB_G, WB_B, scale)      # full-res ISP -> uint8
         return _destripe_u8(out) if DESTRIPE else out
     # CPU fallback: black+WB+demosaic + shade + destripe + tone map
     px = px.astype(np.float32) - BLACK_LEVEL
@@ -279,16 +284,19 @@ def init_detector():
         try: shared_memory.SharedMemory(name=nm).unlink()
         except FileNotFoundError: pass
     try:
-        fshm = shared_memory.SharedMemory(name="q6a_frame", create=True, size=W * H * 3)
+        fshm = shared_memory.SharedMemory(name="q6a_frame", create=True, size=OUT_W * OUT_H * 3)
         cshm = shared_memory.SharedMemory(name="q6a_ctrl", create=True, size=CTRL_SIZE)
     except Exception as e:
         print(f"YOLO disabled (shm: {e})", flush=True); return
     DET = {"fshm": fshm, "cshm": cshm,
-           "frame": np.ndarray((H, W, 3), np.uint8, buffer=fshm.buf),
+           "frame": np.ndarray((OUT_H, OUT_W, 3), np.uint8, buffer=fshm.buf),
            "fseq": np.ndarray((1,), np.uint64, buffer=cshm.buf, offset=0),
            "dcnt": np.ndarray((1,), np.int32, buffer=cshm.buf, offset=16),
+           "ow": np.ndarray((1,), np.uint16, buffer=cshm.buf, offset=24),
+           "oh": np.ndarray((1,), np.uint16, buffer=cshm.buf, offset=26),
            "dbuf": np.ndarray((MAX_DET, 6), np.float32, buffer=cshm.buf, offset=CTRL_OFF)}
     DET["fseq"][0] = 0; DET["dcnt"][0] = 0
+    DET["ow"][0] = OUT_W; DET["oh"][0] = OUT_H          # publish output dims for the detector
     proc = subprocess.Popen(["python3", os.path.expanduser("~/q6a_detector.py")])
     DET["proc"] = proc
 
@@ -425,8 +433,12 @@ if __name__ == "__main__":
     ap.add_argument("--no-yolo", action="store_true", help="disable the NPU YOLO detection overlay")
     ap.add_argument("--gpu", action="store_true", help="full-res ISP on the Adreno GPU (OpenCL) instead of CPU")
     ap.add_argument("--destripe", action="store_true", help="also remove FPN column/row banding (CPU, ~32ms)")
+    ap.add_argument("--bin", action="store_true", help="2x2 binning: half-res (728x544), ~2x less noise + faster")
     args = ap.parse_args()
     DESTRIPE = args.destripe
+    BIN = args.bin
+    if BIN:
+        OUT_W, OUT_H = W // 2, H // 2
     if args.calibrate:
         calibrate(args.cam, args.exposure, args.gain)
         sys.exit(0)

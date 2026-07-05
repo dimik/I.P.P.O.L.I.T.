@@ -68,6 +68,23 @@ __kernel void isp(__global const ushort* bayer, __global const float* shade, __g
     B = 255.0f*pow(clamp(B*scale/255.0f, 0.0f, 1.0f), 0.7f);
     out[o]=(uchar)(R+0.5f); out[o+1]=(uchar)(G+0.5f); out[o+2]=(uchar)(B+0.5f);
 }
+// 2x2 BINNED ISP: one output pixel per Bayer quad (uses real photosites, averages the 2 greens ->
+// ~2x less noise, no demosaic interpolation) + WB + tone map. Output is half-res (OW=W/2, OH=H/2).
+__kernel void isp_bin(__global const ushort* bayer, __global uchar* out,
+                      const int W, const int OW, const int OH, const float bl,
+                      const float wr, const float wg, const float wb, const float scale){
+    int ox = get_global_id(0), oy = get_global_id(1);
+    if (ox >= OW || oy >= OH) return;
+    int x = ox*2, y = oy*2;
+    float B = fmax((float)bayer[y*W + x] - bl, 0.0f);              // BGGR quad
+    float G = 0.5f*(fmax((float)bayer[y*W + x+1] - bl, 0.0f) + fmax((float)bayer[(y+1)*W + x] - bl, 0.0f));
+    float R = fmax((float)bayer[(y+1)*W + x+1] - bl, 0.0f);
+    R*=wr; G*=wg; B*=wb;
+    int o = (oy*OW + ox)*3;
+    out[o]  =(uchar)(255.0f*pow(clamp(R*scale/255.0f,0.0f,1.0f),0.7f)+0.5f);
+    out[o+1]=(uchar)(255.0f*pow(clamp(G*scale/255.0f,0.0f,1.0f),0.7f)+0.5f);
+    out[o+2]=(uchar)(255.0f*pow(clamp(B*scale/255.0f,0.0f,1.0f),0.7f)+0.5f);
+}
 '''
 
 
@@ -80,14 +97,29 @@ class GpuDemosaic:
         self.prg = cl.Program(self.ctx, _SRC).build()
         self.knl = cl.Kernel(self.prg, "demosaic")     # build once, reuse (avoid per-call retrieval)
         self.isp_knl = cl.Kernel(self.prg, "isp")
+        self.isp_bin_knl = cl.Kernel(self.prg, "isp_bin")
         mf = cl.mem_flags
+        self.OW, self.OH = W // 2, H // 2
         self.d_in = cl.Buffer(self.ctx, mf.READ_ONLY, W * H * 2)
         self.d_out = cl.Buffer(self.ctx, mf.WRITE_ONLY, W * H * 3 * 4)
         self.d_u8 = cl.Buffer(self.ctx, mf.WRITE_ONLY, W * H * 3)
+        self.d_u8_bin = cl.Buffer(self.ctx, mf.WRITE_ONLY, self.OW * self.OH * 3)
         self.out = np.empty((H, W, 3), np.float32)
         self.u8 = np.empty((H, W, 3), np.uint8)
+        self.u8_bin = np.empty((self.OH, self.OW, 3), np.uint8)
         self.d_shade = None
         self.dev_name = dev.name.strip()
+
+    def isp_bin(self, px, bl, wr, wg, wb, scale):
+        """2x2 binned ISP: px (H,W) uint16 -> (H/2,W/2,3) uint8 (lower noise + faster)."""
+        px = np.ascontiguousarray(px, np.uint16)
+        cl.enqueue_copy(self.q, self.d_in, px)
+        self.isp_bin_knl(self.q, (self.OW, self.OH), None, self.d_in, self.d_u8_bin,
+                         np.int32(self.W), np.int32(self.OW), np.int32(self.OH), np.float32(bl),
+                         np.float32(wr), np.float32(wg), np.float32(wb), np.float32(scale))
+        cl.enqueue_copy(self.q, self.u8_bin, self.d_u8_bin)
+        self.q.finish()
+        return self.u8_bin
 
     def set_shade(self, shade):
         """Upload a (H,W,3) float32 color-shading gain map to the GPU once (or None to disable)."""
