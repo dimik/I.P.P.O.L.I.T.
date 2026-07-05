@@ -1,14 +1,11 @@
-# Camera color tuning profiles
+# Camera tuning — PROVENANCE (not used at runtime)
 
-Ready-made, lab-calibrated camera tuning files (Raspberry Pi libcamera format). The streamer reads
-`tuning/<camera-model>.json` at startup and applies its **CCM** (color correction matrix, `rpi.ccm`,
-interpolated to a target colour temperature) — the cross-channel colour science that a per-channel
-white balance can't do. This replaces per-unit guessing with a professional calibration.
+The runtime reads `../profiles/<model>.json` (self-contained: geometry, CFA, MIPI format, colour
+defaults, AE bounds, and the CCM). This folder keeps the **original Raspberry Pi libcamera tuning**
+files the CCM matrices were extracted from, for traceability / re-extraction:
 
-- `imx296.json` — Sony IMX296 (our sensor), from Raspberry Pi's Global-Shutter-camera tuning
-  (`raspberrypi/libcamera` `src/ipa/rpi/vc4/data/imx296.json`). Only `rpi.ccm` (+ `rpi.black_level`)
-  is used here; the rest (AGC/AWB/ALSC/…) is RPi-pipeline-specific and ignored.
+- `imx296.json` — Raspberry Pi Global-Shutter-camera tuning (`raspberrypi/libcamera`
+  `src/ipa/rpi/vc4/data/imx296.json`). Its `rpi.ccm.ccms` were copied into `profiles/imx296.json`.
 
-**To add a camera:** drop its RPi tuning JSON here as `<model>.json` and run with
-`--camera-model <model>` (default: `imx296`). Source tuning files:
-`github.com/raspberrypi/libcamera/tree/main/src/ipa/rpi/vc4/data`.
+**To add a camera:** create `profiles/<model>.json` (copy imx296.json and edit geometry/CFA/CCM).
+Optionally drop the source RPi tuning here for provenance.

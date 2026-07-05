@@ -16,12 +16,12 @@ _FIELD_NONE = 1
 
 
 class V4l2Cam:
-    def __init__(self, dev="/dev/video0", width=1456, height=1088, nbufs=4):
+    def __init__(self, dev="/dev/video0", width=1456, height=1088, nbufs=4, pixelformat=None):
         self.fd = os.open(dev, os.O_RDWR | os.O_NONBLOCK)
         try:
             f = r.v4l2_format(); f.type = _MPLANE
             f.fmt.pix_mp.width = width; f.fmt.pix_mp.height = height
-            f.fmt.pix_mp.pixelformat = int(r.PixelFormat.SBGGR10P)   # 'pBAA' packed 10-bit
+            f.fmt.pix_mp.pixelformat = int(pixelformat if pixelformat else r.PixelFormat.SBGGR10P)  # default 'pBAA' RAW10
             f.fmt.pix_mp.num_planes = 1
             f.fmt.pix_mp.field = _FIELD_NONE
             fcntl.ioctl(self.fd, r.IOC.S_FMT, f)

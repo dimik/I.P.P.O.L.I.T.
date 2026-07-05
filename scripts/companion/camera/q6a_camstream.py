@@ -15,10 +15,19 @@ from PIL import Image
 from io import BytesIO
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+# --- Camera geometry/format: DEFAULTS ONLY. All sensor-specifics come from profiles/<model>.json at
+# startup (load_camera_profile), so these scripts are camera-agnostic. Defaults keep the module importable. ---
 W, H = 1456, 1088
-STRIDE = 1824            # bytes/line for pBAA (1456*10/8=1820, padded to 1824)
-FRAME = STRIDE * H       # 1,984,512 bytes/frame (v4l2 sizeimage)
+STRIDE = 1824            # bytes/line for packed RAW10 (align8(W*bits/8)); recomputed from the profile
+FRAME = STRIDE * H       # bytes/frame (v4l2 sizeimage)
 OUT_W, OUT_H = W, H      # output (displayed/detected) resolution; halved by --bin
+BAYER = "BGGR"           # CFA order (top-left 2x2, row-major); IMX296 = BGGR
+RX, RY, BX, BY = 1, 1, 0, 0   # R and B pixel positions within the 2x2, derived from BAYER
+MBUS_CODE = "SBGGR10_1X10"    # sensor media-bus code (setup_pipeline media-ctl format)
+PIXFMT = "pBAA"          # V4L2 capture pixelformat (packed RAW10)
+ENTITY_MATCH = "imx296"  # substring to find the sensor subdev entity in the media graph
+GAIN_MAX = 480           # analogue_gain control max (ctrl units)
+CCM_MATRICES = None      # [(ct, [9 floats]), ...] from the profile; interpolated to CCM_CT
 
 # --- Color pipeline: deterministic, measured from raw Bayer statistics (NOT per-frame guessing) ---
 # A raw Bayer sensor needs black-level subtraction + fixed white-balance gains. On this IMX296 the two
@@ -32,7 +41,7 @@ BLACK_RGB = None                              # per-channel black pedestal (R,G,
 WB_R, WB_G, WB_B = 1.60, 1.00, 1.52          # raw per-channel gains -> neutral grey (measured)
 SHADE = None                                  # optional (H,W,3) radial COLOR-shading gain (green-relative)
 GPU = None                                    # optional Adreno OpenCL ISP (q6a_gpu.GpuDemosaic)
-CAMERA_MODEL = "imx296"                        # tuning/<model>.json -> ready-made CCM (add a camera = add a file)
+CAMERA_MODEL = "imx296"                        # profiles/<model>.json -> all sensor config (add a camera = add a file)
 CCM_CT = 3600                                  # colour temp (K) to interpolate the CCM to (indoor default)
 CCM_ON = True                                  # apply the ready-made color correction matrix
 DESTRIPE = False                              # optional FPN band removal (CPU, ~32ms); off by default
@@ -57,37 +66,70 @@ YOLO_FPS = 10                                   # cap NPU YOLO to this rate (0=u
                                                # doesn't need per-frame detection; boxes persist between updates,
                                                # so 10fps frees the NPU (~60% idle -> cooler, shares HTP w/ the LLM).
 LABELS = [str(i) for i in range(80)]
-TUNING_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tuning")
-def load_ccm(model, ct):
-    """Load the ready-made color correction matrix from tuning/<model>.json (Raspberry Pi libcamera tuning),
-    linearly interpolated to the target colour temperature `ct`. Returns a (3,3) float32, or None if absent.
-    This is the cross-channel colour science (fixes the residual spectral cast) — no per-unit guessing."""
-    path = os.path.join(TUNING_DIR, f"{model}.json")
+PROFILES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "profiles")
+
+def _bayer_pos(s):
+    """CFA string (row-major 2x2, e.g. 'BGGR') -> (rx,ry,bx,by): R and B pixel offsets within the 2x2."""
+    r, b = s.index("R"), s.index("B")
+    return (r % 2, r // 2, b % 2, b // 2)
+
+def _fourcc(s):
+    """V4L2 fourcc string (e.g. 'pBAA') -> its 32-bit int code."""
+    return sum(ord(c) << (8 * i) for i, c in enumerate(s[:4]))
+
+def load_camera_profile(model):
+    """Load ALL sensor-specific config from profiles/<model>.json into module globals -> the scripts stay
+    camera-agnostic (adding a camera = adding a profile: geometry, CFA, MIPI format, colour defaults, AE
+    bounds, and the ready-made CCM). Returns True if a profile was found."""
+    global W, H, STRIDE, FRAME, OUT_W, OUT_H, BAYER, RX, RY, BX, BY, MBUS_CODE, PIXFMT, ENTITY_MATCH
+    global BLACK_LEVEL, WB_R, WB_G, WB_B, AE_TARGET, AE_MIN_EXP, AE_MAX_EXP, GAIN_MAX, CCM_MATRICES, CCM_CT
+    path = os.path.join(PROFILES_DIR, f"{model}.json")
     if not os.path.exists(path):
-        print(f"no tuning file {path} -> CCM disabled", flush=True); return None
-    try:
-        d = json.load(open(path))
-        algos = {list(a)[0]: list(a.values())[0] for a in d["algorithms"]}
-        ccms = sorted(algos["rpi.ccm"]["ccms"], key=lambda e: e["ct"])
-        cts = [e["ct"] for e in ccms]
-        if ct <= cts[0]: m = ccms[0]["ccm"]
-        elif ct >= cts[-1]: m = ccms[-1]["ccm"]
-        else:
-            i = max(k for k in range(len(cts)) if cts[k] <= ct)
-            f = (ct - cts[i]) / (cts[i + 1] - cts[i])
-            m = [a + (b - a) * f for a, b in zip(ccms[i]["ccm"], ccms[i + 1]["ccm"])]
-        print(f"loaded CCM from tuning/{model}.json @ {ct}K (of {len(ccms)} CTs {cts[0]}-{cts[-1]})", flush=True)
-        return np.asarray(m, np.float32).reshape(3, 3)
-    except Exception as e:
-        print(f"CCM load failed ({e}); disabled", flush=True); return None
+        print(f"no camera profile {path}; using built-in defaults ({W}x{H} {BAYER})", flush=True); return False
+    p = json.load(open(path)); s = p["sensor"]
+    W, H = int(s["width"]), int(s["height"])
+    BAYER = s.get("bayer", BAYER); RX, RY, BX, BY = _bayer_pos(BAYER)
+    MBUS_CODE = s.get("mbus_code", MBUS_CODE); PIXFMT = s.get("v4l2_pixelformat", PIXFMT)
+    ENTITY_MATCH = s.get("entity_match", ENTITY_MATCH)
+    bits = int(s.get("bits", 10))
+    STRIDE = ((W * bits // 8 + 7) // 8) * 8       # packed RAW10 stride, aligned up to 8 bytes (as v4l2 pads)
+    FRAME = STRIDE * H; OUT_W, OUT_H = W, H
+    cd = p.get("color_defaults", {})
+    BLACK_LEVEL = float(cd.get("black_level", BLACK_LEVEL))
+    if "wb_rgb" in cd: WB_R, WB_G, WB_B = (float(x) for x in cd["wb_rgb"])
+    ae = p.get("ae", {})
+    AE_TARGET = float(ae.get("target", AE_TARGET)); AE_MIN_EXP = int(ae.get("min_exposure", AE_MIN_EXP))
+    AE_MAX_EXP = int(ae.get("max_exposure", AE_MAX_EXP)); GAIN_MAX = int(ae.get("gain_max", GAIN_MAX))
+    ccm = p.get("ccm", {})
+    if ccm.get("matrices"):
+        CCM_MATRICES = sorted(((int(m["ct"]), list(m["ccm"])) for m in ccm["matrices"]), key=lambda e: e[0])
+        CCM_CT = int(ccm.get("ct", CCM_CT))
+    print(f"camera profile {model}: {W}x{H} {BAYER} {MBUS_CODE}/{PIXFMT} stride={STRIDE} black={BLACK_LEVEL:.0f} "
+          f"ae[{AE_MIN_EXP}-{AE_MAX_EXP}]@{AE_TARGET:.0f} ccm={'yes' if CCM_MATRICES else 'no'}", flush=True)
+    return True
+
+def load_ccm(ct):
+    """Interpolate the profile's ready-made CCM matrices to colour temperature `ct` -> (3,3) float32 (or None).
+    The cross-channel colour science (fixes the residual spectral cast); lab-derived, not per-unit guessing."""
+    if not CCM_MATRICES:
+        return None
+    cts = [c for c, _ in CCM_MATRICES]
+    if ct <= cts[0]: m = CCM_MATRICES[0][1]
+    elif ct >= cts[-1]: m = CCM_MATRICES[-1][1]
+    else:
+        i = max(k for k in range(len(cts)) if cts[k] <= ct)
+        f = (ct - cts[i]) / (cts[i + 1] - cts[i])
+        m = [a + (b - a) * f for a, b in zip(CCM_MATRICES[i][1], CCM_MATRICES[i + 1][1])]
+    print(f"CCM @ {ct}K (of {len(cts)} CTs {cts[0]}-{cts[-1]})", flush=True)
+    return np.asarray(m, np.float32).reshape(3, 3)
 
 def init_gpu():
     global GPU
     try:
         from q6a_gpu import GpuDemosaic
-        GPU = GpuDemosaic(W, H)
+        GPU = GpuDemosaic(W, H, bayer=(RX, RY, BX, BY))
         GPU.set_shade(SHADE)                   # upload color-shading map once (if a profile is loaded)
-        GPU.set_ccm(load_ccm(CAMERA_MODEL, CCM_CT) if CCM_ON else None)   # ready-made color matrix
+        GPU.set_ccm(load_ccm(CCM_CT) if CCM_ON else None)   # ready-made color matrix (profile)
         print(f"GPU ISP enabled: {GPU.dev_name} (full demosaic+WB+CCM+tonemap on GPU)", flush=True)
     except Exception as e:
         GPU = None
@@ -135,10 +177,10 @@ def setup_pipeline(cam, exposure, gain):
     m = ["media-ctl", "-d", "/dev/media0"]
     subprocess.run(m + ["-l", f'"{phy}":1 -> "{csid}":0 [1]'], check=False)
     subprocess.run(m + ["-l", f'"{csid}":1 -> "{rdi}":0 [1]'], check=False)
-    fmt = f"[fmt:SBGGR10_1X10/{W}x{H}]"   # W,H = 728x544 in --sensor-bin (driver enables 2x2 FD binning)
-    # sensor entity name = "imx296 <cci-bus>-001a"; discover it from a link line in the topology
+    fmt = f"[fmt:{MBUS_CODE}/{W}x{H}]"    # MBUS_CODE + W,H from the camera profile
+    # sensor entity name = e.g. "imx296 <cci-bus>-001a"; discover it from a link line in the topology
     top = subprocess.run(m + ["-p"], capture_output=True, text=True).stdout
-    sensor = next((l.split('"')[1] for l in top.splitlines() if "imx296" in l and '"' in l), None)
+    sensor = next((l.split('"')[1] for l in top.splitlines() if ENTITY_MATCH in l and '"' in l), None)
     for ent in ([f'"{sensor}":0'] if sensor else []) + [f'"{phy}":0', f'"{phy}":1',
                 f'"{csid}":0', f'"{csid}":1', f'"{rdi}":0']:
         subprocess.run(m + ["-V", f"{ent} {fmt}"], check=False)
@@ -226,12 +268,13 @@ _KG = np.array([[0, .25, 0], [.25, 0, .25], [0, .25, 0]])          # 4-neighbour
 _KRB = np.array([[.25, .5, .25], [.5, 1, .5], [.25, .5, .25]])     # bilinear R/B upsample
 
 def demosaic_bggr(px):
-    """Full-resolution bilinear demosaic of a BGGR Bayer plane -> (H,W,3) float."""
+    """Full-resolution bilinear demosaic of a Bayer plane -> (H,W,3) float. Bayer-order-agnostic: the R/G/B
+    samples are placed by the profile's CFA positions (RX/RY/BX/BY), then interpolated (name kept for compat)."""
     px = px.astype(np.float32)
     R = np.zeros_like(px); G = np.zeros_like(px); B = np.zeros_like(px)
-    B[0::2, 0::2] = px[0::2, 0::2]
-    G[0::2, 1::2] = px[0::2, 1::2]; G[1::2, 0::2] = px[1::2, 0::2]
-    R[1::2, 1::2] = px[1::2, 1::2]
+    B[BY::2, BX::2] = px[BY::2, BX::2]
+    G[BY::2, RX::2] = px[BY::2, RX::2]; G[RY::2, BX::2] = px[RY::2, BX::2]
+    R[RY::2, RX::2] = px[RY::2, RX::2]
     G = np.where(G > 0, G, _conv3(G, _KG))     # interpolate G only at R/B sites
     R = _conv3(R, _KRB); B = _conv3(B, _KRB)   # bilinear-upsample the quarter-density R/B
     return np.dstack([R, G, B])
@@ -248,14 +291,14 @@ def debayer(buf, full=True):
         return out
     # CPU fallback: unpack + black+WB+demosaic + shade + destripe + tone map
     px = unpack_raw10(buf).astype(np.float32)
-    if BLACK_RGB is not None:                 # per-channel black by Bayer position (BGGR)
-        px[0::2, 0::2] -= BLACK_RGB[2]; px[1::2, 1::2] -= BLACK_RGB[0]
-        px[0::2, 1::2] -= BLACK_RGB[1]; px[1::2, 0::2] -= BLACK_RGB[1]
+    if BLACK_RGB is not None:                 # per-channel black by Bayer position (profile CFA)
+        px[BY::2, BX::2] -= BLACK_RGB[2]; px[RY::2, RX::2] -= BLACK_RGB[0]
+        px[BY::2, RX::2] -= BLACK_RGB[1]; px[RY::2, BX::2] -= BLACK_RGB[1]
     else:
         px -= BLACK_LEVEL
     np.clip(px, 0, None, out=px)
-    px[1::2, 1::2] *= WB_R                    # R sites   (raw white balance, per Bayer position)
-    px[0::2, 0::2] *= WB_B                    # B sites   (G sites keep WB_G=1)
+    px[RY::2, RX::2] *= WB_R                  # R sites   (raw white balance, per Bayer position)
+    px[BY::2, BX::2] *= WB_B                  # B sites   (G sites keep WB_G=1)
     out = _debayer_cpu(px, full)
     if SHADE is not None and SHADE.shape == out.shape:
         out *= SHADE                          # radial color-shading correction (magenta centre -> green edge)
@@ -271,7 +314,7 @@ def _destripe_u8(u8):
 def _debayer_cpu(px, full):
     if full:
         return demosaic_bggr(px)                                 # sharp 1456x1088
-    b = px[0::2, 0::2]; g = (px[0::2, 1::2] + px[1::2, 0::2]) * 0.5; r = px[1::2, 1::2]
+    b = px[BY::2, BX::2]; g = (px[BY::2, RX::2] + px[RY::2, BX::2]) * 0.5; r = px[RY::2, RX::2]
     return np.dstack([r, g, b]).astype(np.float32)              # fast half-res super-pixel
 
 _GAMMA_LUT = (255.0 * (np.arange(256) / 255.0) ** 0.7).astype(np.uint8)   # gamma 0.7 as a 256-entry LUT
@@ -295,7 +338,7 @@ def calibrate(cam, exposure, gain, n=40):
     subprocess.run(["pkill", "-9", "-f", "v4l2-ctl"], check=False); time.sleep(1)
     tmp = "/dev/shm/q6a_cal.raw"
     subprocess.run(["v4l2-ctl", "-d", "/dev/video0",
-                    "--set-fmt-video=width=1456,height=1088,pixelformat=pBAA",
+                    f"--set-fmt-video=width={W},height={H},pixelformat={PIXFMT}",
                     "--stream-mmap", f"--stream-count={n}", f"--stream-to={tmp}"], check=True)
     acc = np.zeros((H, W), np.float64); cnt = 0
     with open(tmp, "rb") as f:
@@ -313,16 +356,16 @@ def calibrate(cam, exposure, gain, n=40):
     if blk_prof is not None:
         bR, bG, bB = blk_prof
     else:
-        b0 = float(min(px[0::2, 0::2].min(), px[1::2, 1::2].min(), px[0::2, 1::2].min())); bR = bG = bB = b0
-    Rm = (px[1::2, 1::2] - bR).mean(); Bm = (px[0::2, 0::2] - bB).mean()
-    Gm = ((px[0::2, 1::2] - bG).mean() + (px[1::2, 0::2] - bG).mean()) / 2
+        b0 = float(min(px[RY::2, RX::2].min(), px[BY::2, BX::2].min(), px[BY::2, RX::2].min())); bR = bG = bB = b0
+    Rm = (px[RY::2, RX::2] - bR).mean(); Bm = (px[BY::2, BX::2] - bB).mean()
+    Gm = ((px[BY::2, RX::2] - bG).mean() + (px[RY::2, BX::2] - bG).mean()) / 2
     wb = np.array([Gm / max(Rm, 1e-3), 1.0, Gm / max(Bm, 1e-3)], np.float32)
     # radial COLOR shading: WB-correct + demosaic the flat field, fit a smooth quadratic per channel
     # (robust to local non-uniformity), then a GREEN-RELATIVE gain that flattens R/G,B/G across the field
     # without touching luminance (green gain = 1 -> no vignette boost -> no corner-noise amplification).
     q = px.copy()                                          # per-channel black subtract (BGGR)
-    q[1::2, 1::2] -= bR; q[0::2, 0::2] -= bB; q[0::2, 1::2] -= bG; q[1::2, 0::2] -= bG
-    q = np.clip(q, 0, None); q[1::2, 1::2] *= wb[0]; q[0::2, 0::2] *= wb[2]
+    q[RY::2, RX::2] -= bR; q[BY::2, BX::2] -= bB; q[BY::2, RX::2] -= bG; q[RY::2, BX::2] -= bG
+    q = np.clip(q, 0, None); q[RY::2, RX::2] *= wb[0]; q[BY::2, BX::2] *= wb[2]
     flat = demosaic_bggr(q)                                 # (H,W,3) WB-corrected flat field
     GX, GY = 32, 24
     coarse = np.stack([np.asarray(Image.fromarray(flat[..., c]).resize((GX, GY), Image.BILINEAR))
@@ -355,7 +398,7 @@ def calibrate_dark(cam, exposure, gain, n=40):
     subprocess.run(["pkill", "-9", "-f", "v4l2-ctl"], check=False); time.sleep(1)
     tmp = "/dev/shm/q6a_dark.raw"
     subprocess.run(["v4l2-ctl", "-d", "/dev/video0",
-                    "--set-fmt-video=width=1456,height=1088,pixelformat=pBAA",
+                    f"--set-fmt-video=width={W},height={H},pixelformat={PIXFMT}",
                     "--stream-mmap", f"--stream-count={n}", f"--stream-to={tmp}"], check=True)
     acc = np.zeros((H, W), np.float64); cnt = 0
     with open(tmp, "rb") as f:
@@ -364,8 +407,8 @@ def calibrate_dark(cam, exposure, gain, n=40):
             if len(b) < FRAME: break
             acc += unpack_raw10(b); cnt += 1
     px = acc / max(cnt, 1)
-    blR = float(px[1::2, 1::2].mean()); blB = float(px[0::2, 0::2].mean())
-    blG = float((px[0::2, 1::2].mean() + px[1::2, 0::2].mean()) / 2)
+    blR = float(px[RY::2, RX::2].mean()); blB = float(px[BY::2, BX::2].mean())
+    blG = float((px[BY::2, RX::2].mean() + px[RY::2, BX::2].mean()) / 2)
     blk = np.array([blR, blG, blB], np.float32)
     sv = dict(black=np.float32(min(blR, blG, blB)), blk=blk)
     if os.path.exists(PROFILE):                            # keep an existing WB / shading map
@@ -486,7 +529,7 @@ def capture_loop(rdi, full):
             State.wake.wait(); State.wake.clear(); continue
         try:
             if cam is None:
-                cam = V4l2Cam("/dev/video0", W, H); fails = 0
+                cam = V4l2Cam("/dev/video0", W, H, pixelformat=_fourcc(PIXFMT)); fails = 0
             data = cam.read_latest(timeout=1.0)  # drains to the freshest frame (low latency)
             if data is not None and len(data) == FRAME:
                 try:
@@ -529,7 +572,7 @@ def _capture_loop_file(rdi, full, batch=300):
             open(tmp, "wb").close()             # truncate before the new batch
             proc = subprocess.Popen(
                 ["v4l2-ctl", "-d", "/dev/video0",
-                 "--set-fmt-video=width=1456,height=1088,pixelformat=pBAA",
+                 f"--set-fmt-video=width={W},height={H},pixelformat={PIXFMT}",
                  "--stream-mmap", f"--stream-count={batch}", f"--stream-to={tmp}"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             f = open(tmp, "rb"); last = 0; last_sz = -1; grew = time.time()
@@ -612,8 +655,8 @@ if __name__ == "__main__":
     ap.add_argument("--calibrate-dark", action="store_true", help="dark-frame black calibration (COVER THE LENS): measures per-channel black to fix the brightness-dependent color cast; then re-run --calibrate")
     ap.add_argument("--no-yolo", action="store_true", help="disable the NPU YOLO detection overlay")
     ap.add_argument("--no-ae", action="store_true", help="disable sensor auto-exposure (use the fixed --exposure/--gain). AE nudges real integration time so bright scenes don't clip; --exposure is just the starting point.")
-    ap.add_argument("--camera-model", default="imx296", help="tuning/<model>.json to load the ready-made color-correction matrix (CCM) from (default imx296)")
-    ap.add_argument("--ccm-ct", type=int, default=3600, help="colour temperature (K) to interpolate the CCM to (2500=warm .. 7400=daylight; 3600 indoor default)")
+    ap.add_argument("--camera-model", default="imx296", help="profiles/<model>.json to load all sensor config from (geometry, CFA, format, defaults, AE, CCM). Add a camera = add a profile.")
+    ap.add_argument("--ccm-ct", type=int, default=None, help="override the profile's CCM colour temperature (K) (2500=warm .. 7400=daylight)")
     ap.add_argument("--no-ccm", action="store_true", help="disable the ready-made color-correction matrix")
     ap.add_argument("--yolo-fps", type=float, default=10.0, help="cap YOLO to this detection rate (0=unlimited, ~26fps NPU max). Detections overlay persists between updates, so a low rate saves NPU heat/power with no visual loss on a slow robot.")
     ap.add_argument("--gpu", action="store_true", help="full-res ISP on the Adreno GPU (OpenCL) instead of CPU")
@@ -624,7 +667,9 @@ if __name__ == "__main__":
     DESTRIPE = args.destripe
     YOLO_FPS = args.yolo_fps
     AE_ON = not args.no_ae
-    CAMERA_MODEL = args.camera_model; CCM_CT = args.ccm_ct; CCM_ON = not args.no_ccm
+    CAMERA_MODEL = args.camera_model; CCM_ON = not args.no_ccm
+    load_camera_profile(CAMERA_MODEL)              # sets geometry/format/defaults/AE/CCM from profiles/<model>.json
+    if args.ccm_ct is not None: CCM_CT = args.ccm_ct   # CLI colour-temp overrides the profile default
     BIN = args.bin
     if BIN:
         OUT_W, OUT_H = W // 2, H // 2

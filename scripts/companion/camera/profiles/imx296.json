@@ -1,0 +1,43 @@
+{
+  "model": "imx296",
+  "description": "Sony IMX296 1.58MP global-shutter, 1-lane MIPI, color BGGR Bayer. Generic camera profile for q6a_camstream (all sensor-specific config lives here; the scripts are camera-agnostic).",
+
+  "sensor": {
+    "width": 1456,
+    "height": 1088,
+    "bayer": "BGGR",
+    "bits": 10,
+    "mbus_code": "SBGGR10_1X10",
+    "v4l2_pixelformat": "pBAA",
+    "entity_match": "imx296"
+  },
+
+  "color_defaults": {
+    "_comment": "Fallbacks used until a runtime calibration (imx296_wb.npz) overrides them. black=60 is RPi's lab value (=our dark-frame 59.4).",
+    "black_level": 60,
+    "wb_rgb": [1.60, 1.0, 1.52]
+  },
+
+  "ae": {
+    "_comment": "Sensor auto-exposure: median-metered, exposure-only (fixed VMAX). target = raw high-byte median.",
+    "target": 70,
+    "min_exposure": 30,
+    "max_exposure": 3000,
+    "gain_max": 480,
+    "gain_analog_max": 240
+  },
+
+  "ccm": {
+    "_comment": "Lab-calibrated color-correction matrices from Raspberry Pi's IMX296 libcamera tuning (rpi.ccm, src/ipa/rpi/vc4/data/imx296.json). Interpolated to `ct` at load. Rows sum to ~1 (neutral-preserving).",
+    "ct": 3600,
+    "matrices": [
+      {"ct": 2500, "ccm": [1.951, -0.574, -0.376, -0.469, 1.867, -0.397, 0.080, -1.141, 2.061]},
+      {"ct": 2800, "ccm": [1.941, -0.603, -0.338, -0.432, 1.854, -0.423, 0.038, -0.950, 1.912]},
+      {"ct": 2900, "ccm": [1.918, -0.596, -0.323, -0.519, 2.091, -0.572, -0.033, -0.735, 1.768]},
+      {"ct": 3620, "ccm": [1.972, -0.664, -0.308, -0.464, 2.026, -0.562, -0.078, -0.612, 1.689]},
+      {"ct": 4560, "ccm": [2.153, -0.848, -0.305, -0.484, 2.290, -0.805, -0.151, -0.530, 1.681]},
+      {"ct": 5600, "ccm": [2.046, -0.748, -0.298, -0.363, 1.990, -0.627, -0.093, -0.465, 1.559]},
+      {"ct": 7400, "ccm": [2.375, -0.831, -0.545, -0.483, 2.843, -1.360, -0.212, -0.665, 1.877]}
+    ]
+  }
+}

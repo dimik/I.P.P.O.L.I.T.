@@ -26,8 +26,8 @@ inline float bget_packed(__global const uchar* p, int x, int y, int W, int H, in
     x = clamp(x, 0, W-1); y = clamp(y, 0, H-1);
     int g = x >> 2, wi = x & 3, base = y*S + g*5;
     int val = ((int)p[base + wi] << 2) | ((p[base + 4] >> (2*wi)) & 3);
-    int bx = x & 1, by = y & 1;                        // BGGR: B@(even,even) R@(odd,odd) else G
-    float bl = (by==0) ? (bx==0 ? blB : blG) : (bx==1 ? blR : blG);
+    int px = x & 1, py = y & 1;                        // channel from CFA position (BRX/BRY/BBX/BBY #defines)
+    float bl = (px==BRX && py==BRY) ? blR : (px==BBX && py==BBY) ? blB : blG;
     float v = (float)val - bl;                         // per-channel black pedestal (dark-frame calibrated)
     return v < 0.0f ? 0.0f : v;
 }
@@ -67,10 +67,10 @@ __kernel void isp(__global const uchar* pk, __global const float* shade, __globa
                      +bget_packed(pk,x-1,y+1,W,H,S,blR,blG,blB)+bget_packed(pk,x+1,y+1,W,H,S,blR,blG,blB));
     float hh = 0.5f*(bget_packed(pk,x-1,y,W,H,S,blR,blG,blB)+bget_packed(pk,x+1,y,W,H,S,blR,blG,blB));
     float vv = 0.5f*(bget_packed(pk,x,y-1,W,H,S,blR,blG,blB)+bget_packed(pk,x,y+1,W,H,S,blR,blG,blB));
-    if (by==0 && bx==0){ B=C; G=g4; R=d4; }
-    else if (by==1 && bx==1){ R=C; G=g4; B=d4; }
-    else if (by==0 && bx==1){ G=C; B=hh; R=vv; }
-    else { G=C; R=hh; B=vv; }
+    if (bx==BBX && by==BBY){ B=C; G=g4; R=d4; }        // B site
+    else if (bx==BRX && by==BRY){ R=C; G=g4; B=d4; }   // R site
+    else if (by==BBY){ G=C; B=hh; R=vv; }              // G on the B row: horiz=B, vert=R
+    else { G=C; R=hh; B=vv; }                          // G on the R row: horiz=R, vert=B
     R*=wr; G*=wg; B*=wb;
     int o = (y*W + x)*3;
     if (use_shade){ R*=shade[o]; G*=shade[o+1]; B*=shade[o+2]; }
@@ -98,9 +98,9 @@ __kernel void isp_bin(__global const uchar* pk, __global const float* shade, __g
     int ox = get_global_id(0), oy = get_global_id(1);
     if (ox >= OW || oy >= OH) return;
     int x = ox*2, y = oy*2;
-    float B = bget_packed(pk, x,   y,   W, H, S, blR, blG, blB);              // BGGR quad (unpacked on GPU)
-    float G = 0.5f*(bget_packed(pk, x+1, y, W, H, S, blR, blG, blB) + bget_packed(pk, x, y+1, W, H, S, blR, blG, blB));
-    float R = bget_packed(pk, x+1, y+1, W, H, S, blR, blG, blB);
+    float B = bget_packed(pk, x+BBX, y+BBY, W, H, S, blR, blG, blB);          // CFA quad (unpacked on GPU)
+    float R = bget_packed(pk, x+BRX, y+BRY, W, H, S, blR, blG, blB);
+    float G = 0.5f*(bget_packed(pk, x+BRX, y+BBY, W, H, S, blR, blG, blB) + bget_packed(pk, x+BBX, y+BRY, W, H, S, blR, blG, blB));
     R*=wr; G*=wg; B*=wb;
     if (use_shade){ int so=(y*W + x)*3; R*=shade[so]; G*=shade[so+1]; B*=shade[so+2]; }  // radial color-shading
     if (use_ccm){                                                  // color correction matrix (RPi IMX296 tuning)
@@ -164,12 +164,14 @@ __kernel void destripe_sub(__global uchar* im, __global const float* dcol, __glo
 
 
 class GpuDemosaic:
-    def __init__(self, W, H):
+    def __init__(self, W, H, bayer=(1, 1, 0, 0)):
         self.W, self.H = W, H
         dev = cl.get_platforms()[0].get_devices()[0]
         self.ctx = cl.Context(devices=[dev])
         self.q = cl.CommandQueue(self.ctx)
-        self.prg = cl.Program(self.ctx, _SRC).build(options=["-cl-fast-relaxed-math"])
+        rx, ry, bx, by = bayer                                # R/B pixel positions in the 2x2 (BGGR=(1,1,0,0))
+        defs = f"#define BRX {rx}\n#define BRY {ry}\n#define BBX {bx}\n#define BBY {by}\n"
+        self.prg = cl.Program(self.ctx, defs + _SRC).build(options=["-cl-fast-relaxed-math"])
         self.knl = cl.Kernel(self.prg, "demosaic")     # build once, reuse (avoid per-call retrieval)
         self.isp_knl = cl.Kernel(self.prg, "isp")
         self.isp_bin_knl = cl.Kernel(self.prg, "isp_bin")
