@@ -32,9 +32,13 @@ scp -q "$REPO_DIR/q6a_yolo.py" "$Q6A:~/q6a_yolo.py"
 [ -f "$REPO_DIR/models/coco_labels.txt" ] && scp -q "$REPO_DIR/models/coco_labels.txt" "$Q6A:~/coco_labels.txt" 2>/dev/null || true
 [ -f "$REPO_DIR/imx296_wb.npz" ] && scp -q "$REPO_DIR/imx296_wb.npz" "$Q6A:~/imx296_wb.npz" 2>/dev/null || true
 
-echo "== start streamer on the Q6A (detached; --fast = half-res demosaic, ~6x faster) =="
+echo "== start streamer on the Q6A (detached; --gpu = full-res demosaic on the Adreno, ~23fps) =="
+# ensure the Adreno OpenCL driver is registered as an ICD (pyopencl's loader needs it); idempotent
+ssh "$Q6A" "[ -f /etc/OpenCL/vendors/adreno.icd ] || (sudo mkdir -p /etc/OpenCL/vendors && \
+  echo /usr/lib/aarch64-linux-gnu/libOpenCL_adreno.so.1 | sudo tee /etc/OpenCL/vendors/adreno.icd >/dev/null)" 2>/dev/null || true
+# --gpu falls back to --fast automatically if pyopencl/OpenCL is unavailable
 ssh "$Q6A" "ss -ltn 2>/dev/null | grep -q ":$PORT " || \
-  setsid python3 ~/q6a_camstream.py --cam $CAM --port $PORT --fast </dev/null >~/camstream.log 2>&1 &" || true
+  setsid python3 ~/q6a_camstream.py --cam $CAM --port $PORT --gpu </dev/null >~/camstream.log 2>&1 &" || true
 sleep 3
 echo "   stream: http://$HOST_IP:$PORT/stream   (log: ssh $Q6A 'tail -f ~/camstream.log')"
 

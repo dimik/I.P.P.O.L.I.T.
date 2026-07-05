@@ -28,6 +28,17 @@ FRAME = STRIDE * H       # 1,984,512 bytes/frame (v4l2 sizeimage)
 BLACK_LEVEL = 56.0
 WB_R, WB_G, WB_B = 1.60, 1.00, 1.52          # raw per-channel gains -> neutral grey (measured)
 SHADE = None                                  # optional (H,W,3) radial COLOR-shading gain (green-relative)
+GPU = None                                    # optional Adreno OpenCL demosaic (q6a_gpu.GpuDemosaic)
+ACCEL = threading.Lock()                       # serialize GPU (Adreno) and NPU (Hexagon) — concurrent use crashes
+def init_gpu():
+    global GPU
+    try:
+        from q6a_gpu import GpuDemosaic
+        GPU = GpuDemosaic(W, H)
+        print(f"GPU demosaic enabled: {GPU.dev_name}", flush=True)
+    except Exception as e:
+        GPU = None
+        print(f"GPU demosaic unavailable ({e}); using CPU numpy demosaic", flush=True)
 PROFILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "imx296_wb.npz")
 def load_profile():
     global BLACK_LEVEL, WB_R, WB_G, WB_B, SHADE
@@ -106,25 +117,32 @@ def demosaic_bggr(px):
 
 def debayer(px, full=True):
     """BGGR Bayer -> full-res RGB uint8: black-level + raw WB -> demosaic -> destripe -> tone map."""
-    px = px.astype(np.float32) - BLACK_LEVEL
-    np.clip(px, 0, None, out=px)
-    px[1::2, 1::2] *= WB_R                    # R sites   (raw white balance, per Bayer position)
-    px[0::2, 0::2] *= WB_B                    # B sites   (G sites keep WB_G=1)
-    if full:
-        out = demosaic_bggr(px)                                  # sharp 1456x1088
-    else:  # fast half-res super-pixel (fallback)
-        b = px[0::2, 0::2]; g = (px[0::2, 1::2] + px[1::2, 0::2]) * 0.5; r = px[1::2, 1::2]
-        out = np.dstack([r, g, b]).astype(np.float32)
+    if GPU is not None and full:
+        with ACCEL:                          # serialize GPU vs NPU — concurrent Adreno+Hexagon crashes
+            out = GPU.demosaic(px, BLACK_LEVEL, WB_R, WB_G, WB_B)    # black-level+WB+demosaic on the Adreno
+    else:
+        px = px.astype(np.float32) - BLACK_LEVEL
+        np.clip(px, 0, None, out=px)
+        px[1::2, 1::2] *= WB_R                # R sites   (raw white balance, per Bayer position)
+        px[0::2, 0::2] *= WB_B                # B sites   (G sites keep WB_G=1)
+        out = _debayer_cpu(px, full)
     if SHADE is not None and SHADE.shape == out.shape:
         out *= SHADE                          # radial color-shading correction (magenta centre -> green edge)
-    # destripe: subtract the HIGH-FREQUENCY part of the per-column and per-row brightness profiles
+    return _post(out)
+
+def _debayer_cpu(px, full):
+    if full:
+        return demosaic_bggr(px)                                 # sharp 1456x1088
+    b = px[0::2, 0::2]; g = (px[0::2, 1::2] + px[1::2, 0::2]) * 0.5; r = px[1::2, 1::2]
+    return np.dstack([r, g, b]).astype(np.float32)              # fast half-res super-pixel
+
+def _post(out):
+    """destripe (remove FPN column/row banding) + tone map (target-mean lift + gamma) -> uint8."""
     col = out.mean(axis=0); out -= (col - _smooth(col, 41))[None, :, :]   # vertical stripes
     row = out.mean(axis=1); out -= (row - _smooth(row, 41))[:, None, :]   # horizontal stripes
     out = np.clip(out, 0, None)
-    # tone map: subtract black level, lift to a TARGET MEAN brightness (robust to a bright light in the
-    # frame, unlike a min/max stretch which the lamp would anchor), then gamma to lift shadows.
     out = np.clip(out - np.percentile(out, 1), 0, None)
-    out *= 95.0 / max(out.mean(), 1.0)                     # target mean brightness ~95
+    out *= 95.0 / max(out.mean(), 1.0)                     # target mean brightness ~95 (robust to a lamp)
     out = 255.0 * np.clip(out / 255.0, 0, 1) ** 0.7        # gamma 0.7 lifts midtones/shadows
     return np.clip(out, 0, 255).astype(np.uint8)
 
@@ -226,7 +244,8 @@ def detector_loop(interval=0.25):
         with State.lock:
             rgb = State.rgb
         try:
-            dets = det.infer(rgb)
+            with ACCEL:                      # serialize NPU vs GPU demosaic (concurrent accel crashes)
+                dets = det.infer(rgb)
             with State.lock:
                 State.dets = dets
         except Exception as e:
@@ -322,11 +341,16 @@ if __name__ == "__main__":
     ap.add_argument("--gain", type=int, default=200, help="analogue gain 0..480 (0.1dB); higher=brighter+noisier")
     ap.add_argument("--calibrate", action="store_true", help="capture a flat-field color profile (aim at a white/gray surface)")
     ap.add_argument("--no-yolo", action="store_true", help="disable the NPU YOLO detection overlay")
+    ap.add_argument("--gpu", action="store_true", help="full-res demosaic on the Adreno GPU (OpenCL) instead of CPU")
     args = ap.parse_args()
     if args.calibrate:
         calibrate(args.cam, args.exposure, args.gain)
         sys.exit(0)
     load_profile()
+    if args.gpu:
+        init_gpu()
+        if GPU is None:
+            args.fast = True         # GPU unavailable -> half-res CPU (fast) instead of slow full-res CPU
     print("start: setting up pipeline...", flush=True)
     rdi = setup_pipeline(args.cam, args.exposure, args.gain)
     print(f"pipeline ready ({rdi}); starting capture + server", flush=True)

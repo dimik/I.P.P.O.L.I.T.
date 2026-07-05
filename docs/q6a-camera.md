@@ -172,3 +172,26 @@ available to us on mainline** — the documented path is RDI raw + demosaic in u
   via OpenCL** (the stack already used for llama.cpp) → full-res at speed, no vendor stack, no board risk.
 - **Viewer note:** view the MJPEG stream with **VLC/mpv, NOT Firefox** — snap Firefox leaks decoded frames
   into shmem (~800 MB) and the OOM killer stops it (kernel `oom-kill … task=snap.firefox`, ~845 MB shmem).
+
+## GPU (Adreno OpenCL) demosaic — DONE (2026-07-05) → full-res at ~23 fps
+
+Since mainline can't use the ISP (above), the demosaic runs on the **Adreno 635 GPU via OpenCL** — the
+kernel-blessed "userspace on CPU/GPU" path. `q6a_gpu.py` (`GpuDemosaic`, pyopencl) does black-level + raw
+WB + full-res bilinear BGGR demosaic in one kernel; the CPU keeps the cheap destripe + tone-map.
+
+- **Perf:** full-res demosaic **342 ms (numpy) → ~25 ms (GPU)**, ~14×. Stream **~3 fps → ~23 fps at full
+  1456×1088**, with YOLO. Enable with `q6a_camstream.py --gpu` (falls back to `--fast` half-res CPU if
+  OpenCL is unavailable). `view_q6a_cam.sh` uses `--gpu` by default.
+- **Setup (one-time):**
+  - `pip3 install --break-system-packages --user pyopencl`
+  - Register the Adreno driver as an ICD (pyopencl's bundled loader needs it; Qualcomm ships `libOpenCL.so`
+    as a direct driver, not an ICD): `echo /usr/lib/aarch64-linux-gnu/libOpenCL_adreno.so.1 | sudo tee
+    /etc/OpenCL/vendors/adreno.icd`  (`view_q6a_cam.sh` creates this automatically.)
+- **CRITICAL — GPU and NPU must NOT run concurrently.** Running the Adreno (OpenCL demosaic) and the
+  Hexagon (YOLO via appbuilder) at the same instant from different threads **crashes the process natively**
+  (no Python traceback — they contend on the Qualcomm DMA/fastrpc layer). Fixed with a single module-level
+  `ACCEL = threading.Lock()` that both `GPU.demosaic` and `det.infer` acquire, serializing the two
+  accelerators. Each is fast (GPU ~25 ms, YOLO ~40 ms) so serialization is free. GPU-alone or NPU-alone are
+  fine; only concurrent use crashes.
+- Correctness: GPU demosaic matches the numpy path except at a few edge/dark pixels (max abs diff ~680 on
+  0–1600 range) — visually identical, full detail. Kernel is built once (`cl.Kernel`), reused per frame.
