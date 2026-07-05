@@ -454,7 +454,7 @@ if __name__ == "__main__":
     ap.add_argument("--gpu", action="store_true", help="full-res ISP on the Adreno GPU (OpenCL) instead of CPU")
     ap.add_argument("--destripe", action="store_true", help="also remove FPN column/row banding (CPU, ~32ms)")
     ap.add_argument("--bin", action="store_true", help="GPU digital 2x2 binning: half-res (728x544), ~2x less noise + faster")
-    ap.add_argument("--sensor-bin", action="store_true", help="2x2 binning ON THE SENSOR (charge-domain FD binning -> 728x544): cleaner than --bin (combines charge before readout) + 1/4 the MIPI/GPU/JPEG load. Needs the FD-binning-patched imx296 driver (build_imx296_fdbin.sh).")
+    ap.add_argument("--sensor-bin", action="store_true", help="[EXPERIMENTAL / NON-FUNCTIONAL] 2x2 binning on the IMX296 (charge-domain FD binning -> 728x544). The imx296 MIPIC_AREA3W patch stops the STREAMON hang but mainline qcom-camss still delivers EMPTY (0xFF) buffers - the binned pixel payload never lands (no kernel error). Use --bin (GPU digital) instead; it gives the same 728x544 and is faster.")
     args = ap.parse_args()
     DESTRIPE = args.destripe
     YOLO_FPS = args.yolo_fps
