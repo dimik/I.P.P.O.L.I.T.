@@ -33,7 +33,16 @@ GPU = None                                    # optional Adreno OpenCL ISP (q6a_
 DESTRIPE = False                              # optional FPN band removal (CPU, ~32ms); off by default
 BIN = False                                   # GPU digital 2x2 binning -> half-res, ~2x less noise + faster
 SENSOR_BIN = False                            # sensor 2x2 FD binning (charge-domain, cleaner): capture 728x544
-TARGET_MEAN = 95.0                            # tone-map target brightness
+TARGET_MEAN = 95.0                            # tone-map target brightness (DISPLAY, digital — see AE below)
+# --- Sensor auto-exposure (real integration-time control, not the digital tone-map) ---
+# The tone-map only rescales the DISPLAY; it can't recover raw pixels that clipped at 1023 in bright light.
+# AE nudges the sensor exposure (lines) — and gain at the extremes — so the raw stays well-exposed with
+# highlight headroom. vblank tracks exposure so frame length stays minimal (lower exposure -> higher fps).
+SENSOR_SD = None                              # sensor subdev path (discovered in setup_pipeline)
+EXPOSURE = 3000; GAIN = 240                   # current sensor exposure (lines) / gain (ctrl); AE updates these
+AE_ON = True                                  # runtime sensor auto-exposure
+AE_TARGET = 90.0                              # target raw high-byte mean (~raw 360/1023 -> ~2.8x highlight headroom)
+AE_MIN_EXP = 30; AE_MAX_EXP = 8000            # exposure clamp (lines)
 # YOLO runs in a SEPARATE PROCESS (q6a_detector.py) sharing frames via shared memory. The Adreno (GPU
 # ISP) and Hexagon (NPU) crash if driven concurrently in ONE process (shared userspace allocator
 # corruption) but run fine across processes -> no lock, true concurrency. shm layout <-> q6a_detector.py.
@@ -87,6 +96,8 @@ def load_profile():
 CAM_MAP = {2: ("msm_csiphy2", "msm_csid0"), 3: ("msm_csiphy3", "msm_csid1")}
 
 def setup_pipeline(cam, exposure, gain):
+    global SENSOR_SD, EXPOSURE, GAIN
+    EXPOSURE, GAIN = exposure, gain
     phy, csid = CAM_MAP[cam]
     rdi = "msm_vfe0_rdi0" if cam == 2 else "msm_vfe0_rdi1"
     m = ["media-ctl", "-d", "/dev/media0"]
@@ -103,6 +114,7 @@ def setup_pipeline(cam, exposure, gain):
     if sensor:
         sd = subprocess.run(m + ["-e", sensor], capture_output=True, text=True).stdout.strip()
         if sd:
+            SENSOR_SD = sd
             # frame length = H + vblank must be >= exposure; use the MINIMUM -> max fps at this exposure
             # (no noise cost). The old "exposure+200" padded the frame ~1.4x longer than needed.
             vblank = max(30, exposure - H + 64)
@@ -110,6 +122,48 @@ def setup_pipeline(cam, exposure, gain):
                          ("analogue_gain", gain)]:
                 subprocess.run(["v4l2-ctl", "-d", sd, "--set-ctrl", f"{c}={v}"], check=False)
     return rdi
+
+def _set_exposure(exp):
+    """Set sensor integration time (lines) + track vblank so the frame length stays minimal (max fps).
+    Order: shrink exposure first to avoid a transient exposure>VMAX, then set vblank, then the real exposure."""
+    if SENSOR_SD is None:
+        return
+    vblank = max(30, exp - H + 64)
+    subprocess.run(["v4l2-ctl", "-d", SENSOR_SD, "--set-ctrl",
+                    f"exposure=100,vertical_blanking={vblank},exposure={exp}"], check=False)
+
+_AE_N = 0
+def auto_exposure(buf):
+    """Real sensor AE from the packed RAW10 high bytes (cheap, no unpack). Every ~8 frames, nudge the
+    sensor exposure (then gain at the floor/ceiling) so the raw is well-exposed with highlight headroom.
+    Damped (per-step change clamped) to avoid hunting; a saturated-pixel check cuts exposure hard when
+    highlights blow (mean-only AE gets fooled by a bright window)."""
+    global EXPOSURE, GAIN, _AE_N
+    if not AE_ON or SENSOR_SD is None:
+        return
+    _AE_N += 1
+    if _AE_N % 8:                                  # ~4 Hz at 31 fps
+        return
+    a = np.frombuffer(buf, np.uint8)[:STRIDE * H].reshape(H, STRIDE)[:, :W * 10 // 8].reshape(H, W // 4, 5)
+    hi = a[::4, ::4, :4]                            # high-byte subsample (raw >> 2, 0..255)
+    mean = float(hi.mean()); sat = float((hi >= 250).mean())
+    ratio = AE_TARGET / max(mean, 1.0)
+    if sat > 0.03:                                  # blown highlights -> cut exposure hard (beats deadband)
+        ratio = min(ratio, 0.6)
+    elif 0.75 < ratio < 1.30:
+        return                                      # within deadband -> hold steady (no hunting)
+    ratio = min(max(ratio, 0.5), 2.0)
+    target_exp = EXPOSURE * ratio                   # partial step toward target -> damped, no overshoot/chase
+    new_exp = int(EXPOSURE + 0.4 * (target_exp - EXPOSURE))
+    new_exp = int(min(max(new_exp, AE_MIN_EXP), AE_MAX_EXP))
+    if new_exp <= AE_MIN_EXP and (mean > AE_TARGET or sat > 0.03) and GAIN > 0:
+        GAIN = max(0, GAIN - 48)                    # exposure floored but still bright -> drop gain
+        subprocess.run(["v4l2-ctl", "-d", SENSOR_SD, "--set-ctrl", f"analogue_gain={GAIN}"], check=False)
+    elif new_exp >= AE_MAX_EXP and mean < AE_TARGET * 0.6 and GAIN < 480:
+        GAIN = min(480, GAIN + 48)                  # exposure maxed but dark -> add gain
+        subprocess.run(["v4l2-ctl", "-d", SENSOR_SD, "--set-ctrl", f"analogue_gain={GAIN}"], check=False)
+    if new_exp != EXPOSURE:
+        EXPOSURE = new_exp; _set_exposure(EXPOSURE)
 
 def unpack_raw10(buf):
     """MIPI RAW10 packed -> uint16 Bayer (H, W). 4px in 5 bytes; b4 holds the 4x2 LSBs."""
@@ -345,6 +399,7 @@ def capture_loop(rdi, full):
                 cam = V4l2Cam("/dev/video0", W, H); fails = 0
             data = cam.read_latest(timeout=1.0)  # drains to the freshest frame (low latency)
             if data is not None and len(data) == FRAME:
+                auto_exposure(data)              # nudge sensor exposure/gain (real AE, no-op if --no-ae)
                 process(data, full)
         except Exception as e:
             print("capture error (v4l2):", e, flush=True)
@@ -450,6 +505,7 @@ if __name__ == "__main__":
     ap.add_argument("--gain", type=int, default=240, help="sensor gain, ctrl 0..480 = 0..48dB (0.1dB/step). Per the IMX296 datasheet ONLY 0..240 (0..24dB) is ANALOG; 240..480 adds DIGITAL gain. Analog is the only stage that lowers input-referred read noise, so 240 (max analog) is the cleanest value + keeps full highlight range; the ISP tone-map handles brightness. Raise toward 480 (digital) or bump --exposure only for genuinely dark scenes.")
     ap.add_argument("--calibrate", action="store_true", help="capture a flat-field color profile (aim at a white/gray surface)")
     ap.add_argument("--no-yolo", action="store_true", help="disable the NPU YOLO detection overlay")
+    ap.add_argument("--no-ae", action="store_true", help="disable sensor auto-exposure (use the fixed --exposure/--gain). AE nudges real integration time so bright scenes don't clip; --exposure is just the starting point.")
     ap.add_argument("--yolo-fps", type=float, default=10.0, help="cap YOLO to this detection rate (0=unlimited, ~26fps NPU max). Detections overlay persists between updates, so a low rate saves NPU heat/power with no visual loss on a slow robot.")
     ap.add_argument("--gpu", action="store_true", help="full-res ISP on the Adreno GPU (OpenCL) instead of CPU")
     ap.add_argument("--destripe", action="store_true", help="also remove FPN column/row banding (CPU, ~32ms)")
@@ -458,6 +514,7 @@ if __name__ == "__main__":
     args = ap.parse_args()
     DESTRIPE = args.destripe
     YOLO_FPS = args.yolo_fps
+    AE_ON = not args.no_ae
     BIN = args.bin
     if BIN:
         OUT_W, OUT_H = W // 2, H // 2

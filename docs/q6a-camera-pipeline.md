@@ -346,3 +346,18 @@ delay — worse than our 3 ms MJPEG). So it's a future option for slashing strea
 gated on a firmware/UEFI change; it does nothing for the demosaic+JPEG throughput wall. NV12 input needs
 128-wide / 32-high alignment (728→768 stride, 1456→1536). (Refs: Radxa forum "encoder reboot" thread;
 kernel stateful-encoder API; FFmpeg `v4l2_m2m_enc.c`.)
+
+## 9. Sensor auto-exposure (2026-07-05)
+
+The pipeline had **no sensor AE** — exposure/gain were fixed at startup and only a *digital* tone-map
+rescaled the display, which can't recover raw pixels that clip at 1023 in bright light (→ blown highlights
+in daytime). Added a real AE loop (`auto_exposure()` in `q6a_camstream.py`, on by default; `--no-ae` to
+disable):
+- Measures raw brightness + saturated-pixel fraction from the packed RAW10 **high bytes** (cheap, no unpack),
+  every ~8 frames (~4 Hz).
+- Nudges the sensor **exposure** toward a target raw mean (headroom for highlights), with a **deadband**
+  (hold when within ±25%) + **partial-step damping** (move 40%/step) to avoid feedback oscillation (the
+  sensor latches exposure a frame or two late). `vblank` tracks exposure so frame length stays minimal
+  (lower exposure → higher fps). Drops to **gain** only at the exposure floor (too bright) or ceiling (dark).
+- Result: bright daytime drops exposure ~3000 → ~290 lines (≈10×) → no saturation; converges in ~2–3 s and
+  holds. Calibration is unaffected (it runs a fixed exposure outside the capture loop).
