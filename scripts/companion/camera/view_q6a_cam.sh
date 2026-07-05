@@ -9,9 +9,26 @@ REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 stop_streamer() { ssh "$Q6A" "p=\$(ss -ltnp 2>/dev/null|grep ':$PORT '|grep -oP 'pid=\K[0-9]+'|head -1); [ -n \"\$p\" ] && kill -9 \$p; pkill -9 -f '[q]6a_detector'; pkill -9 -f '[v]4l2-ctl'; rm -f /dev/shm/q6a_*; sleep 2" || true; }
 
+if [ "${1:-}" = calibrate-dark ]; then
+    # Dark-frame black calibration -> fixes the brightness-dependent color cast (green shadows / magenta
+    # highlights). Do this FIRST, then the grey `calibrate`.
+    CAM="${2:-2}"
+    scp -q "$REPO_DIR/q6a_camstream.py" "$Q6A:~/q6a_camstream.py"
+    [ -f "$REPO_DIR/imx296_wb.npz" ] && scp -q "$REPO_DIR/imx296_wb.npz" "$Q6A:~/imx296_wb.npz" 2>/dev/null || true
+    echo ">>> COVER THE LENS COMPLETELY — a cap, or a hand/thick cloth blocking ALL light. This measures the"
+    echo ">>> sensor's true per-channel black so white balance stops turning it into a magenta/green cast."
+    read -r -p "Press Enter when the lens is fully covered (dark)... "
+    stop_streamer
+    ssh "$Q6A" "python3 ~/q6a_camstream.py --calibrate-dark --cam $CAM"
+    scp -q "$Q6A:~/imx296_wb.npz" "$REPO_DIR/imx296_wb.npz" 2>/dev/null || true
+    echo "== dark black saved. NEXT: grey calibration -> ./view_q6a_cam.sh calibrate $CAM =="
+    exit 0
+fi
+
 if [ "${1:-}" = calibrate ]; then
     CAM="${2:-2}"
     scp -q "$REPO_DIR/q6a_camstream.py" "$Q6A:~/q6a_camstream.py"
+    [ -f "$REPO_DIR/imx296_wb.npz" ] && scp -q "$REPO_DIR/imx296_wb.npz" "$Q6A:~/imx296_wb.npz" 2>/dev/null || true   # keep any dark-frame blk
     echo ">>> Aim at a UNIFORM, EVENLY-LIT white/grey surface filling the whole frame (a blank wall or"
     echo ">>> a sheet of paper). Avoid shadows, glare and light pools; slightly DEFOCUS to blur texture."
     echo ">>> This measures white balance + the radial colour-shading map (magenta-centre / green-edge)."

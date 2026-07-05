@@ -27,6 +27,8 @@ OUT_W, OUT_H = W, H      # output (displayed/detected) resolution; halved by --b
 # channel neutralises it everywhere (no fragile per-pixel flat-field). Re-derive on a grey card via
 # --calibrate; it writes the 4 numbers below to PROFILE, which load_profile() then uses to override.
 BLACK_LEVEL = 56.0
+BLACK_RGB = None                              # per-channel black pedestal (R,G,B) from a dark-frame calibration;
+                                              # None -> use the single BLACK_LEVEL for all channels
 WB_R, WB_G, WB_B = 1.60, 1.00, 1.52          # raw per-channel gains -> neutral grey (measured)
 SHADE = None                                  # optional (H,W,3) radial COLOR-shading gain (green-relative)
 GPU = None                                    # optional Adreno OpenCL ISP (q6a_gpu.GpuDemosaic)
@@ -79,10 +81,12 @@ def _auto_scale_packed(buf):
     return TARGET_MEAN / max(max(m, 0.0) * avg_wb, 1.0)
 PROFILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "imx296_wb.npz")
 def load_profile():
-    global BLACK_LEVEL, WB_R, WB_G, WB_B, SHADE
+    global BLACK_LEVEL, BLACK_RGB, WB_R, WB_G, WB_B, SHADE
     if os.path.exists(PROFILE):
         z = np.load(PROFILE); BLACK_LEVEL = float(z["black"]); WB_R, WB_G, WB_B = (float(x) for x in z["wb"])
-        msg = f"loaded WB profile: black={BLACK_LEVEL:.0f} wb=({WB_R:.3f},{WB_G:.3f},{WB_B:.3f})"
+        if "blk" in z.files:                   # per-channel black pedestal (dark-frame calibrated)
+            BLACK_RGB = tuple(float(x) for x in z["blk"])
+        msg = f"loaded WB profile: black={BLACK_LEVEL:.0f}" + (f" blk={tuple(round(x,1) for x in BLACK_RGB)}" if BLACK_RGB else "") + f" wb=({WB_R:.3f},{WB_G:.3f},{WB_B:.3f})"
         if "shade" in z.files:                 # small green-relative gain grid -> upscale to full res
             s = z["shade"]
             SHADE = np.stack([np.asarray(Image.fromarray(s[..., c]).resize((W, H), Image.BILINEAR))
@@ -206,13 +210,19 @@ def debayer(buf, full=True):
     """Packed RAW10 -> RGB uint8. GPU path unpacks on-device; CPU path unpacks first."""
     if GPU is not None and full:
         scale = _auto_scale_packed(buf)      # auto-exposure from the packed RAW10 (no CPU unpack)
+        blk = BLACK_RGB if BLACK_RGB is not None else BLACK_LEVEL   # per-channel (R,G,B) or scalar
         if BIN:
-            out = GPU.isp_bin(buf, STRIDE, BLACK_LEVEL, WB_R, WB_G, WB_B, scale, destripe=DESTRIPE)  # all on GPU
+            out = GPU.isp_bin(buf, STRIDE, blk, WB_R, WB_G, WB_B, scale, destripe=DESTRIPE)  # all on GPU
         else:
-            out = GPU.isp(buf, STRIDE, BLACK_LEVEL, WB_R, WB_G, WB_B, scale, destripe=DESTRIPE)
+            out = GPU.isp(buf, STRIDE, blk, WB_R, WB_G, WB_B, scale, destripe=DESTRIPE)
         return out
     # CPU fallback: unpack + black+WB+demosaic + shade + destripe + tone map
-    px = unpack_raw10(buf).astype(np.float32) - BLACK_LEVEL
+    px = unpack_raw10(buf).astype(np.float32)
+    if BLACK_RGB is not None:                 # per-channel black by Bayer position (BGGR)
+        px[0::2, 0::2] -= BLACK_RGB[2]; px[1::2, 1::2] -= BLACK_RGB[0]
+        px[0::2, 1::2] -= BLACK_RGB[1]; px[1::2, 0::2] -= BLACK_RGB[1]
+    else:
+        px -= BLACK_LEVEL
     np.clip(px, 0, None, out=px)
     px[1::2, 1::2] *= WB_R                    # R sites   (raw white balance, per Bayer position)
     px[0::2, 0::2] *= WB_B                    # B sites   (G sites keep WB_G=1)
@@ -264,14 +274,25 @@ def calibrate(cam, exposure, gain, n=40):
             if len(b) < FRAME: break
             acc += unpack_raw10(b); cnt += 1
     px = acc / max(cnt, 1)                                  # averaged raw Bayer (low noise)
-    black = float(min(px[0::2, 0::2].min(), px[1::2, 1::2].min(), px[0::2, 1::2].min()))
-    Rm = (px[1::2, 1::2] - black).mean(); Bm = (px[0::2, 0::2] - black).mean()
-    Gm = ((px[0::2, 1::2] - black).mean() + (px[1::2, 0::2] - black).mean()) / 2
+    # per-channel black: prefer a prior DARK-frame calibration (true pedestal) -> WB won't bake in a
+    # brightness-dependent cast; else fall back to the single-min estimate.
+    blk_prof = None
+    if os.path.exists(PROFILE):
+        _z = np.load(PROFILE)
+        if "blk" in _z.files: blk_prof = [float(v) for v in _z["blk"]]
+    if blk_prof is not None:
+        bR, bG, bB = blk_prof
+    else:
+        b0 = float(min(px[0::2, 0::2].min(), px[1::2, 1::2].min(), px[0::2, 1::2].min())); bR = bG = bB = b0
+    Rm = (px[1::2, 1::2] - bR).mean(); Bm = (px[0::2, 0::2] - bB).mean()
+    Gm = ((px[0::2, 1::2] - bG).mean() + (px[1::2, 0::2] - bG).mean()) / 2
     wb = np.array([Gm / max(Rm, 1e-3), 1.0, Gm / max(Bm, 1e-3)], np.float32)
     # radial COLOR shading: WB-correct + demosaic the flat field, fit a smooth quadratic per channel
     # (robust to local non-uniformity), then a GREEN-RELATIVE gain that flattens R/G,B/G across the field
     # without touching luminance (green gain = 1 -> no vignette boost -> no corner-noise amplification).
-    q = np.clip(px - black, 0, None); q[1::2, 1::2] *= wb[0]; q[0::2, 0::2] *= wb[2]
+    q = px.copy()                                          # per-channel black subtract (BGGR)
+    q[1::2, 1::2] -= bR; q[0::2, 0::2] -= bB; q[0::2, 1::2] -= bG; q[1::2, 0::2] -= bG
+    q = np.clip(q, 0, None); q[1::2, 1::2] *= wb[0]; q[0::2, 0::2] *= wb[2]
     flat = demosaic_bggr(q)                                 # (H,W,3) WB-corrected flat field
     GX, GY = 32, 24
     coarse = np.stack([np.asarray(Image.fromarray(flat[..., c]).resize((GX, GY), Image.BILINEAR))
@@ -286,9 +307,46 @@ def calibrate(cam, exposure, gain, n=40):
     gR = np.clip(ratioR[cy, cx] / np.maximum(ratioR, 1e-3), 0.5, 2.0)   # gain to flatten R/G to centre
     gB = np.clip(ratioB[cy, cx] / np.maximum(ratioB, 1e-3), 0.5, 2.0)
     shade = np.stack([gR, np.ones_like(gR), gB], axis=2).astype(np.float32)  # green untouched
-    np.savez(PROFILE, black=np.float32(black), wb=wb, shade=shade)
-    print(f"saved profile ({cnt} frames): black={black:.0f} wb=({wb[0]:.3f},1.000,{wb[2]:.3f}) "
-          f"shade R[{gR.min():.2f}-{gR.max():.2f}] B[{gB.min():.2f}-{gB.max():.2f}] to {PROFILE}", flush=True)
+    _sv = dict(black=np.float32(min(bR, bG, bB)), wb=wb, shade=shade)
+    if blk_prof is not None: _sv["blk"] = np.array(blk_prof, np.float32)   # preserve dark-frame black
+    np.savez(PROFILE, **_sv)
+    print(f"saved profile ({cnt} frames): blk=({bR:.0f},{bG:.0f},{bB:.0f}) wb=({wb[0]:.3f},1.000,{wb[2]:.3f}) "
+          f"shade R[{gR.min():.2f}-{gR.max():.2f}] B[{gB.min():.2f}-{gB.max():.2f}] to {PROFILE}"
+          + ("" if blk_prof else "  [no dark-frame black yet -> run calibrate-dark for the color-cast fix]"), flush=True)
+
+def calibrate_dark(cam, exposure, gain, n=40):
+    """Dark-frame black calibration: COVER THE LENS completely. Measures the true per-channel black
+    pedestal (R,G,B) so the WB no longer amplifies a black-level error into a brightness-dependent color
+    cast (green shadows / magenta highlights). Merges blk into the profile (keeps any wb + shade); then
+    re-run the grey `--calibrate` so the WB is derived against these blacks."""
+    import time
+    setup_pipeline(cam, exposure, gain)
+    print(f"DARK CALIBRATION: cover the lens COMPLETELY (no light). Capturing {n} frames...", flush=True)
+    subprocess.run(["pkill", "-9", "-f", "v4l2-ctl"], check=False); time.sleep(1)
+    tmp = "/dev/shm/q6a_dark.raw"
+    subprocess.run(["v4l2-ctl", "-d", "/dev/video0",
+                    "--set-fmt-video=width=1456,height=1088,pixelformat=pBAA",
+                    "--stream-mmap", f"--stream-count={n}", f"--stream-to={tmp}"], check=True)
+    acc = np.zeros((H, W), np.float64); cnt = 0
+    with open(tmp, "rb") as f:
+        for _ in range(n):
+            b = f.read(FRAME)
+            if len(b) < FRAME: break
+            acc += unpack_raw10(b); cnt += 1
+    px = acc / max(cnt, 1)
+    blR = float(px[1::2, 1::2].mean()); blB = float(px[0::2, 0::2].mean())
+    blG = float((px[0::2, 1::2].mean() + px[1::2, 0::2].mean()) / 2)
+    blk = np.array([blR, blG, blB], np.float32)
+    sv = dict(black=np.float32(min(blR, blG, blB)), blk=blk)
+    if os.path.exists(PROFILE):                            # keep an existing WB / shading map
+        z = np.load(PROFILE)
+        if "wb" in z.files: sv["wb"] = z["wb"]
+        if "shade" in z.files: sv["shade"] = z["shade"]
+    np.savez(PROFILE, **sv)
+    warn = "  WARNING: black>150 — was the lens actually covered?" if max(blR, blG, blB) > 150 else ""
+    print(f"saved dark profile ({cnt} frames): blk R={blR:.1f} G={blG:.1f} B={blB:.1f} to {PROFILE}{warn}\n"
+          f">>> Now re-run the grey calibration so WB is derived against these blacks: "
+          f"./view_q6a_cam.sh calibrate {cam}", flush=True)
 
 from PIL import ImageDraw, ImageFont
 _FONT = ImageFont.load_default()
@@ -505,6 +563,7 @@ if __name__ == "__main__":
     ap.add_argument("--exposure", type=int, default=3000, help="sensor exposure (lines); LOWER=higher fps (frame length scales with exposure) but noisier in dim light. 3000~21fps, 6000~13fps")
     ap.add_argument("--gain", type=int, default=240, help="sensor gain, ctrl 0..480 = 0..48dB (0.1dB/step). Per the IMX296 datasheet ONLY 0..240 (0..24dB) is ANALOG; 240..480 adds DIGITAL gain. Analog is the only stage that lowers input-referred read noise, so 240 (max analog) is the cleanest value + keeps full highlight range; the ISP tone-map handles brightness. Raise toward 480 (digital) or bump --exposure only for genuinely dark scenes.")
     ap.add_argument("--calibrate", action="store_true", help="capture a flat-field color profile (aim at a white/gray surface)")
+    ap.add_argument("--calibrate-dark", action="store_true", help="dark-frame black calibration (COVER THE LENS): measures per-channel black to fix the brightness-dependent color cast; then re-run --calibrate")
     ap.add_argument("--no-yolo", action="store_true", help="disable the NPU YOLO detection overlay")
     ap.add_argument("--no-ae", action="store_true", help="disable sensor auto-exposure (use the fixed --exposure/--gain). AE nudges real integration time so bright scenes don't clip; --exposure is just the starting point.")
     ap.add_argument("--yolo-fps", type=float, default=10.0, help="cap YOLO to this detection rate (0=unlimited, ~26fps NPU max). Detections overlay persists between updates, so a low rate saves NPU heat/power with no visual loss on a slow robot.")
@@ -519,6 +578,9 @@ if __name__ == "__main__":
     BIN = args.bin
     if BIN:
         OUT_W, OUT_H = W // 2, H // 2
+    if args.calibrate_dark:
+        calibrate_dark(args.cam, args.exposure, args.gain)
+        sys.exit(0)
     if args.calibrate:
         calibrate(args.cam, args.exposure, args.gain)   # always full-res 1456x1088 (WB gains are mode-independent)
         sys.exit(0)
