@@ -7,7 +7,7 @@ Q6A="ippolit-lan"                 # wired link (192.168.20.2)
 HOST_IP="192.168.20.2"; PORT=8092
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-stop_streamer() { ssh "$Q6A" "p=\$(ss -ltnp 2>/dev/null|grep ':$PORT '|grep -oP 'pid=\K[0-9]+'|head -1); [ -n \"\$p\" ] && kill -9 \$p; pkill -9 -f '[v]4l2-ctl'; sleep 2" || true; }
+stop_streamer() { ssh "$Q6A" "p=\$(ss -ltnp 2>/dev/null|grep ':$PORT '|grep -oP 'pid=\K[0-9]+'|head -1); [ -n \"\$p\" ] && kill -9 \$p; pkill -9 -f '[q]6a_detector'; pkill -9 -f '[v]4l2-ctl'; rm -f /dev/shm/q6a_*; sleep 2" || true; }
 
 if [ "${1:-}" = calibrate ]; then
     CAM="${2:-2}"
@@ -44,8 +44,11 @@ ssh "$Q6A" "[ -f /etc/OpenCL/vendors/adreno.icd ] || (sudo mkdir -p /etc/OpenCL/
 # MIPIC_AREA3W driver patch stops the STREAMON hang, but the VFE still writes EMPTY (0xFF) buffers -
 # the binned pixel payload never lands (no kernel error; sensor/CSID binning needs deeper RE, Sony's
 # binning registers are NDA). GPU digital --bin gives the same 728x544, works, and is faster. See docs.
-ssh "$Q6A" "ss -ltn 2>/dev/null | grep -q ":$PORT " || \
-  setsid python3 ~/q6a_camstream.py --cam $CAM --port $PORT --gpu --bin </dev/null >~/camstream.log 2>&1 &" || true
+# ALWAYS restart the streamer so the latest color profile (imx296_wb.npz) + code take effect. The old
+# "start only if the port is free" logic silently kept a stale pre-calibration stream running -> made
+# calibration look like it did nothing (the running process never re-read the profile).
+stop_streamer
+ssh "$Q6A" "setsid python3 ~/q6a_camstream.py --cam $CAM --port $PORT --gpu --bin </dev/null >~/camstream.log 2>&1 &" || true
 sleep 3
 echo "   stream: http://$HOST_IP:$PORT/stream   (log: ssh $Q6A 'tail -f ~/camstream.log')"
 
