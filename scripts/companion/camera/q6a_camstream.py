@@ -59,6 +59,8 @@ DESTRIPE = False                              # optional FPN band removal; off b
 BIN = False                                   # GPU digital 2x2 binning -> half-res, ~2x less noise + faster
 SENSOR_BIN = False                            # sensor 2x2 FD binning (charge-domain, cleaner): capture 728x544
 TARGET_MEAN = 95.0                            # tone-map target brightness (DISPLAY, digital — see AE below)
+TONEMAP_GAMMA = 0.7                           # tone-curve gamma (single source of truth; profile "tonemap.gamma",
+                                              # applied on the GPU (#define GAMMA) and the CPU-fallback LUT)
 # --- Sensor auto-exposure (real integration-time control, not the digital tone-map) ---
 # The tone-map only rescales the DISPLAY; it can't recover raw pixels that clipped at 1023 in bright light.
 # AE nudges the sensor exposure (lines) — and gain at the extremes — so the raw stays well-exposed with
@@ -68,6 +70,12 @@ EXPOSURE = 3000; GAIN = 240                   # current sensor exposure (lines) 
 AE_ON = True                                  # runtime sensor auto-exposure
 AE_TARGET = 70.0                              # target raw high-byte MEDIAN (robust to dark corners + bright window)
 AE_MIN_EXP = 30; AE_MAX_EXP = 3000            # exposure clamp (lines); VMAX fixed here -> ~32fps, no vblank churn; cap keeps fps >=~24 + out of the deep-noise regime
+# AE loop behaviour (generic control tuning, not camera-specific):
+AE_UPDATE_EVERY = 8                           # run the AE/AWB update every Nth frame (~4 Hz at 31 fps)
+AE_DEADBAND = (0.75, 1.30)                    # hold steady while target/median ratio is within this band (no hunting)
+AE_DAMP = 0.4                                 # partial step toward the target each update (sensor latches ~1-2 frames late)
+AE_GAIN_STEP = 48                             # analogue_gain ctrl step when exposure is floored/ceilinged (~4.8 dB)
+AE_DARK_FRAC = 0.6                            # "still too dark" when median < AE_TARGET*this (at the exposure ceiling -> add gain)
 # --- Auto white balance (damped, constrained gray-world) --- tracks the illuminant (day<->evening) so
 # adjusts the WB gains (software, GPU reads them next frame -> no glitch). ANCHORED gray-world: opt-in via
 # --awb. Unbounded gray-world runs away to magenta on a non-gray room (observed 1.6->3.2/1.5->4.1); this
@@ -107,7 +115,7 @@ def load_camera_profile(model):
     global W, H, STRIDE, FRAME, OUT_W, OUT_H, BAYER, RX, RY, BX, BY, MBUS_CODE, PIXFMT, ENTITY_MATCH
     global BLACK_LEVEL, WB_R, WB_G, WB_B, AE_TARGET, AE_MIN_EXP, AE_MAX_EXP, GAIN_MAX, GAIN_ANALOG_MAX, CCM_MATRICES, CCM_CT
     global AWB_RMIN, AWB_RMAX, AWB_BMIN, AWB_BMAX
-    global SHADE_CHROMA, SHADE_CHROMA_CLAMP, SHADE_GAIN_CLAMP, SHADE_SMOOTH
+    global SHADE_CHROMA, SHADE_CHROMA_CLAMP, SHADE_GAIN_CLAMP, SHADE_SMOOTH, TARGET_MEAN, TONEMAP_GAMMA, _GAMMA_LUT
     path = os.path.join(PROFILES_DIR, f"{model}.json")
     if not os.path.exists(path):
         print(f"no camera profile {path}; using built-in defaults ({W}x{H} {BAYER})", flush=True); return False
@@ -129,6 +137,9 @@ def load_camera_profile(model):
     awb = p.get("awb", {})
     if "r_gain" in awb: AWB_RMIN, AWB_RMAX = (float(x) for x in awb["r_gain"])
     if "b_gain" in awb: AWB_BMIN, AWB_BMAX = (float(x) for x in awb["b_gain"])
+    tm = p.get("tonemap", {})              # display tone curve
+    TARGET_MEAN = float(tm.get("target_mean", TARGET_MEAN)); TONEMAP_GAMMA = float(tm.get("gamma", TONEMAP_GAMMA))
+    _GAMMA_LUT = (255.0 * (np.arange(256) / 255.0) ** TONEMAP_GAMMA).astype(np.uint8)   # rebuild CPU LUT
     sh = p.get("shading", {})              # lens shade-map post-processing (see load_profile)
     SHADE_CHROMA = float(sh.get("chroma", SHADE_CHROMA))
     if "chroma_clamp" in sh: SHADE_CHROMA_CLAMP = tuple(float(x) for x in sh["chroma_clamp"])
@@ -161,7 +172,7 @@ def init_gpu():
     global GPU
     try:
         from q6a_gpu import GpuDemosaic
-        GPU = GpuDemosaic(W, H, bayer=(RX, RY, BX, BY))
+        GPU = GpuDemosaic(W, H, bayer=(RX, RY, BX, BY), gamma=TONEMAP_GAMMA)
         GPU.set_shade(SHADE)                   # upload color-shading map once (if a profile is loaded)
         GPU.set_ccm(load_ccm(CCM_CT) if CCM_ON else None)   # ready-made color matrix (profile)
         stages = "demosaic+WB" + ("+AWB" if AWB_ON else "") + ("+CCM" if CCM_ON else "") \
@@ -273,7 +284,7 @@ def auto_exposure(buf):
     if not AE_ON or SENSOR_SD is None:
         return
     _AE_N += 1
-    if _AE_N % 8:                                  # ~4 Hz at 31 fps
+    if _AE_N % AE_UPDATE_EVERY:
         return
     a = np.frombuffer(buf, np.uint8)[:STRIDE * H].reshape(H, STRIDE)[:, :W * 10 // 8].reshape(H, W // 4, 5)
     hi = a[::4, ::4, :4].astype(np.float32)         # high-byte subsample (raw >> 2, 0..255)
@@ -282,17 +293,17 @@ def auto_exposure(buf):
     # normalizes DISPLAY brightness separately; AE just keeps the raw in a sane band (no clip, low noise).
     mid = float(np.median(hi))
     ratio = AE_TARGET / max(mid, 1.0)
-    if 0.75 < ratio < 1.30:
+    if AE_DEADBAND[0] < ratio < AE_DEADBAND[1]:
         return                                      # within deadband -> hold steady (no hunting)
     ratio = min(max(ratio, 0.5), 2.0)
     target_exp = EXPOSURE * ratio                   # partial step toward target -> damped, no overshoot/chase
-    new_exp = int(EXPOSURE + 0.4 * (target_exp - EXPOSURE))
+    new_exp = int(EXPOSURE + AE_DAMP * (target_exp - EXPOSURE))
     new_exp = int(min(max(new_exp, AE_MIN_EXP), AE_MAX_EXP))
     if new_exp <= AE_MIN_EXP and mid > AE_TARGET and GAIN > 0:
-        GAIN = max(0, GAIN - 48)                    # exposure floored but still bright -> drop gain
+        GAIN = max(0, GAIN - AE_GAIN_STEP)          # exposure floored but still bright -> drop gain
         subprocess.run(["v4l2-ctl", "-d", SENSOR_SD, "--set-ctrl", f"analogue_gain={GAIN}"], check=False)
-    elif new_exp >= AE_MAX_EXP and mid < AE_TARGET * 0.6 and GAIN < GAIN_ANALOG_MAX:
-        GAIN = min(GAIN_ANALOG_MAX, GAIN + 48)      # exposure maxed but dark -> add gain, but only up to the
+    elif new_exp >= AE_MAX_EXP and mid < AE_TARGET * AE_DARK_FRAC and GAIN < GAIN_ANALOG_MAX:
+        GAIN = min(GAIN_ANALOG_MAX, GAIN + AE_GAIN_STEP)  # exposure maxed but dark -> add gain, but only up to the
                                                     # ANALOG max (240): digital gain adds noise + row-lines and
                                                     # shifts the calibration operating point (green drift). The
                                                     # tone-map lifts dim scenes instead.
@@ -313,7 +324,7 @@ def auto_wb(buf):
     if _AWB_ANCHOR_R is None:                       # anchor to the calibrated WB loaded at startup
         _AWB_ANCHOR_R, _AWB_ANCHOR_B = WB_R, WB_B
     _AWB_N += 1
-    if _AWB_N % 8:
+    if _AWB_N % AE_UPDATE_EVERY:
         return
     a = np.frombuffer(buf, np.uint8)[:STRIDE * H].reshape(H, STRIDE)[:, :W * 10 // 8].reshape(H, W // 4, 5)
     h = a[:, ::4, :4].astype(np.float32) * 4.0     # subsample groups -> ~10-bit level per pixel (high byte<<2)
@@ -406,7 +417,7 @@ def _debayer_cpu(px, full):
     b = px[BY::2, BX::2]; g = (px[BY::2, RX::2] + px[RY::2, BX::2]) * 0.5; r = px[RY::2, RX::2]
     return np.dstack([r, g, b]).astype(np.float32)              # fast half-res super-pixel
 
-_GAMMA_LUT = (255.0 * (np.arange(256) / 255.0) ** 0.7).astype(np.uint8)   # gamma 0.7 as a 256-entry LUT
+_GAMMA_LUT = (255.0 * (np.arange(256) / 255.0) ** TONEMAP_GAMMA).astype(np.uint8)   # CPU-fallback tone LUT (rebuilt on profile load)
 
 def _post(out):
     """destripe (remove FPN column/row banding) + tone map (target-mean lift + gamma) -> uint8."""

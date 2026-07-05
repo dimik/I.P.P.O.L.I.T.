@@ -33,6 +33,12 @@
     "b_gain": [1.2, 4.2]
   },
 
+  "tonemap": {
+    "_comment": "Display tone curve. gamma<1 lifts shadows; target_mean is the digital brightness the tone-map aims the frame at. Applied on the GPU (#define GAMMA) and the CPU-fallback LUT from one source.",
+    "gamma": 0.7,
+    "target_mean": 95.0
+  },
+
   "shading": {
     "_comment": "Post-processing for the calibrated radial shade map (imx296_wb.npz -> 'shade'). This fisheye has heavy corner vignetting + colour shading; the grey-card fit over-corrects the dark noisy corners into blue/magenta 'trash'. Smooth the grid to kill per-cell spikes, keep 85% of the colour correction, and clamp both the colour ratio and the vignetting gain so no corner cell over-tints or over-amplifies. Omit this section for a generic pass-through.",
     "smooth": 3,

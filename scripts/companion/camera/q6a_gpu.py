@@ -81,9 +81,9 @@ __kernel void isp(__global const uchar* pk, __global const float* shade, __globa
         float R2=ccm[0]*R+ccm[1]*G+ccm[2]*B, G2=ccm[3]*R+ccm[4]*G+ccm[5]*B, B2=ccm[6]*R+ccm[7]*G+ccm[8]*B;
         R=fmax(R2,0.0f); G=fmax(G2,0.0f); B=fmax(B2,0.0f);
     }
-    R = 255.0f*native_powr(clamp(R*scale/255.0f, 0.0f, 1.0f), 0.7f);   // tone map: scale to target + gamma
-    G = 255.0f*native_powr(clamp(G*scale/255.0f, 0.0f, 1.0f), 0.7f);
-    B = 255.0f*native_powr(clamp(B*scale/255.0f, 0.0f, 1.0f), 0.7f);
+    R = 255.0f*native_powr(clamp(R*scale/255.0f, 0.0f, 1.0f), GAMMA);   // tone map: scale to target + gamma
+    G = 255.0f*native_powr(clamp(G*scale/255.0f, 0.0f, 1.0f), GAMMA);
+    B = 255.0f*native_powr(clamp(B*scale/255.0f, 0.0f, 1.0f), GAMMA);
     out[o]=(uchar)clamp(R+0.5f,0.0f,255.0f); out[o+1]=(uchar)clamp(G+0.5f,0.0f,255.0f); out[o+2]=(uchar)clamp(B+0.5f,0.0f,255.0f);
 }
 // 2x2 BINNED ISP: one output pixel per Bayer quad (uses real photosites, averages the 2 greens ->
@@ -107,9 +107,9 @@ __kernel void isp_bin(__global const uchar* pk, __global const float* shade, __g
         R=fmax(R2,0.0f); G=fmax(G2,0.0f); B=fmax(B2,0.0f);
     }
     int o = (oy*OW + ox)*3;
-    float ro=255.0f*native_powr(clamp(R*scale/255.0f,0.0f,1.0f),0.7f);
-    float go=255.0f*native_powr(clamp(G*scale/255.0f,0.0f,1.0f),0.7f);
-    float bo=255.0f*native_powr(clamp(B*scale/255.0f,0.0f,1.0f),0.7f);
+    float ro=255.0f*native_powr(clamp(R*scale/255.0f,0.0f,1.0f),GAMMA);
+    float go=255.0f*native_powr(clamp(G*scale/255.0f,0.0f,1.0f),GAMMA);
+    float bo=255.0f*native_powr(clamp(B*scale/255.0f,0.0f,1.0f),GAMMA);
     if (use_ds){                                                   // FPN destripe fused inline (no 2nd pass)
         // LUMINANCE-only: subtract the SAME per-row/col offset from all 3 channels. A per-channel subtract
         // (old behaviour) turned row/col FPN into COLOUR stripes; the mean removes the luminance banding
@@ -159,13 +159,14 @@ __kernel void destripe_sub(__global uchar* im, __global const float* dcol, __glo
 
 
 class GpuDemosaic:
-    def __init__(self, W, H, bayer=(1, 1, 0, 0)):
+    def __init__(self, W, H, bayer=(1, 1, 0, 0), gamma=0.7):
         self.W, self.H = W, H
         dev = cl.get_platforms()[0].get_devices()[0]
         self.ctx = cl.Context(devices=[dev])
         self.q = cl.CommandQueue(self.ctx)
         rx, ry, bx, by = bayer                                # R/B pixel positions in the 2x2 (BGGR=(1,1,0,0))
-        defs = f"#define BRX {rx}\n#define BRY {ry}\n#define BBX {bx}\n#define BBY {by}\n"
+        # compile-time constants: Bayer offsets + tone-map GAMMA (single source of truth for the tone curve)
+        defs = f"#define BRX {rx}\n#define BRY {ry}\n#define BBX {bx}\n#define BBY {by}\n#define GAMMA {gamma}f\n"
         self.prg = cl.Program(self.ctx, defs + _SRC).build(options=["-cl-fast-relaxed-math"])
         self.knl = cl.Kernel(self.prg, "demosaic")     # build once, reuse (avoid per-call retrieval)
         self.isp_knl = cl.Kernel(self.prg, "isp")
