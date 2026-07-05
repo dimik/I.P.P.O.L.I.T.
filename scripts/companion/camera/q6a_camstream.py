@@ -145,10 +145,10 @@ def debayer(buf, full=True):
     if GPU is not None and full:
         scale = _auto_scale_packed(buf)      # auto-exposure from the packed RAW10 (no CPU unpack)
         if BIN:
-            out = GPU.isp_bin(buf, STRIDE, BLACK_LEVEL, WB_R, WB_G, WB_B, scale)  # unpack+2x2 bin on GPU
+            out = GPU.isp_bin(buf, STRIDE, BLACK_LEVEL, WB_R, WB_G, WB_B, scale, destripe=DESTRIPE)  # all on GPU
         else:
-            out = GPU.isp(buf, STRIDE, BLACK_LEVEL, WB_R, WB_G, WB_B, scale)      # unpack+full ISP on GPU
-        return _destripe_u8(out) if DESTRIPE else out
+            out = GPU.isp(buf, STRIDE, BLACK_LEVEL, WB_R, WB_G, WB_B, scale, destripe=DESTRIPE)
+        return out
     # CPU fallback: unpack + black+WB+demosaic + shade + destripe + tone map
     px = unpack_raw10(buf).astype(np.float32) - BLACK_LEVEL
     np.clip(px, 0, None, out=px)

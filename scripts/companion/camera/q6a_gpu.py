@@ -93,6 +93,31 @@ __kernel void isp_bin(__global const uchar* pk, __global uchar* out,
     out[o+1]=(uchar)(255.0f*pow(clamp(G*scale/255.0f,0.0f,1.0f),0.7f)+0.5f);
     out[o+2]=(uchar)(255.0f*pow(clamp(B*scale/255.0f,0.0f,1.0f),0.7f)+0.5f);
 }
+// destripe (FPN) on the uint8 image, all on GPU: column/row sums -> (CPU smooths) -> subtract
+__kernel void col_sum(__global const uchar* im, __global int* cs, const int OW, const int OH){
+    int x = get_global_id(0), c = get_global_id(1);
+    if (x >= OW || c >= 3) return;
+    int s = 0;
+    for (int y = 0; y < OH; y++) s += im[(y*OW + x)*3 + c];
+    cs[x*3 + c] = s;
+}
+__kernel void row_sum(__global const uchar* im, __global int* rs, const int OW, const int OH){
+    int y = get_global_id(0), c = get_global_id(1);
+    if (y >= OH || c >= 3) return;
+    int s = 0;
+    for (int x = 0; x < OW; x++) s += im[(y*OW + x)*3 + c];
+    rs[y*3 + c] = s;
+}
+__kernel void destripe_sub(__global uchar* im, __global const float* dcol, __global const float* drow,
+                           const int OW, const int OH){
+    int x = get_global_id(0), y = get_global_id(1);
+    if (x >= OW || y >= OH) return;
+    int o = (y*OW + x)*3;
+    for (int c = 0; c < 3; c++){
+        float v = (float)im[o+c] - dcol[x*3+c] - drow[y*3+c];
+        im[o+c] = (uchar)clamp(v, 0.0f, 255.0f);
+    }
+}
 '''
 
 
@@ -106,25 +131,52 @@ class GpuDemosaic:
         self.knl = cl.Kernel(self.prg, "demosaic")     # build once, reuse (avoid per-call retrieval)
         self.isp_knl = cl.Kernel(self.prg, "isp")
         self.isp_bin_knl = cl.Kernel(self.prg, "isp_bin")
+        self.col_sum_knl = cl.Kernel(self.prg, "col_sum")
+        self.row_sum_knl = cl.Kernel(self.prg, "row_sum")
+        self.destripe_knl = cl.Kernel(self.prg, "destripe_sub")
         mf = cl.mem_flags
         self.OW, self.OH = W // 2, H // 2
         self.d_in = cl.Buffer(self.ctx, mf.READ_ONLY, W * H * 2)
         self.d_out = cl.Buffer(self.ctx, mf.WRITE_ONLY, W * H * 3 * 4)
-        self.d_u8 = cl.Buffer(self.ctx, mf.WRITE_ONLY, W * H * 3)
-        self.d_u8_bin = cl.Buffer(self.ctx, mf.WRITE_ONLY, self.OW * self.OH * 3)
+        self.d_u8 = cl.Buffer(self.ctx, mf.READ_WRITE, W * H * 3)         # RW: destripe edits in place
+        self.d_u8_bin = cl.Buffer(self.ctx, mf.READ_WRITE, self.OW * self.OH * 3)
+        self.d_colsum = cl.Buffer(self.ctx, mf.READ_WRITE, W * 3 * 4)
+        self.d_rowsum = cl.Buffer(self.ctx, mf.READ_WRITE, H * 3 * 4)
+        self.d_dcol = cl.Buffer(self.ctx, mf.READ_ONLY, W * 3 * 4)
+        self.d_drow = cl.Buffer(self.ctx, mf.READ_ONLY, H * 3 * 4)
         self.out = np.empty((H, W, 3), np.float32)
         self.u8 = np.empty((H, W, 3), np.uint8)
         self.u8_bin = np.empty((self.OH, self.OW, 3), np.uint8)
         self.d_shade = None
         self.dev_name = dev.name.strip()
 
-    def isp_bin(self, packed, stride, bl, wr, wg, wb, scale):
+    @staticmethod
+    def _boxsmooth(v, win=41):
+        k = np.ones(win, np.float32) / win
+        return np.stack([np.convolve(v[:, c], k, mode="same") for c in range(3)], axis=1)
+
+    def _apply_destripe(self, d_u8, ow, oh):
+        """FPN destripe on a GPU uint8 image: col/row sums (GPU) -> smooth (CPU, tiny) -> subtract (GPU)."""
+        self.col_sum_knl(self.q, (ow, 3), None, d_u8, self.d_colsum, np.int32(ow), np.int32(oh))
+        self.row_sum_knl(self.q, (oh, 3), None, d_u8, self.d_rowsum, np.int32(ow), np.int32(oh))
+        cs = np.empty((ow, 3), np.int32); rs = np.empty((oh, 3), np.int32)
+        cl.enqueue_copy(self.q, cs, self.d_colsum); cl.enqueue_copy(self.q, rs, self.d_rowsum)
+        self.q.finish()
+        colmean = cs.astype(np.float32) / oh; rowmean = rs.astype(np.float32) / ow
+        dcol = np.ascontiguousarray(colmean - self._boxsmooth(colmean), np.float32)
+        drow = np.ascontiguousarray(rowmean - self._boxsmooth(rowmean), np.float32)
+        cl.enqueue_copy(self.q, self.d_dcol, dcol); cl.enqueue_copy(self.q, self.d_drow, drow)
+        self.destripe_knl(self.q, (ow, oh), None, d_u8, self.d_dcol, self.d_drow, np.int32(ow), np.int32(oh))
+
+    def isp_bin(self, packed, stride, bl, wr, wg, wb, scale, destripe=False):
         """2x2 binned ISP from PACKED RAW10 bytes -> (H/2,W/2,3) uint8 (unpack on GPU; lower noise)."""
         cl.enqueue_copy(self.q, self.d_in, np.frombuffer(packed, np.uint8))
         self.isp_bin_knl(self.q, (self.OW, self.OH), None, self.d_in, self.d_u8_bin,
                          np.int32(self.W), np.int32(self.H), np.int32(self.OW), np.int32(self.OH),
                          np.int32(stride), np.float32(bl),
                          np.float32(wr), np.float32(wg), np.float32(wb), np.float32(scale))
+        if destripe:
+            self._apply_destripe(self.d_u8_bin, self.OW, self.OH)
         cl.enqueue_copy(self.q, self.u8_bin, self.d_u8_bin)
         self.q.finish()
         return self.u8_bin
@@ -136,7 +188,7 @@ class GpuDemosaic:
         s = np.ascontiguousarray(shade, np.float32)
         self.d_shade = cl.Buffer(self.ctx, cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR, hostbuf=s)
 
-    def isp(self, packed, stride, bl, wr, wg, wb, scale):
+    def isp(self, packed, stride, bl, wr, wg, wb, scale, destripe=False):
         """Full ISP on the GPU from PACKED RAW10 bytes -> (H,W,3) uint8 (unpack+demosaic+WB+shade+tonemap)."""
         cl.enqueue_copy(self.q, self.d_in, np.frombuffer(packed, np.uint8))
         use = 1 if self.d_shade is not None else 0
@@ -145,6 +197,8 @@ class GpuDemosaic:
                      np.int32(self.W), np.int32(self.H), np.int32(stride), np.float32(bl),
                      np.float32(wr), np.float32(wg), np.float32(wb),
                      np.float32(scale), np.int32(use))
+        if destripe:
+            self._apply_destripe(self.d_u8, self.W, self.H)
         cl.enqueue_copy(self.q, self.u8, self.d_u8)
         self.q.finish()
         return self.u8
