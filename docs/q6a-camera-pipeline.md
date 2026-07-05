@@ -478,3 +478,24 @@ RGGB to regenerate a valid shading map if lens vignetting/shading correction is 
 **Lessons:** (1) verify the CFA against a **known colour reference** before tuning colour — a chart would have
 saved two days. (2) yellow→cyan + magenta-stable ⇒ R↔B swap; a full hue rotation ⇒ phase shift (try the other
 Bayer phases). (3) don't pile compensations on an un-diagnosed root cause.
+
+## 13. Two follow-ups: blown-highlight handling + the pyopencl stale-kernel-cache trap (2026-07-05)
+
+**Blown highlights (bright doorway → magenta).** After the §12 cleanup, a very bright clipping region (an
+open doorway/light source) rendered **magenta**. Cause: a blown region has no real colour, but the WB gains
+(AWB ~R×3.2/B×3.6 for this dim room) push R and B to clip (255) before G → magenta (not an AWB *bug* — AWB
+correctly neutralises the room; only the one clipping region colours). Fix = re-add **highlight
+desaturation** in the GPU kernel (`isp` + `isp_bin`): fade a pixel toward its luma as its brightest channel
+approaches clip, so blown highlights read neutral white. High threshold (**238→255**, `t=(mx-238)/17`) so
+only truly near-clipping pixels are touched — normal bright walls keep their colour (an earlier 190 threshold
+greyed mid-bright areas). This is standard ISP highlight handling, not a swap-era hack.
+
+**⚠️ The pyopencl kernel cache silently served a STALE binary — kernel edits had no effect.** While iterating
+on `q6a_gpu.py`, deployed kernel changes (the destripe rewrite, denoise add/remove, the highlight fade)
+**did not take effect**: pyopencl cached the compiled program and kept using the old binary even though the
+source changed. Symptom that unmasked it: a clipped pixel with the fade at `t=1` (which must go neutral)
+stayed magenta. Fixes: **`PYOPENCL_NO_CACHE=1`** in the launch env **and** clear `~/.cache/pyopencl` +
+`~/.cache/pytools` (`view_q6a_cam.sh` now does both; a bare in-code `os.environ["PYOPENCL_NO_CACHE"]="1"`
+proved unreliable on its own). Recompiling costs ~2-4 s at startup only. **Lesson: after any `q6a_gpu.py`
+kernel edit, assume the cache is stale — bypass/clear it, and verify the change actually took (e.g. measure a
+pixel the edit must change).** This likely muddied some earlier kernel A/B measurements too.

@@ -11,6 +11,9 @@ Import is lazy in the streamer, so if OpenCL is unavailable the pipeline falls b
 """
 import os
 os.environ.setdefault("PYOPENCL_COMPILER_OUTPUT", "0")
+# Disable pyopencl's binary cache: it was serving a STALE compiled kernel across source edits (kernel
+# changes silently had no effect until the cache was cleared). Recompiling costs ~2-4 s at startup only.
+os.environ["PYOPENCL_NO_CACHE"] = "1"
 import numpy as np
 import pyopencl as cl
 
@@ -81,6 +84,11 @@ __kernel void isp(__global const uchar* pk, __global const float* shade, __globa
     R = 255.0f*native_powr(clamp(R*scale/255.0f, 0.0f, 1.0f), 0.7f);   // tone map: scale to target + gamma
     G = 255.0f*native_powr(clamp(G*scale/255.0f, 0.0f, 1.0f), 0.7f);
     B = 255.0f*native_powr(clamp(B*scale/255.0f, 0.0f, 1.0f), 0.7f);
+    // Highlight handling (standard ISP): a blown region carries no real colour, but WB gains push R,B to
+    // clip before G -> it renders magenta (e.g. a bright doorway). Fade ONLY near-clipping pixels to luma so
+    // they read neutral white. High threshold (238) -> normal bright areas keep their colour.
+    float mx = fmax(fmax(R,G),B); float t = clamp((mx-238.0f)*(1.0f/17.0f), 0.0f, 1.0f);
+    float lum = 0.299f*R+0.587f*G+0.114f*B; R += (lum-R)*t; G += (lum-G)*t; B += (lum-B)*t;
     out[o]=(uchar)clamp(R+0.5f,0.0f,255.0f); out[o+1]=(uchar)clamp(G+0.5f,0.0f,255.0f); out[o+2]=(uchar)clamp(B+0.5f,0.0f,255.0f);
 }
 // 2x2 BINNED ISP: one output pixel per Bayer quad (uses real photosites, averages the 2 greens ->
@@ -115,6 +123,11 @@ __kernel void isp_bin(__global const uchar* pk, __global const float* shade, __g
         float dr = (drow[oy*3]+drow[oy*3+1]+drow[oy*3+2]) * 0.3333333f;
         ro -= dc+dr; go -= dc+dr; bo -= dc+dr;
     }
+    // Highlight handling (standard ISP): a blown region carries no real colour, but WB gains push R,B to
+    // clip before G -> it renders magenta (e.g. a bright doorway). Fade ONLY near-clipping pixels to luma so
+    // they read neutral white. High threshold (238) -> normal bright areas keep their colour.
+    float mx = fmax(fmax(ro,go),bo); float t = clamp((mx-238.0f)*(1.0f/17.0f), 0.0f, 1.0f);
+    float lum = 0.299f*ro+0.587f*go+0.114f*bo; ro += (lum-ro)*t; go += (lum-go)*t; bo += (lum-bo)*t;
     out[o]  =(uchar)clamp(ro+0.5f,0.0f,255.0f);
     out[o+1]=(uchar)clamp(go+0.5f,0.0f,255.0f);
     out[o+2]=(uchar)clamp(bo+0.5f,0.0f,255.0f);
