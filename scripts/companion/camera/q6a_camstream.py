@@ -274,8 +274,41 @@ def detector_loop(interval=0.25):
             print("detect error:", e, flush=True); time.sleep(0.5)
         time.sleep(interval)
 
-def capture_loop(rdi, full, batch=300):
-    """Smooth continuous capture. v4l2-ctl --stream-count=0-to-pipe HANGS this CAMSS driver, and a
+def capture_loop(rdi, full):
+    """Prefer direct V4L2 mmap streaming (full sensor rate, ~23fps); fall back to the file-tail method."""
+    import time
+    subprocess.run(["pkill", "-9", "-f", "v4l2-ctl"], check=False)   # free the device
+    try:
+        from q6a_v4l2 import V4l2Cam
+    except Exception as e:
+        print(f"V4L2 mmap unavailable ({e}); using file-tail capture", flush=True)
+        return _capture_loop_file(rdi, full)
+    cam = None; fails = 0
+    while True:
+        if State.clients == 0:                 # no viewer -> release camera, idle
+            State.jpeg = None
+            if cam is not None: cam.close(); cam = None
+            State.wake.wait(); State.wake.clear(); continue
+        try:
+            if cam is None:
+                cam = V4l2Cam("/dev/video0", W, H); fails = 0
+            data = cam.read_latest(timeout=1.0)  # drains to the freshest frame (low latency)
+            if data is not None and len(data) == FRAME:
+                process(data, full)
+        except Exception as e:
+            print("capture error (v4l2):", e, flush=True)
+            if cam is not None:
+                try: cam.close()
+                except Exception: pass
+                cam = None
+            fails += 1
+            if fails >= 3:
+                print("V4L2 capture failing; falling back to file-tail", flush=True)
+                return _capture_loop_file(rdi, full)
+            time.sleep(0.5)
+
+def _capture_loop_file(rdi, full, batch=300):
+    """Fallback: v4l2-ctl --stream-count=0-to-pipe HANGS this CAMSS driver, and a
     capture-then-process batch stutters (freeze during capture). Instead: run a large finite batch
     writing to a tmpfs file while we *tail* it, always seeking to the LATEST complete frame (dropping
     any we can't keep up with -> low latency, no stutter). Brief hiccup only every ~batch frames."""

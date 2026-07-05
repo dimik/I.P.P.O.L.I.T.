@@ -28,6 +28,8 @@ CAM="${1:-2}"
 echo "== ensure streamer + detector + model + color profile are on the Q6A =="
 scp -q "$REPO_DIR/q6a_camstream.py" "$Q6A:~/q6a_camstream.py"
 scp -q "$REPO_DIR/q6a_yolo.py" "$Q6A:~/q6a_yolo.py"
+scp -q "$REPO_DIR/q6a_gpu.py" "$Q6A:~/q6a_gpu.py"       # Adreno OpenCL ISP
+scp -q "$REPO_DIR/q6a_v4l2.py" "$Q6A:~/q6a_v4l2.py"     # V4L2 mmap capture
 [ -f "$REPO_DIR/models/yolov8_det.bin" ] && scp -q "$REPO_DIR/models/yolov8_det.bin" "$Q6A:~/yolov8_det.bin" 2>/dev/null || true
 [ -f "$REPO_DIR/models/coco_labels.txt" ] && scp -q "$REPO_DIR/models/coco_labels.txt" "$Q6A:~/coco_labels.txt" 2>/dev/null || true
 [ -f "$REPO_DIR/imx296_wb.npz" ] && scp -q "$REPO_DIR/imx296_wb.npz" "$Q6A:~/imx296_wb.npz" 2>/dev/null || true
