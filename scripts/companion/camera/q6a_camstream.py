@@ -57,6 +57,13 @@ def _auto_scale(px):
     np.clip(sub, 0, None, out=sub)
     avg_wb = (WB_R + 2.0 * WB_G + WB_B) / 4.0          # BGGR: 1 B, 2 G, 1 R per 2x2
     return TARGET_MEAN / max(sub.mean() * avg_wb, 1.0)
+
+def _auto_scale_packed(buf):
+    """Auto-exposure scale from the packed RAW10 high bytes (~value>>2; avoids the CPU unpack)."""
+    a = np.frombuffer(buf, np.uint8)[:STRIDE * H].reshape(H, STRIDE)[:, :1820].reshape(H, 364, 5)
+    m = a[::4, ::4, :4].astype(np.float32).mean() * 4.0 - BLACK_LEVEL   # high bytes -> ~10-bit level
+    avg_wb = (WB_R + 2.0 * WB_G + WB_B) / 4.0
+    return TARGET_MEAN / max(max(m, 0.0) * avg_wb, 1.0)
 PROFILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "imx296_wb.npz")
 def load_profile():
     global BLACK_LEVEL, WB_R, WB_G, WB_B, SHADE
@@ -133,17 +140,17 @@ def demosaic_bggr(px):
     R = _conv3(R, _KRB); B = _conv3(B, _KRB)   # bilinear-upsample the quarter-density R/B
     return np.dstack([R, G, B])
 
-def debayer(px, full=True):
-    """BGGR Bayer -> full-res RGB uint8: black-level + raw WB -> demosaic -> destripe -> tone map."""
+def debayer(buf, full=True):
+    """Packed RAW10 -> RGB uint8. GPU path unpacks on-device; CPU path unpacks first."""
     if GPU is not None and full:
-        scale = _auto_scale(px)              # cheap CPU auto-exposure metric from the raw subsample
+        scale = _auto_scale_packed(buf)      # auto-exposure from the packed RAW10 (no CPU unpack)
         if BIN:
-            out = GPU.isp_bin(px, BLACK_LEVEL, WB_R, WB_G, WB_B, scale)  # 2x2 bin -> half-res, low noise
+            out = GPU.isp_bin(buf, STRIDE, BLACK_LEVEL, WB_R, WB_G, WB_B, scale)  # unpack+2x2 bin on GPU
         else:
-            out = GPU.isp(px, BLACK_LEVEL, WB_R, WB_G, WB_B, scale)      # full-res ISP -> uint8
+            out = GPU.isp(buf, STRIDE, BLACK_LEVEL, WB_R, WB_G, WB_B, scale)      # unpack+full ISP on GPU
         return _destripe_u8(out) if DESTRIPE else out
-    # CPU fallback: black+WB+demosaic + shade + destripe + tone map
-    px = px.astype(np.float32) - BLACK_LEVEL
+    # CPU fallback: unpack + black+WB+demosaic + shade + destripe + tone map
+    px = unpack_raw10(buf).astype(np.float32) - BLACK_LEVEL
     np.clip(px, 0, None, out=px)
     px[1::2, 1::2] *= WB_R                    # R sites   (raw white balance, per Bayer position)
     px[0::2, 0::2] *= WB_B                    # B sites   (G sites keep WB_G=1)
@@ -250,7 +257,7 @@ class State:
     dets = []                   # latest YOLO detections (drawn onto every frame)
 
 def process(buf, full):
-    rgb = debayer(unpack_raw10(buf), full)                 # (H,W,3) uint8 (GPU ISP)
+    rgb = debayer(buf, full)                                # packed RAW10 in -> (H,W,3) uint8 (GPU unpacks)
     dets = None
     if DET is not None:
         DET["frame"][:] = rgb                              # publish latest frame to the detector (shm)
@@ -428,7 +435,7 @@ if __name__ == "__main__":
     ap.add_argument("--port", type=int, default=8092)
     ap.add_argument("--fast", action="store_true", help="half-res debayer (faster, softer); default is full-res")
     ap.add_argument("--exposure", type=int, default=3000, help="sensor exposure (lines); LOWER=higher fps (frame length scales with exposure) but noisier in dim light. 3000~21fps, 6000~13fps")
-    ap.add_argument("--gain", type=int, default=200, help="analogue gain 0..480 (0.1dB); higher=brighter+noisier")
+    ap.add_argument("--gain", type=int, default=380, help="analogue gain 0..480; higher=cleaner low-light (analog beats digital scaling) up to the noise floor")
     ap.add_argument("--calibrate", action="store_true", help="capture a flat-field color profile (aim at a white/gray surface)")
     ap.add_argument("--no-yolo", action="store_true", help="disable the NPU YOLO detection overlay")
     ap.add_argument("--gpu", action="store_true", help="full-res ISP on the Adreno GPU (OpenCL) instead of CPU")

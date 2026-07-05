@@ -20,6 +20,14 @@ inline float bget(__global const ushort* b, int x, int y, int W, int H, float bl
     float v = (float)b[y*W + x] - bl;
     return v < 0.0f ? 0.0f : v;
 }
+// read a pixel straight from the packed MIPI RAW10 buffer (pBAA: 4 px in 5 bytes, stride S) -> unpack on GPU
+inline float bget_packed(__global const uchar* p, int x, int y, int W, int H, int S, float bl){
+    x = clamp(x, 0, W-1); y = clamp(y, 0, H-1);
+    int g = x >> 2, wi = x & 3, base = y*S + g*5;
+    int val = ((int)p[base + wi] << 2) | ((p[base + 4] >> (2*wi)) & 3);
+    float v = (float)val - bl;
+    return v < 0.0f ? 0.0f : v;
+}
 // BGGR bilinear demosaic + black level + raw white balance -> interleaved float RGB
 __kernel void demosaic(__global const ushort* bayer, __global float* rgb,
                        const int W, const int H, const float bl,
@@ -41,21 +49,21 @@ __kernel void demosaic(__global const ushort* bayer, __global float* rgb,
     int o = (y*W + x)*3;
     rgb[o]=R*wr; rgb[o+1]=G*wg; rgb[o+2]=B*wb;
 }
-// full ISP: demosaic + WB + optional shading + tone map (scale to target + gamma 0.7) -> uint8 RGB
-__kernel void isp(__global const ushort* bayer, __global const float* shade, __global uchar* out,
-                  const int W, const int H, const float bl,
+// full ISP from PACKED RAW10: unpack + demosaic + WB + optional shading + tone map -> uint8 RGB
+__kernel void isp(__global const uchar* pk, __global const float* shade, __global uchar* out,
+                  const int W, const int H, const int S, const float bl,
                   const float wr, const float wg, const float wb,
                   const float scale, const int use_shade){
     int x = get_global_id(0), y = get_global_id(1);
     if (x >= W || y >= H) return;
     int bx = x & 1, by = y & 1;
-    float C = bget(bayer, x, y, W, H, bl), R, G, B;
-    float g4 = 0.25f*(bget(bayer,x-1,y,W,H,bl)+bget(bayer,x+1,y,W,H,bl)
-                     +bget(bayer,x,y-1,W,H,bl)+bget(bayer,x,y+1,W,H,bl));
-    float d4 = 0.25f*(bget(bayer,x-1,y-1,W,H,bl)+bget(bayer,x+1,y-1,W,H,bl)
-                     +bget(bayer,x-1,y+1,W,H,bl)+bget(bayer,x+1,y+1,W,H,bl));
-    float hh = 0.5f*(bget(bayer,x-1,y,W,H,bl)+bget(bayer,x+1,y,W,H,bl));
-    float vv = 0.5f*(bget(bayer,x,y-1,W,H,bl)+bget(bayer,x,y+1,W,H,bl));
+    float C = bget_packed(pk, x, y, W, H, S, bl), R, G, B;
+    float g4 = 0.25f*(bget_packed(pk,x-1,y,W,H,S,bl)+bget_packed(pk,x+1,y,W,H,S,bl)
+                     +bget_packed(pk,x,y-1,W,H,S,bl)+bget_packed(pk,x,y+1,W,H,S,bl));
+    float d4 = 0.25f*(bget_packed(pk,x-1,y-1,W,H,S,bl)+bget_packed(pk,x+1,y-1,W,H,S,bl)
+                     +bget_packed(pk,x-1,y+1,W,H,S,bl)+bget_packed(pk,x+1,y+1,W,H,S,bl));
+    float hh = 0.5f*(bget_packed(pk,x-1,y,W,H,S,bl)+bget_packed(pk,x+1,y,W,H,S,bl));
+    float vv = 0.5f*(bget_packed(pk,x,y-1,W,H,S,bl)+bget_packed(pk,x,y+1,W,H,S,bl));
     if (by==0 && bx==0){ B=C; G=g4; R=d4; }
     else if (by==1 && bx==1){ R=C; G=g4; B=d4; }
     else if (by==0 && bx==1){ G=C; B=hh; R=vv; }
@@ -70,15 +78,15 @@ __kernel void isp(__global const ushort* bayer, __global const float* shade, __g
 }
 // 2x2 BINNED ISP: one output pixel per Bayer quad (uses real photosites, averages the 2 greens ->
 // ~2x less noise, no demosaic interpolation) + WB + tone map. Output is half-res (OW=W/2, OH=H/2).
-__kernel void isp_bin(__global const ushort* bayer, __global uchar* out,
-                      const int W, const int OW, const int OH, const float bl,
+__kernel void isp_bin(__global const uchar* pk, __global uchar* out,
+                      const int W, const int H, const int OW, const int OH, const int S, const float bl,
                       const float wr, const float wg, const float wb, const float scale){
     int ox = get_global_id(0), oy = get_global_id(1);
     if (ox >= OW || oy >= OH) return;
     int x = ox*2, y = oy*2;
-    float B = fmax((float)bayer[y*W + x] - bl, 0.0f);              // BGGR quad
-    float G = 0.5f*(fmax((float)bayer[y*W + x+1] - bl, 0.0f) + fmax((float)bayer[(y+1)*W + x] - bl, 0.0f));
-    float R = fmax((float)bayer[(y+1)*W + x+1] - bl, 0.0f);
+    float B = bget_packed(pk, x,   y,   W, H, S, bl);              // BGGR quad (unpacked on GPU)
+    float G = 0.5f*(bget_packed(pk, x+1, y, W, H, S, bl) + bget_packed(pk, x, y+1, W, H, S, bl));
+    float R = bget_packed(pk, x+1, y+1, W, H, S, bl);
     R*=wr; G*=wg; B*=wb;
     int o = (oy*OW + ox)*3;
     out[o]  =(uchar)(255.0f*pow(clamp(R*scale/255.0f,0.0f,1.0f),0.7f)+0.5f);
@@ -110,12 +118,12 @@ class GpuDemosaic:
         self.d_shade = None
         self.dev_name = dev.name.strip()
 
-    def isp_bin(self, px, bl, wr, wg, wb, scale):
-        """2x2 binned ISP: px (H,W) uint16 -> (H/2,W/2,3) uint8 (lower noise + faster)."""
-        px = np.ascontiguousarray(px, np.uint16)
-        cl.enqueue_copy(self.q, self.d_in, px)
+    def isp_bin(self, packed, stride, bl, wr, wg, wb, scale):
+        """2x2 binned ISP from PACKED RAW10 bytes -> (H/2,W/2,3) uint8 (unpack on GPU; lower noise)."""
+        cl.enqueue_copy(self.q, self.d_in, np.frombuffer(packed, np.uint8))
         self.isp_bin_knl(self.q, (self.OW, self.OH), None, self.d_in, self.d_u8_bin,
-                         np.int32(self.W), np.int32(self.OW), np.int32(self.OH), np.float32(bl),
+                         np.int32(self.W), np.int32(self.H), np.int32(self.OW), np.int32(self.OH),
+                         np.int32(stride), np.float32(bl),
                          np.float32(wr), np.float32(wg), np.float32(wb), np.float32(scale))
         cl.enqueue_copy(self.q, self.u8_bin, self.d_u8_bin)
         self.q.finish()
@@ -128,14 +136,13 @@ class GpuDemosaic:
         s = np.ascontiguousarray(shade, np.float32)
         self.d_shade = cl.Buffer(self.ctx, cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR, hostbuf=s)
 
-    def isp(self, px, bl, wr, wg, wb, scale):
-        """Full ISP on the GPU: px (H,W) uint16 -> (H,W,3) uint8 (demosaic+WB+shade+tonemap)."""
-        px = np.ascontiguousarray(px, np.uint16)
-        cl.enqueue_copy(self.q, self.d_in, px)
+    def isp(self, packed, stride, bl, wr, wg, wb, scale):
+        """Full ISP on the GPU from PACKED RAW10 bytes -> (H,W,3) uint8 (unpack+demosaic+WB+shade+tonemap)."""
+        cl.enqueue_copy(self.q, self.d_in, np.frombuffer(packed, np.uint8))
         use = 1 if self.d_shade is not None else 0
         sh = self.d_shade if use else self.d_in           # dummy (unused) buffer when no shade
         self.isp_knl(self.q, (self.W, self.H), None, self.d_in, sh, self.d_u8,
-                     np.int32(self.W), np.int32(self.H), np.float32(bl),
+                     np.int32(self.W), np.int32(self.H), np.int32(stride), np.float32(bl),
                      np.float32(wr), np.float32(wg), np.float32(wb),
                      np.float32(scale), np.int32(use))
         cl.enqueue_copy(self.q, self.u8, self.d_u8)
