@@ -136,15 +136,17 @@ def _debayer_cpu(px, full):
     b = px[0::2, 0::2]; g = (px[0::2, 1::2] + px[1::2, 0::2]) * 0.5; r = px[1::2, 1::2]
     return np.dstack([r, g, b]).astype(np.float32)              # fast half-res super-pixel
 
+_GAMMA_LUT = (255.0 * (np.arange(256) / 255.0) ** 0.7).astype(np.uint8)   # gamma 0.7 as a 256-entry LUT
+
 def _post(out):
     """destripe (remove FPN column/row banding) + tone map (target-mean lift + gamma) -> uint8."""
     col = out.mean(axis=0); out -= (col - _smooth(col, 41))[None, :, :]   # vertical stripes
     row = out.mean(axis=1); out -= (row - _smooth(row, 41))[:, None, :]   # horizontal stripes
     out = np.clip(out, 0, None)
-    out = np.clip(out - np.percentile(out, 1), 0, None)
+    out -= np.percentile(out[::4, ::4], 1)                 # black lift (subsampled percentile: 44ms->4ms)
+    np.clip(out, 0, None, out=out)
     out *= 95.0 / max(out.mean(), 1.0)                     # target mean brightness ~95 (robust to a lamp)
-    out = 255.0 * np.clip(out / 255.0, 0, 1) ** 0.7        # gamma 0.7 lifts midtones/shadows
-    return np.clip(out, 0, 255).astype(np.uint8)
+    return _GAMMA_LUT[np.clip(out, 0, 255).astype(np.uint8)]  # gamma via LUT (float pow 59ms->~19ms)
 
 def calibrate(cam, exposure, gain, n=40):
     """White-balance calibration: aim at a UNIFORM grey/white surface; measure the raw black level and
