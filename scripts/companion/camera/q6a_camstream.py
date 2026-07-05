@@ -63,13 +63,17 @@ AE_ON = True                                  # runtime sensor auto-exposure
 AE_TARGET = 70.0                              # target raw high-byte MEDIAN (robust to dark corners + bright window)
 AE_MIN_EXP = 30; AE_MAX_EXP = 3000            # exposure clamp (lines); VMAX fixed here -> ~32fps, no vblank churn; cap keeps fps >=~24 + out of the deep-noise regime
 # --- Auto white balance (damped, constrained gray-world) --- tracks the illuminant (day<->evening) so
-# adjusts the WB gains (software, GPU reads them next frame -> no glitch). Opt-in via --awb, OFF by default:
-# gray-world assumes the scene averages neutral, but a warm/non-gray room makes it slowly over-boost R,B
-# (observed drifting 1.6->3.2 / 1.5->4.1 over minutes -> whole frame goes magenta). Fixed WB is stable.
+# adjusts the WB gains (software, GPU reads them next frame -> no glitch). ANCHORED gray-world: opt-in via
+# --awb. Unbounded gray-world runs away to magenta on a non-gray room (observed 1.6->3.2/1.5->4.1); this
+# version is CLAMPED to +-AWB_ANCHOR_MARGIN around the loaded calibration WB, so it can only make small
+# corrections (tracks the sensor's thermal drift + modest light changes) and PHYSICALLY cannot reach magenta.
 AWB_ON = False
-AWB_ALPHA = 0.05                              # WB gain smoothing per update (~1-2 s to track a light change)
-AWB_RMIN, AWB_RMAX = 1.2, 3.2                 # plausible R gain range (green-dominant raw); from the profile
-AWB_BMIN, AWB_BMAX = 1.2, 4.2                 # plausible B gain range
+AWB_ALPHA = 0.05                              # WB gain smoothing per update (slow, flicker-free)
+AWB_ANCHOR_MARGIN = 0.10                      # AWB may move each gain only +-10% from the calibration anchor
+                                              # (covers the ~8% thermal drift; tight enough to stay near neutral)
+_AWB_ANCHOR_R = _AWB_ANCHOR_B = None          # captured from the loaded WB on the first AWB update
+AWB_RMIN, AWB_RMAX = 1.2, 3.2                 # (legacy absolute range; the anchor clamp below is tighter)
+AWB_BMIN, AWB_BMAX = 1.2, 4.2
 # YOLO runs in a SEPARATE PROCESS (q6a_detector.py) sharing frames via shared memory. The Adreno (GPU
 # ISP) and Hexagon (NPU) crash if driven concurrently in ONE process (shared userspace allocator
 # corruption) but run fine across processes -> no lock, true concurrency. shm layout <-> q6a_detector.py.
@@ -267,13 +271,16 @@ def auto_exposure(buf):
 
 _AWB_N = 0
 def auto_wb(buf):
-    """Damped, constrained gray-world AWB from the packed RAW10 high bytes. Every ~8 frames, estimate the
-    per-Bayer-channel MEDIANS (robust to bright/coloured spots), take the gray-world WB that equalises them,
-    and move WB_R/WB_B a small fraction toward it (clamped to a plausible range). Tracks the illuminant
-    (day<->evening) without flicker. WB is a software gain the GPU reads each frame, so no sensor reconfig."""
-    global WB_R, WB_B, _AWB_N
+    """ANCHORED gray-world AWB from the packed RAW10 high bytes. Every ~8 frames, estimate the per-Bayer-channel
+    MEDIANS (robust to bright/coloured spots), take the gray-world WB that equalises them, and move WB_R/WB_B
+    a small fraction toward it -- but CLAMPED to +-AWB_ANCHOR_MARGIN around the loaded calibration WB. This
+    tracks the sensor's thermal drift + modest light changes yet physically cannot run away to magenta (which
+    unbounded gray-world does on a non-gray room). WB is a software gain the GPU reads each frame -> no glitch."""
+    global WB_R, WB_B, _AWB_N, _AWB_ANCHOR_R, _AWB_ANCHOR_B
     if not AWB_ON:
         return
+    if _AWB_ANCHOR_R is None:                       # anchor to the calibrated WB loaded at startup
+        _AWB_ANCHOR_R, _AWB_ANCHOR_B = WB_R, WB_B
     _AWB_N += 1
     if _AWB_N % 8:
         return
@@ -287,11 +294,11 @@ def auto_wb(buf):
     Gm = (float(np.median(h[BY::2][:, :, RX::2])) + float(np.median(h[RY::2][:, :, BX::2]))) / 2 - bG
     if Gm < 8 or Rm < 4 or Bm < 4:                 # too dark to estimate WB reliably -> hold
         return
-    tR = min(max(Gm / Rm, AWB_RMIN), AWB_RMAX)     # gray-world target, clamped to a plausible illuminant range
-    tB = min(max(Gm / Bm, AWB_BMIN), AWB_BMAX)
-    alpha = 0.30 if _AWB_N < 8 * 10 else AWB_ALPHA # fast initial lock (~1 s), then slow flicker-free tracking
-    WB_R += alpha * (tR - WB_R)
-    WB_B += alpha * (tB - WB_B)
+    m = AWB_ANCHOR_MARGIN                           # clamp targets to +-m around the calibration anchor
+    tR = min(max(Gm / Rm, _AWB_ANCHOR_R * (1 - m)), _AWB_ANCHOR_R * (1 + m))
+    tB = min(max(Gm / Bm, _AWB_ANCHOR_B * (1 - m)), _AWB_ANCHOR_B * (1 + m))
+    WB_R += AWB_ALPHA * (tR - WB_R)                # slow, flicker-free (no fast-lock: starts at the calibration)
+    WB_B += AWB_ALPHA * (tB - WB_B)
 
 def unpack_raw10(buf):
     """MIPI RAW10 packed -> uint16 Bayer (H, W). 4px in 5 bytes; b4 holds the 4x2 LSBs."""
@@ -707,7 +714,7 @@ if __name__ == "__main__":
     ap.add_argument("--calibrate-dark", action="store_true", help="dark-frame black calibration (COVER THE LENS): measures per-channel black to fix the brightness-dependent color cast; then re-run --calibrate")
     ap.add_argument("--no-yolo", action="store_true", help="disable the NPU YOLO detection overlay")
     ap.add_argument("--no-ae", action="store_true", help="disable sensor auto-exposure (use the fixed --exposure/--gain). AE nudges real integration time so bright scenes don't clip; --exposure is just the starting point.")
-    ap.add_argument("--awb", action="store_true", help="enable gray-world auto white balance (OFF by default). Tracks the illuminant, but on a non-gray room it slowly over-boosts R,B -> whole frame drifts magenta over minutes. Fixed profile WB is the stable default.")
+    ap.add_argument("--awb", action="store_true", help="enable ANCHORED auto white balance: gray-world clamped +-15%% around the calibrated WB, so it tracks the sensor's thermal drift + modest light changes but cannot run away to magenta. OFF by default (bare runs use fixed WB); view_q6a_cam.sh enables it.")
     ap.add_argument("--camera-model", default="imx296", help="profiles/<model>.json to load all sensor config from (geometry, CFA, format, defaults, AE, CCM). Add a camera = add a profile.")
     ap.add_argument("--ccm-ct", type=int, default=None, help="override the profile's CCM colour temperature (K) (2500=warm .. 7400=daylight)")
     ap.add_argument("--ccm", action="store_true", help="enable the ready-made color-correction matrix (RPi IMX296 tuning) (OFF by default: crushes green toward magenta with high WB gains + amplifies low-light noise)")

@@ -75,7 +75,7 @@ stop_streamer
 # binary across q6a_gpu.py edits (kernel changes had no effect until the cache was bypassed). Recompile
 # costs ~2-4 s at startup only. (The in-code os.environ set alone proved unreliable — set it here too.)
 ssh "$Q6A" "rm -rf ~/.cache/pyopencl ~/.cache/pytools" 2>/dev/null || true
-ssh "$Q6A" "PYOPENCL_NO_CACHE=1 setsid python3 ~/q6a_camstream.py --cam $CAM --port $PORT --gpu --bin </dev/null >~/camstream.log 2>&1 &" || true
+ssh "$Q6A" "PYOPENCL_NO_CACHE=1 setsid python3 ~/q6a_camstream.py --cam $CAM --port $PORT --gpu --bin --awb </dev/null >~/camstream.log 2>&1 &" || true
 sleep 3
 echo "   stream: http://$HOST_IP:$PORT/stream   (log: ssh $Q6A 'tail -f ~/camstream.log')"
 
