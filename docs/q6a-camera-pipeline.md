@@ -367,3 +367,21 @@ disable):
   at a balanced ~2500 lines (subject visible, no stripes) instead of going black or to noise. Converges in
   ~2–3 s and holds. Calibration is unaffected (fixed exposure, outside the capture loop). Residual color cast
   in mixed light (room vs window) is a separate white-balance limit, not exposure.
+
+## 10. Auto white balance (2026-07-05)
+
+A *fixed* WB (from calibration/profile) can't track a changing illuminant — the same gains that neutralize
+midday daylight go green under evening/tungsten light, so the cast we chased in §8 kept coming back whenever
+the light changed. Added a real AWB loop (`auto_wb()` in `q6a_camstream.py`, on by default; `--no-awb`):
+- **Damped, constrained gray-world.** Every ~8 frames, estimate the per-Bayer-channel **medians** from the
+  packed RAW10 high bytes (black-subtracted; medians are robust to a coloured spot or a bright window), take
+  the gray-world WB that equalizes R,G,B, and move `WB_R`/`WB_B` a fraction toward it — clamped to a plausible
+  illuminant range (from the profile `awb.r_gain`/`b_gain`). WB is a **software gain the GPU reads each frame**,
+  so there's no sensor reconfig and no frame glitch (unlike the AE vblank hazard in §9).
+- **Fast initial lock, slow tracking.** The first ~10 updates use a large step (α=0.30) so a stale profile WB
+  snaps to the scene in ~2 s; after that α drops to 0.05 for flicker-free tracking (~15 s to follow a slow light
+  change, imperceptible frame-to-frame). Holds when too dark to estimate reliably (green < floor).
+- Result: MID green cast −32 → ~−10 and BRIGHT magenta +26 → +8 after lock, and it re-neutralizes on its own
+  when the light shifts instead of drifting. AE errors and AWB errors are both **non-fatal** (wrapped in the
+  capture loop) — a throw must never trigger a camera reinit (that caused the §9 "snow every 2–3 s" stutter).
+- All AWB config lives in the camera profile (`profiles/imx296.json` → `awb`), keeping the scripts generic.

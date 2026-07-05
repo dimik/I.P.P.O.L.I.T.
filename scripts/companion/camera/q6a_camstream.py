@@ -57,6 +57,13 @@ EXPOSURE = 3000; GAIN = 240                   # current sensor exposure (lines) 
 AE_ON = True                                  # runtime sensor auto-exposure
 AE_TARGET = 70.0                              # target raw high-byte MEDIAN (robust to dark corners + bright window)
 AE_MIN_EXP = 30; AE_MAX_EXP = 3000            # exposure clamp (lines); VMAX fixed here -> ~32fps, no vblank churn; cap keeps fps >=~24 + out of the deep-noise regime
+# --- Auto white balance (damped, constrained gray-world) --- tracks the illuminant (day<->evening) so
+# color doesn't drift; adjusts the WB gains (software, GPU reads them next frame -> no glitch). Damped +
+# clamped so it doesn't flicker or over-correct on strongly-coloured scenes.
+AWB_ON = True
+AWB_ALPHA = 0.05                              # WB gain smoothing per update (~1-2 s to track a light change)
+AWB_RMIN, AWB_RMAX = 1.2, 3.2                 # plausible R gain range (green-dominant raw); from the profile
+AWB_BMIN, AWB_BMAX = 1.2, 4.2                 # plausible B gain range
 # YOLO runs in a SEPARATE PROCESS (q6a_detector.py) sharing frames via shared memory. The Adreno (GPU
 # ISP) and Hexagon (NPU) crash if driven concurrently in ONE process (shared userspace allocator
 # corruption) but run fine across processes -> no lock, true concurrency. shm layout <-> q6a_detector.py.
@@ -83,6 +90,7 @@ def load_camera_profile(model):
     bounds, and the ready-made CCM). Returns True if a profile was found."""
     global W, H, STRIDE, FRAME, OUT_W, OUT_H, BAYER, RX, RY, BX, BY, MBUS_CODE, PIXFMT, ENTITY_MATCH
     global BLACK_LEVEL, WB_R, WB_G, WB_B, AE_TARGET, AE_MIN_EXP, AE_MAX_EXP, GAIN_MAX, CCM_MATRICES, CCM_CT
+    global AWB_RMIN, AWB_RMAX, AWB_BMIN, AWB_BMAX
     path = os.path.join(PROFILES_DIR, f"{model}.json")
     if not os.path.exists(path):
         print(f"no camera profile {path}; using built-in defaults ({W}x{H} {BAYER})", flush=True); return False
@@ -100,6 +108,9 @@ def load_camera_profile(model):
     ae = p.get("ae", {})
     AE_TARGET = float(ae.get("target", AE_TARGET)); AE_MIN_EXP = int(ae.get("min_exposure", AE_MIN_EXP))
     AE_MAX_EXP = int(ae.get("max_exposure", AE_MAX_EXP)); GAIN_MAX = int(ae.get("gain_max", GAIN_MAX))
+    awb = p.get("awb", {})
+    if "r_gain" in awb: AWB_RMIN, AWB_RMAX = (float(x) for x in awb["r_gain"])
+    if "b_gain" in awb: AWB_BMIN, AWB_BMAX = (float(x) for x in awb["b_gain"])
     ccm = p.get("ccm", {})
     if ccm.get("matrices"):
         CCM_MATRICES = sorted(((int(m["ct"]), list(m["ccm"])) for m in ccm["matrices"]), key=lambda e: e[0])
@@ -241,6 +252,34 @@ def auto_exposure(buf):
         subprocess.run(["v4l2-ctl", "-d", SENSOR_SD, "--set-ctrl", f"analogue_gain={GAIN}"], check=False)
     if new_exp != EXPOSURE:
         EXPOSURE = new_exp; _set_exposure(EXPOSURE)
+
+_AWB_N = 0
+def auto_wb(buf):
+    """Damped, constrained gray-world AWB from the packed RAW10 high bytes. Every ~8 frames, estimate the
+    per-Bayer-channel MEDIANS (robust to bright/coloured spots), take the gray-world WB that equalises them,
+    and move WB_R/WB_B a small fraction toward it (clamped to a plausible range). Tracks the illuminant
+    (day<->evening) without flicker. WB is a software gain the GPU reads each frame, so no sensor reconfig."""
+    global WB_R, WB_B, _AWB_N
+    if not AWB_ON:
+        return
+    _AWB_N += 1
+    if _AWB_N % 8:
+        return
+    a = np.frombuffer(buf, np.uint8)[:STRIDE * H].reshape(H, STRIDE)[:, :W * 10 // 8].reshape(H, W // 4, 5)
+    h = a[:, ::4, :4].astype(np.float32) * 4.0     # subsample groups -> ~10-bit level per pixel (high byte<<2)
+    bR = BLACK_RGB[0] if BLACK_RGB else BLACK_LEVEL
+    bG = BLACK_RGB[1] if BLACK_RGB else BLACK_LEVEL
+    bB = BLACK_RGB[2] if BLACK_RGB else BLACK_LEVEL
+    Rm = float(np.median(h[RY::2][:, :, RX::2])) - bR       # per-channel medians by CFA position
+    Bm = float(np.median(h[BY::2][:, :, BX::2])) - bB
+    Gm = (float(np.median(h[BY::2][:, :, RX::2])) + float(np.median(h[RY::2][:, :, BX::2]))) / 2 - bG
+    if Gm < 8 or Rm < 4 or Bm < 4:                 # too dark to estimate WB reliably -> hold
+        return
+    tR = min(max(Gm / Rm, AWB_RMIN), AWB_RMAX)     # gray-world target, clamped to a plausible illuminant range
+    tB = min(max(Gm / Bm, AWB_BMIN), AWB_BMAX)
+    alpha = 0.30 if _AWB_N < 8 * 10 else AWB_ALPHA # fast initial lock (~1 s), then slow flicker-free tracking
+    WB_R += alpha * (tR - WB_R)
+    WB_B += alpha * (tB - WB_B)
 
 def unpack_raw10(buf):
     """MIPI RAW10 packed -> uint16 Bayer (H, W). 4px in 5 bytes; b4 holds the 4x2 LSBs."""
@@ -534,12 +573,13 @@ def capture_loop(rdi, full):
             if data is not None and len(data) == FRAME:
                 try:
                     auto_exposure(data)          # nudge sensor exposure/gain (real AE, no-op if --no-ae)
+                    auto_wb(data)                # track the illuminant (damped gray-world, no-op if --no-awb)
                 except Exception as e:
-                    print("AE error (non-fatal):", e, flush=True)   # never let AE crash the capture -> reinit
+                    print("AE/AWB error (non-fatal):", e, flush=True)  # never crash the capture -> reinit
                 process(data, full)
                 _hbn += 1                        # heartbeat: server-side publish rate (server froze? -> 0)
                 if _t.time() - _hbt >= 2.0:
-                    print(f"[hb] publish {_hbn/(_t.time()-_hbt):.0f} fps jseq={State.jseq} clients={State.clients} jpeg={0 if State.jpeg is None else len(State.jpeg)//1024}KB", flush=True)
+                    print(f"[hb] publish {_hbn/(_t.time()-_hbt):.0f} fps jseq={State.jseq} clients={State.clients} jpeg={0 if State.jpeg is None else len(State.jpeg)//1024}KB exp={EXPOSURE} wb=({WB_R:.2f},{WB_B:.2f})", flush=True)
                     _hbn = 0; _hbt = _t.time()
         except Exception as e:
             print("capture error (v4l2):", e, flush=True)
@@ -655,6 +695,7 @@ if __name__ == "__main__":
     ap.add_argument("--calibrate-dark", action="store_true", help="dark-frame black calibration (COVER THE LENS): measures per-channel black to fix the brightness-dependent color cast; then re-run --calibrate")
     ap.add_argument("--no-yolo", action="store_true", help="disable the NPU YOLO detection overlay")
     ap.add_argument("--no-ae", action="store_true", help="disable sensor auto-exposure (use the fixed --exposure/--gain). AE nudges real integration time so bright scenes don't clip; --exposure is just the starting point.")
+    ap.add_argument("--no-awb", action="store_true", help="disable auto white balance (use the profile/calibration WB fixed). AWB tracks the illuminant (day<->evening) so color doesn't drift; damped + clamped, no flicker.")
     ap.add_argument("--camera-model", default="imx296", help="profiles/<model>.json to load all sensor config from (geometry, CFA, format, defaults, AE, CCM). Add a camera = add a profile.")
     ap.add_argument("--ccm-ct", type=int, default=None, help="override the profile's CCM colour temperature (K) (2500=warm .. 7400=daylight)")
     ap.add_argument("--no-ccm", action="store_true", help="disable the ready-made color-correction matrix")
@@ -666,7 +707,7 @@ if __name__ == "__main__":
     args = ap.parse_args()
     DESTRIPE = args.destripe
     YOLO_FPS = args.yolo_fps
-    AE_ON = not args.no_ae
+    AE_ON = not args.no_ae; AWB_ON = not args.no_awb
     CAMERA_MODEL = args.camera_model; CCM_ON = not args.no_ccm
     load_camera_profile(CAMERA_MODEL)              # sets geometry/format/defaults/AE/CCM from profiles/<model>.json
     if args.ccm_ct is not None: CCM_CT = args.ccm_ct   # CLI colour-temp overrides the profile default

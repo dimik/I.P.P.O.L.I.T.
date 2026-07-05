@@ -27,6 +27,12 @@
     "gain_analog_max": 240
   },
 
+  "awb": {
+    "_comment": "Auto white balance gain clamp (damped gray-world). Green-dominant Bayer -> R/B gains > 1; range covers tungsten..daylight for this sensor.",
+    "r_gain": [1.2, 3.2],
+    "b_gain": [1.2, 4.2]
+  },
+
   "ccm": {
     "_comment": "Lab-calibrated color-correction matrices from Raspberry Pi's IMX296 libcamera tuning (rpi.ccm, src/ipa/rpi/vc4/data/imx296.json). Interpolated to `ct` at load. Rows sum to ~1 (neutral-preserving).",
     "ct": 3600,
