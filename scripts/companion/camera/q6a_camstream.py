@@ -359,7 +359,7 @@ if __name__ == "__main__":
     ap.add_argument("--cam", type=int, default=2, choices=(2, 3))
     ap.add_argument("--port", type=int, default=8092)
     ap.add_argument("--fast", action="store_true", help="half-res debayer (faster, softer); default is full-res")
-    ap.add_argument("--exposure", type=int, default=6000, help="sensor exposure (lines); higher=brighter+more motion blur")
+    ap.add_argument("--exposure", type=int, default=3000, help="sensor exposure (lines); LOWER=higher fps (frame length scales with exposure) but noisier in dim light. 3000~21fps, 6000~13fps")
     ap.add_argument("--gain", type=int, default=200, help="analogue gain 0..480 (0.1dB); higher=brighter+noisier")
     ap.add_argument("--calibrate", action="store_true", help="capture a flat-field color profile (aim at a white/gray surface)")
     ap.add_argument("--no-yolo", action="store_true", help="disable the NPU YOLO detection overlay")
