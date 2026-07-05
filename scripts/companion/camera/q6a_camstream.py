@@ -47,7 +47,7 @@ SENSOR_SD = None                              # sensor subdev path (discovered i
 EXPOSURE = 3000; GAIN = 240                   # current sensor exposure (lines) / gain (ctrl); AE updates these
 AE_ON = True                                  # runtime sensor auto-exposure
 AE_TARGET = 70.0                              # target raw high-byte MEDIAN (robust to dark corners + bright window)
-AE_MIN_EXP = 30; AE_MAX_EXP = 4000            # exposure clamp (lines); cap keeps fps >=~24 + out of the deep-noise regime
+AE_MIN_EXP = 30; AE_MAX_EXP = 3000            # exposure clamp (lines); VMAX fixed here -> ~32fps, no vblank churn; cap keeps fps >=~24 + out of the deep-noise regime
 # YOLO runs in a SEPARATE PROCESS (q6a_detector.py) sharing frames via shared memory. The Adreno (GPU
 # ISP) and Hexagon (NPU) crash if driven concurrently in ONE process (shared userspace allocator
 # corruption) but run fine across processes -> no lock, true concurrency. shm layout <-> q6a_detector.py.
@@ -149,22 +149,23 @@ def setup_pipeline(cam, exposure, gain):
             SENSOR_SD = sd
             # frame length = H + vblank must be >= exposure; use the MINIMUM -> max fps at this exposure
             # (no noise cost). The old "exposure+200" padded the frame ~1.4x longer than needed.
-            vblank = max(30, exposure - H + 64)
+            # Fix VMAX for the AE ceiling so AE only ever changes exposure (no mid-stream vblank churn ->
+            # no per-frame timing glitch / motion 'snow'). fps is then fixed at this VMAX rate (~32).
+            vb_exp = AE_MAX_EXP if AE_ON else exposure
+            vblank = max(30, vb_exp - H + 64)
             for c, v in [("exposure", 100), ("vertical_blanking", vblank), ("exposure", exposure),
                          ("analogue_gain", gain)]:
                 subprocess.run(["v4l2-ctl", "-d", sd, "--set-ctrl", f"{c}={v}"], check=False)
     return rdi
 
 def _set_exposure(exp):
-    """Set sensor integration time (lines) + track vblank so the frame length stays minimal (max fps).
-    Set vblank (VMAX) THEN exposure in one call (v4l2-ctl applies left-to-right) so exposure never exceeds
-    VMAX. NB: do NOT stage a tiny exposure=100 first — that emits one near-black frame that the tone-map
-    amplifies into a full-screen 'snow' flash on every AE adjustment."""
+    """Set ONLY the sensor integration time (SHS1 via the exposure control). VMAX/vblank is fixed once at
+    setup (for AE_MAX_EXP), so exposure changes are clean per-frame latches. Changing vblank (frame length)
+    mid-stream reconfigures the sensor timing and glitches one frame -> full-screen 'snow' on movement
+    (motion -> AE adjusts frequently). Exposure-only avoids that; fps is then fixed at the VMAX rate."""
     if SENSOR_SD is None:
         return
-    vblank = max(30, exp - H + 64)
-    subprocess.run(["v4l2-ctl", "-d", SENSOR_SD, "--set-ctrl",
-                    f"vertical_blanking={vblank},exposure={exp}"], check=False)
+    subprocess.run(["v4l2-ctl", "-d", SENSOR_SD, "--set-ctrl", f"exposure={exp}"], check=False)
 
 _AE_N = 0
 def auto_exposure(buf):
