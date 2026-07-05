@@ -84,6 +84,8 @@ __kernel void isp(__global const uchar* pk, __global const float* shade, __globa
     R = 255.0f*native_powr(clamp(R*scale/255.0f, 0.0f, 1.0f), GAMMA);   // tone map: scale to target + gamma
     G = 255.0f*native_powr(clamp(G*scale/255.0f, 0.0f, 1.0f), GAMMA);
     B = 255.0f*native_powr(clamp(B*scale/255.0f, 0.0f, 1.0f), GAMMA);
+    float sh = clamp((SHKNEE - G)/SHKNEE, 0.0f, 1.0f);                  // shadow green comp: pull R,B up TOWARD G
+    R += SHR*sh*fmax(0.0f, G-R); B += SHB*sh*fmax(0.0f, G-B);           // (only when below G -> reduces green, never magenta)
     out[o]=(uchar)clamp(R+0.5f,0.0f,255.0f); out[o+1]=(uchar)clamp(G+0.5f,0.0f,255.0f); out[o+2]=(uchar)clamp(B+0.5f,0.0f,255.0f);
 }
 // 2x2 BINNED ISP: one output pixel per Bayer quad (uses real photosites, averages the 2 greens ->
@@ -118,6 +120,8 @@ __kernel void isp_bin(__global const uchar* pk, __global const float* shade, __g
         float dr = (drow[oy*3]+drow[oy*3+1]+drow[oy*3+2]) * 0.3333333f;
         ro -= dc+dr; go -= dc+dr; bo -= dc+dr;
     }
+    float sh = clamp((SHKNEE - go)/SHKNEE, 0.0f, 1.0f);            // shadow green comp: pull R,B up TOWARD G
+    ro += SHR*sh*fmax(0.0f, go-ro); bo += SHB*sh*fmax(0.0f, go-bo); // (only when below G -> reduces green, never magenta)
     out[o]  =(uchar)clamp(ro+0.5f,0.0f,255.0f);
     out[o+1]=(uchar)clamp(go+0.5f,0.0f,255.0f);
     out[o+2]=(uchar)clamp(bo+0.5f,0.0f,255.0f);
@@ -159,14 +163,16 @@ __kernel void destripe_sub(__global uchar* im, __global const float* dcol, __glo
 
 
 class GpuDemosaic:
-    def __init__(self, W, H, bayer=(1, 1, 0, 0), gamma=0.7):
+    def __init__(self, W, H, bayer=(1, 1, 0, 0), gamma=0.7, shadow=(110.0, 0.0, 0.0)):
         self.W, self.H = W, H
         dev = cl.get_platforms()[0].get_devices()[0]
         self.ctx = cl.Context(devices=[dev])
         self.q = cl.CommandQueue(self.ctx)
         rx, ry, bx, by = bayer                                # R/B pixel positions in the 2x2 (BGGR=(1,1,0,0))
-        # compile-time constants: Bayer offsets + tone-map GAMMA (single source of truth for the tone curve)
-        defs = f"#define BRX {rx}\n#define BRY {ry}\n#define BBX {bx}\n#define BBY {by}\n#define GAMMA {gamma}f\n"
+        skn, sr, sb = shadow                                  # shadow green compensation: knee, R-pull, B-pull
+        # compile-time constants: Bayer offsets, tone GAMMA, shadow green-comp (single source of truth)
+        defs = (f"#define BRX {rx}\n#define BRY {ry}\n#define BBX {bx}\n#define BBY {by}\n#define GAMMA {gamma}f\n"
+                f"#define SHKNEE {skn}f\n#define SHR {sr}f\n#define SHB {sb}f\n")
         self.prg = cl.Program(self.ctx, defs + _SRC).build(options=["-cl-fast-relaxed-math"])
         self.knl = cl.Kernel(self.prg, "demosaic")     # build once, reuse (avoid per-call retrieval)
         self.isp_knl = cl.Kernel(self.prg, "isp")

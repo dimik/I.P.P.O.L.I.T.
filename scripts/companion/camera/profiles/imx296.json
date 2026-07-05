@@ -39,6 +39,13 @@
     "target_mean": 95.0
   },
 
+  "shadow_tint": {
+    "_comment": "Shadow green compensation (sensor low-light characteristic): R,B fall off faster than G at low signal, so shadows go green even at correct WB. In dark output pixels, pull R,B up toward G (only when below it -> reduces green, never magenta), tapering to 0 by 'knee' (output-green 0..255). r/b = fraction of the G-gap closed in deep shadow.",
+    "knee": 110,
+    "r": 0.4,
+    "b": 0.4
+  },
+
   "shading": {
     "_comment": "Post-processing for the calibrated radial shade map (imx296_wb.npz -> 'shade'). This fisheye has heavy corner vignetting + colour shading; the grey-card fit over-corrects the dark noisy corners into blue/magenta 'trash'. Smooth the grid to kill per-cell spikes, keep 85% of the colour correction, and clamp both the colour ratio and the vignetting gain so no corner cell over-tints or over-amplifies. Omit this section for a generic pass-through.",
     "smooth": 3,

@@ -61,6 +61,11 @@ SENSOR_BIN = False                            # sensor 2x2 FD binning (charge-do
 TARGET_MEAN = 95.0                            # tone-map target brightness (DISPLAY, digital — see AE below)
 TONEMAP_GAMMA = 0.7                           # tone-curve gamma (single source of truth; profile "tonemap.gamma",
                                               # applied on the GPU (#define GAMMA) and the CPU-fallback LUT)
+# Shadow green compensation (SENSOR low-light characteristic; profile "shadow_tint"). This sensor's R,B
+# response falls off faster than G at low signal -> shadows go green even at correct WB. In dark output
+# pixels, pull R,B UP toward G (only when below it -> reduces green, never magenta), tapering to 0 by the knee.
+SHADOW_KNEE = 110.0                           # output-green level below which the comp ramps in (0..255)
+SHADOW_R = 0.0; SHADOW_B = 0.0                # strength: fraction of the (G - channel) gap closed in deep shadow
 # --- Sensor auto-exposure (real integration-time control, not the digital tone-map) ---
 # The tone-map only rescales the DISPLAY; it can't recover raw pixels that clipped at 1023 in bright light.
 # AE nudges the sensor exposure (lines) — and gain at the extremes — so the raw stays well-exposed with
@@ -118,6 +123,7 @@ def load_camera_profile(model):
     global BLACK_LEVEL, WB_R, WB_G, WB_B, AE_TARGET, AE_MIN_EXP, AE_MAX_EXP, GAIN_MAX, GAIN_ANALOG_MAX, CCM_MATRICES, CCM_CT
     global AWB_RMIN, AWB_RMAX, AWB_BMIN, AWB_BMAX
     global SHADE_CHROMA, SHADE_CHROMA_CLAMP, SHADE_GAIN_CLAMP, SHADE_SMOOTH, TARGET_MEAN, TONEMAP_GAMMA, _GAMMA_LUT
+    global SHADOW_KNEE, SHADOW_R, SHADOW_B
     path = os.path.join(PROFILES_DIR, f"{model}.json")
     if not os.path.exists(path):
         print(f"no camera profile {path}; using built-in defaults ({W}x{H} {BAYER})", flush=True); return False
@@ -142,6 +148,8 @@ def load_camera_profile(model):
     tm = p.get("tonemap", {})              # display tone curve
     TARGET_MEAN = float(tm.get("target_mean", TARGET_MEAN)); TONEMAP_GAMMA = float(tm.get("gamma", TONEMAP_GAMMA))
     _GAMMA_LUT = (255.0 * (np.arange(256) / 255.0) ** TONEMAP_GAMMA).astype(np.uint8)   # rebuild CPU LUT
+    st = p.get("shadow_tint", {})          # shadow green compensation (sensor low-light R,B falloff)
+    SHADOW_KNEE = float(st.get("knee", SHADOW_KNEE)); SHADOW_R = float(st.get("r", SHADOW_R)); SHADOW_B = float(st.get("b", SHADOW_B))
     sh = p.get("shading", {})              # lens shade-map post-processing (see load_profile)
     SHADE_CHROMA = float(sh.get("chroma", SHADE_CHROMA))
     if "chroma_clamp" in sh: SHADE_CHROMA_CLAMP = tuple(float(x) for x in sh["chroma_clamp"])
@@ -174,7 +182,8 @@ def init_gpu():
     global GPU
     try:
         from q6a_gpu import GpuDemosaic
-        GPU = GpuDemosaic(W, H, bayer=(RX, RY, BX, BY), gamma=TONEMAP_GAMMA)
+        GPU = GpuDemosaic(W, H, bayer=(RX, RY, BX, BY), gamma=TONEMAP_GAMMA,
+                          shadow=(SHADOW_KNEE, SHADOW_R, SHADOW_B))
         GPU.set_shade(SHADE)                   # upload color-shading map once (if a profile is loaded)
         GPU.set_ccm(load_ccm(CCM_CT) if CCM_ON else None)   # ready-made color matrix (profile)
         stages = "demosaic+WB" + ("+AWB" if AWB_ON else "") + ("+CCM" if CCM_ON else "") \
