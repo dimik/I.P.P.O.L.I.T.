@@ -207,7 +207,8 @@ person to aim the camera at a uniform surface).
 | `--gpu --bin` (no destripe) | 32.2 | 47 °C | fastest/coolest |
 | `--gpu` (full-res, no destripe) | 22.0 | 49 °C | full 1456×1088 |
 
-**~3 → ~32 fps** live, full detection, CPU near-idle (load 0.15). Default: `--gpu --bin --destripe --gain 380`.
+**~3 → ~32 fps** live, full detection, CPU near-idle (load 0.15). Default: `--gpu --bin --destripe`
+(gain 240, YOLO capped 10 fps). Further pipeline optimization + Venus/zero-copy investigation: **§8**.
 
 ### The vblank win (biggest free gain)
 The IMX296 does **60 fps at full res** — our cap was never the sensor, it was `frame_length`. Frame length =
@@ -295,34 +296,51 @@ Not fixable without the confidential datasheet. **Investigation closed.** Stock 
 
 ## 8. Pipeline optimization — demosaic + JPEG wall (2026-07-05)
 
-Profiled the GPU-bin pipeline per stage (728×544 out) to attack the throughput ceiling:
+Profiled the GPU-bin pipeline per stage (728×544 out) and optimized it. Net result: the **bright-light
+pipeline ceiling rose ~54 → ~76 fps**, and — more valuable for a passively-cooled robot — **indoor draw
+dropped from ~60 °C to ~52 °C at the same (exposure-limited) 31 fps**, because the GPU now does far less work.
 
-| Stage | Before | After | note |
-|---|---:|---:|---|
-| GPU `isp_bin` (demosaic+WB+tonemap) | 10.3 ms | 10.2 ms | latency-bound (see below) |
-| GPU destripe (FPN col/row) | 4.9 ms | **0.76 ms** | amortized — recompute correction every 8 frames |
-| shm frame memcpy | 0.09 ms | 0.09 ms | negligible |
-| JPEG encode (libjpeg-turbo, q75) | 2.7–3.2 ms | 2.7 ms | already NEON SIMD |
-| **serial total** | **18.5 ms (54 fps)** | **13.5 ms (74 fps)** | |
+| Optimization | Effect | Status |
+|---|---|---|
+| **Destripe fused into the demosaic kernel** | destripe 5.7 ms → **0.6 ms** (real loop 54 → 73 fps) | shipped |
+| **`native_powr` tonemap + `-cl-fast-relaxed-math`** | `isp_bin` kernel 10.3 → 7.2 ms (`pow` is Qualcomm's costliest math class) | shipped |
+| Non-blocking host↔device copies (single `finish`/frame) | tiny | shipped |
+| Destripe col/row correction recompute every 8 frames (static FPN) | avoids the per-frame reduction | shipped (folded into fusion) |
 
-**Destripe amortization (shipped).** FPN column/row banding is *static* per sensor/gain, so the correction
-barely changes frame-to-frame. `GpuDemosaic` now recomputes the col/row correction (the expensive
-`col_sum`+`row_sum`+`corr` reductions) only every `destripe_period` (=8) frames and applies the cached
-correction (`destripe_sub`) every frame → **destripe 4.9 → 0.76 ms**, verified no brightness pumping
-(per-frame mean std 0.23 over 20 frames).
+**Destripe fusion (the big one).** FPN column/row banding is *static*, so instead of a separate full-image
+`destripe_sub` pass every frame (a 2nd GPU kernel submission ≈ 5.7 ms in this latency-bound regime), the
+cached col/row correction is now **subtracted inline in the `isp_bin` output write**. Every 8th frame the
+kernel renders *without* destripe and the correction is recomputed from that raw frame for the next 8 (the
+one un-destriped frame per period is imperceptible; verified per-frame mean std 0.18, no pumping). Destripe
+went from a 24 fps tax to ~3.5 fps.
 
-**The `isp_bin` 10 ms is submission latency, not compute.** Micro-profiling the sub-steps *pipelined* (tight
-loop, one `finish` at the end) gives: upload packed 1.98 MB = 1.4 ms, kernel = 1.4 ms, readback 1.19 MB =
-0.7 ms → **~3.4 ms of real work**. The per-frame figure is ~10 ms because the Adreno **power-gates between
-frames** at 32 fps (≈21 ms idle gap) and pays a wakeup/submit latency on each `q.finish()`. Consequences:
-- **fp16 and zero-copy have low ROI here** — they'd shave the 3.4 ms compute, not the ~7 ms wakeup latency.
-  They only help when the GPU is kept busy (bright light / higher fps), where the per-frame amortizes toward
-  3.4 ms. Keeping the GPU warm with filler work would cut latency but *raise* heat — wrong trade for a
-  passively-cooled robot. So the latency is accepted; it's invisible indoors (exposure-limited to 32 fps,
-  and the pipeline ceiling is now 74 fps — 2× headroom).
-- Made the host↔device copies non-blocking (`is_blocking=False`) + a single `finish`/frame (tiny win).
+**The `isp_bin` per-frame time is submission latency, not compute.** Micro-profiling the sub-steps *pipelined*
+(tight loop, one `finish`): upload 1.98 MB = 1.4 ms, kernel = 1.4 ms, readback 1.19 MB = 0.7 ms → **~3.4 ms
+of real work**; the ~10 ms per-frame figure is Adreno **power-gating between frames** at 32 fps (≈21 ms idle
+gap) paying a wakeup/submit latency on each `finish()`. This reframes the whole optimization space:
+- **fp16 / zero-copy have low ROI** — they shave the 3.4 ms compute, not the ~6.6 ms wakeup latency. They
+  only help when the GPU is kept busy (bright light). Zero-copy IS feasible here (`cl_qcom_dmabuf_host_ptr`
+  is advertised → import a V4L2 `VIDIOC_EXPBUF` dmabuf as a `cl_mem` via a ctypes shim, `CL_MEM_DMABUF_HOST_PTR_QCOM`
+  0x411D + page-align + `EXT_MEM_PADDING`), but not worth the effort given the latency-bound profile.
+- **Pinning the GPU clock** (devfreq `userspace` @ 812 MHz vs `simple_ondemand`) gained only ~0.8 ms and
+  raises idle heat — rejected for the passive-cooled robot.
+- The driver even exposes `CL_QCOM_UNORM_MIPI10`/`CL_QCOM_BAYER` image formats (hardware RAW10 unpack +
+  bilinear) and `cl_qcom_vector_image_ops` `qcom_read_imagef_2x2` — a future kernel rewrite could use them,
+  but again the win is on the latency-hidden compute. (Ref: Qualcomm OpenCL guide 80-NB295-11.)
 
-**JPEG is already optimal on CPU.** Pillow here links **libjpeg-turbo** (NEON SIMD) → 2.7 ms for 728×544;
-not worth replacing. The real encode lever is the **Venus H.264 hardware encoder** (`/dev/video17`) — it
-would remove JPEG from the CPU entirely *and* cut stream bandwidth ~10× (MJPEG ~60 KB/frame vs H.264
-~a few KB) — see the Venus investigation below.
+**JPEG is already optimal on CPU.** Pillow links **libjpeg-turbo** (NEON) → 2.7 ms for 728×544. There is
+**no hardware JPEG on mainline** (not in Venus `venc_formats`, not in camss, no GPU/DSP path) — confirmed.
+Keep libjpeg-turbo.
+
+**Venus H.264 hardware encoder — CONFIRMED it hard-reboots this board.** `/dev/video17` (`qcom-venus`)
+enumerates NV12→H264/HEVC and the driver is healthy, but calling `v4l2h264enc` **instantly reset the board**
+(uptime 17374 s → 135 s; last log `qcom-venus: non legacy binding`). Root cause (confirmed on the Radxa
+forum + linux-media): on sc7280/QCS6490 non-ChromeOS boards Venus firmware loads via TrustZone secure PIL,
+and encode-start trips the hypervisor memory gate → reset. **Fix requires physical UEFI access we can't do
+remotely:** update SPI boot firmware to ≥ `6.0.260120` **and** set UEFI → Hypervisor Settings → *Hypervisor
+Override = Enabled* (the "auto" default reboots). Even fixed, Venus is a **bandwidth** win (inter-frame
+H.264 ≈ 5–20× smaller than MJPEG) **not a latency/fps win** (HW encode ≈ 4–5 ms + 1 frame of M2M pipeline
+delay — worse than our 3 ms MJPEG). So it's a future option for slashing stream bandwidth over the link,
+gated on a firmware/UEFI change; it does nothing for the demosaic+JPEG throughput wall. NV12 input needs
+128-wide / 32-high alignment (728→768 stride, 1456→1536). (Refs: Radxa forum "encoder reboot" thread;
+kernel stateful-encoder API; FFmpeg `v4l2_m2m_enc.c`.)

@@ -71,16 +71,17 @@ __kernel void isp(__global const uchar* pk, __global const float* shade, __globa
     R*=wr; G*=wg; B*=wb;
     int o = (y*W + x)*3;
     if (use_shade){ R*=shade[o]; G*=shade[o+1]; B*=shade[o+2]; }
-    R = 255.0f*pow(clamp(R*scale/255.0f, 0.0f, 1.0f), 0.7f);   // tone map: scale to target + gamma
-    G = 255.0f*pow(clamp(G*scale/255.0f, 0.0f, 1.0f), 0.7f);
-    B = 255.0f*pow(clamp(B*scale/255.0f, 0.0f, 1.0f), 0.7f);
+    R = 255.0f*native_powr(clamp(R*scale/255.0f, 0.0f, 1.0f), 0.7f);   // tone map: scale to target + gamma
+    G = 255.0f*native_powr(clamp(G*scale/255.0f, 0.0f, 1.0f), 0.7f);
+    B = 255.0f*native_powr(clamp(B*scale/255.0f, 0.0f, 1.0f), 0.7f);
     out[o]=(uchar)(R+0.5f); out[o+1]=(uchar)(G+0.5f); out[o+2]=(uchar)(B+0.5f);
 }
 // 2x2 BINNED ISP: one output pixel per Bayer quad (uses real photosites, averages the 2 greens ->
 // ~2x less noise, no demosaic interpolation) + WB + tone map. Output is half-res (OW=W/2, OH=H/2).
 __kernel void isp_bin(__global const uchar* pk, __global uchar* out,
                       const int W, const int H, const int OW, const int OH, const int S, const float bl,
-                      const float wr, const float wg, const float wb, const float scale){
+                      const float wr, const float wg, const float wb, const float scale,
+                      __global const float* dcol, __global const float* drow, const int use_ds){
     int ox = get_global_id(0), oy = get_global_id(1);
     if (ox >= OW || oy >= OH) return;
     int x = ox*2, y = oy*2;
@@ -89,9 +90,17 @@ __kernel void isp_bin(__global const uchar* pk, __global uchar* out,
     float R = bget_packed(pk, x+1, y+1, W, H, S, bl);
     R*=wr; G*=wg; B*=wb;
     int o = (oy*OW + ox)*3;
-    out[o]  =(uchar)(255.0f*pow(clamp(R*scale/255.0f,0.0f,1.0f),0.7f)+0.5f);
-    out[o+1]=(uchar)(255.0f*pow(clamp(G*scale/255.0f,0.0f,1.0f),0.7f)+0.5f);
-    out[o+2]=(uchar)(255.0f*pow(clamp(B*scale/255.0f,0.0f,1.0f),0.7f)+0.5f);
+    float ro=255.0f*native_powr(clamp(R*scale/255.0f,0.0f,1.0f),0.7f);
+    float go=255.0f*native_powr(clamp(G*scale/255.0f,0.0f,1.0f),0.7f);
+    float bo=255.0f*native_powr(clamp(B*scale/255.0f,0.0f,1.0f),0.7f);
+    if (use_ds){                                                   // FPN destripe fused inline (no 2nd pass)
+        ro -= dcol[ox*3]  +drow[oy*3];
+        go -= dcol[ox*3+1]+drow[oy*3+1];
+        bo -= dcol[ox*3+2]+drow[oy*3+2];
+    }
+    out[o]  =(uchar)clamp(ro+0.5f,0.0f,255.0f);
+    out[o+1]=(uchar)clamp(go+0.5f,0.0f,255.0f);
+    out[o+2]=(uchar)clamp(bo+0.5f,0.0f,255.0f);
 }
 // destripe (FPN) on the uint8 image, all on GPU: column/row sums -> (CPU smooths) -> subtract
 __kernel void col_sum(__global const uchar* im, __global int* cs, const int OW, const int OH){
@@ -135,7 +144,7 @@ class GpuDemosaic:
         dev = cl.get_platforms()[0].get_devices()[0]
         self.ctx = cl.Context(devices=[dev])
         self.q = cl.CommandQueue(self.ctx)
-        self.prg = cl.Program(self.ctx, _SRC).build()
+        self.prg = cl.Program(self.ctx, _SRC).build(options=["-cl-fast-relaxed-math"])
         self.knl = cl.Kernel(self.prg, "demosaic")     # build once, reuse (avoid per-call retrieval)
         self.isp_knl = cl.Kernel(self.prg, "isp")
         self.isp_bin_knl = cl.Kernel(self.prg, "isp_bin")
@@ -176,17 +185,32 @@ class GpuDemosaic:
         self._dstr_ctr += 1
         self.destripe_knl(self.q, (ow, oh), None, d_u8, self.d_dcol, self.d_drow, np.int32(ow), np.int32(oh))
 
+    def _refresh_destripe(self, d_u8, ow, oh, win=41):
+        """Recompute the FPN col/row correction (d_dcol/d_drow) from a RAW (un-destriped) frame.
+        Called every destripe_period frames; the correction is then applied inline by the isp_bin kernel."""
+        self.col_sum_knl(self.q, (ow, 3), None, d_u8, self.d_colsum, np.int32(ow), np.int32(oh))
+        self.row_sum_knl(self.q, (oh, 3), None, d_u8, self.d_rowsum, np.int32(ow), np.int32(oh))
+        self.corr_knl(self.q, (ow, 3), None, self.d_colsum, self.d_dcol, np.int32(ow), np.int32(oh), np.int32(win))
+        self.corr_knl(self.q, (oh, 3), None, self.d_rowsum, self.d_drow, np.int32(oh), np.int32(ow), np.int32(win))
+
     def isp_bin(self, packed, stride, bl, wr, wg, wb, scale, destripe=False):
-        """2x2 binned ISP from PACKED RAW10 bytes -> (H/2,W/2,3) uint8 (unpack on GPU; lower noise)."""
-        # non-blocking copies on the in-order queue (ordering guaranteed) + a single finish at the end:
-        # avoids two per-frame host<->device sync points (blocking is pyopencl's enqueue_copy default).
+        """2x2 binned ISP from PACKED RAW10 bytes -> (H/2,W/2,3) uint8 (unpack on GPU; lower noise).
+        Destripe is FUSED into the kernel: the cached col/row FPN correction is subtracted inline in the
+        output write (no separate full-image pass). On every `destripe_period`-th frame the kernel renders
+        WITHOUT destripe and the correction is recomputed from that raw frame for the next N frames (a
+        static-FPN approximation; the one un-destriped frame per period is imperceptible)."""
         cl.enqueue_copy(self.q, self.d_in, np.frombuffer(packed, np.uint8), is_blocking=False)
+        refresh = destripe and (self._dstr_ctr % self.destripe_period == 0)
+        use_ds = 1 if (destripe and not refresh) else 0
         self.isp_bin_knl(self.q, (self.OW, self.OH), None, self.d_in, self.d_u8_bin,
                          np.int32(self.W), np.int32(self.H), np.int32(self.OW), np.int32(self.OH),
                          np.int32(stride), np.float32(bl),
-                         np.float32(wr), np.float32(wg), np.float32(wb), np.float32(scale))
+                         np.float32(wr), np.float32(wg), np.float32(wb), np.float32(scale),
+                         self.d_dcol, self.d_drow, np.int32(use_ds))
         if destripe:
-            self._apply_destripe(self.d_u8_bin, self.OW, self.OH)
+            self._dstr_ctr += 1
+            if refresh:
+                self._refresh_destripe(self.d_u8_bin, self.OW, self.OH)   # for the next N frames
         cl.enqueue_copy(self.q, self.u8_bin, self.d_u8_bin, is_blocking=False)
         self.q.finish()
         return self.u8_bin
