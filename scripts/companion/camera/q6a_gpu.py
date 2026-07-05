@@ -78,9 +78,9 @@ __kernel void isp(__global const uchar* pk, __global const float* shade, __globa
 }
 // 2x2 BINNED ISP: one output pixel per Bayer quad (uses real photosites, averages the 2 greens ->
 // ~2x less noise, no demosaic interpolation) + WB + tone map. Output is half-res (OW=W/2, OH=H/2).
-__kernel void isp_bin(__global const uchar* pk, __global uchar* out,
+__kernel void isp_bin(__global const uchar* pk, __global const float* shade, __global uchar* out,
                       const int W, const int H, const int OW, const int OH, const int S, const float bl,
-                      const float wr, const float wg, const float wb, const float scale,
+                      const float wr, const float wg, const float wb, const float scale, const int use_shade,
                       __global const float* dcol, __global const float* drow, const int use_ds){
     int ox = get_global_id(0), oy = get_global_id(1);
     if (ox >= OW || oy >= OH) return;
@@ -89,6 +89,7 @@ __kernel void isp_bin(__global const uchar* pk, __global uchar* out,
     float G = 0.5f*(bget_packed(pk, x+1, y, W, H, S, bl) + bget_packed(pk, x, y+1, W, H, S, bl));
     float R = bget_packed(pk, x+1, y+1, W, H, S, bl);
     R*=wr; G*=wg; B*=wb;
+    if (use_shade){ int so=(y*W + x)*3; R*=shade[so]; G*=shade[so+1]; B*=shade[so+2]; }  // radial color-shading
     int o = (oy*OW + ox)*3;
     float ro=255.0f*native_powr(clamp(R*scale/255.0f,0.0f,1.0f),0.7f);
     float go=255.0f*native_powr(clamp(G*scale/255.0f,0.0f,1.0f),0.7f);
@@ -202,10 +203,12 @@ class GpuDemosaic:
         cl.enqueue_copy(self.q, self.d_in, np.frombuffer(packed, np.uint8), is_blocking=False)
         refresh = destripe and (self._dstr_ctr % self.destripe_period == 0)
         use_ds = 1 if (destripe and not refresh) else 0
-        self.isp_bin_knl(self.q, (self.OW, self.OH), None, self.d_in, self.d_u8_bin,
+        use_sh = 1 if self.d_shade is not None else 0
+        sh = self.d_shade if use_sh else self.d_in         # dummy (unused) buffer when no shade map
+        self.isp_bin_knl(self.q, (self.OW, self.OH), None, self.d_in, sh, self.d_u8_bin,
                          np.int32(self.W), np.int32(self.H), np.int32(self.OW), np.int32(self.OH),
                          np.int32(stride), np.float32(bl),
-                         np.float32(wr), np.float32(wg), np.float32(wb), np.float32(scale),
+                         np.float32(wr), np.float32(wg), np.float32(wb), np.float32(scale), np.int32(use_sh),
                          self.d_dcol, self.d_drow, np.int32(use_ds))
         if destripe:
             self._dstr_ctr += 1

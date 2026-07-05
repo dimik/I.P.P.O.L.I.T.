@@ -45,7 +45,7 @@ ssh "$Q6A" "[ -f /etc/OpenCL/vendors/adreno.icd ] || (sudo mkdir -p /etc/OpenCL/
 # the binned pixel payload never lands (no kernel error; sensor/CSID binning needs deeper RE, Sony's
 # binning registers are NDA). GPU digital --bin gives the same 728x544, works, and is faster. See docs.
 ssh "$Q6A" "ss -ltn 2>/dev/null | grep -q ":$PORT " || \
-  setsid python3 ~/q6a_camstream.py --cam $CAM --port $PORT --gpu --bin --destripe </dev/null >~/camstream.log 2>&1 &" || true
+  setsid python3 ~/q6a_camstream.py --cam $CAM --port $PORT --gpu --bin </dev/null >~/camstream.log 2>&1 &" || true
 sleep 3
 echo "   stream: http://$HOST_IP:$PORT/stream   (log: ssh $Q6A 'tail -f ~/camstream.log')"
 
