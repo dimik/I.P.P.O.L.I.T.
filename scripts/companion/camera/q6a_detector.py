@@ -11,13 +11,15 @@ Shared-memory layout (must match q6a_camstream.py):
   q6a_ctrl  : [0]=frame_seq u64  [8]=det_seq u64  [16]=det_count i32  [32:]=MAX_DET x 6 f32
               det row = (x1, y1, x2, y2, conf, class_idx)
 """
-import time
+import os, time
 import numpy as np
 from multiprocessing import shared_memory
 
 W, H = 1456, 1088
 MAX_DET = 32
 CTRL_OFF = 32
+DET_FPS = float(os.environ.get("Q6A_DET_FPS", "10"))   # 0 = unlimited (run at the NPU inference ceiling)
+MIN_PERIOD = (1.0 / DET_FPS) if DET_FPS > 0 else 0.0    # min seconds between inferences (NPU duty-cycle cap)
 
 
 def main():
@@ -48,15 +50,24 @@ def main():
     det = YoloDetector()
     labels = det.labels
     print("[detector] YOLO ready on NPU (separate process, no lock)", flush=True)
-    last = 0
+    print(f"[detector] rate cap: {DET_FPS:g} fps" if MIN_PERIOD else "[detector] rate: unlimited (NPU ceiling)", flush=True)
+    last = 0; t_prev = 0.0
     while True:
         s = int(fseq[0])
         if s == last:
             time.sleep(0.004); continue        # no new frame
+        # Rate cap: don't infer more than DET_FPS/s. We still always take the FRESHEST frame (frame-drop),
+        # just less often -> lower NPU duty (cooler, frees the HTP for the LLM) with no visual loss since the
+        # streamer persists the last boxes between updates.
+        if MIN_PERIOD:
+            wait = MIN_PERIOD - (time.time() - t_prev)
+            if wait > 0:
+                time.sleep(wait); continue     # loop back and re-read fseq -> newest frame after the wait
         last = s
         img = frame.copy()                      # snapshot
         if int(fseq[0]) != s:                   # streamer overwrote it mid-copy -> skip, grab next
             continue
+        t_prev = time.time()
         try:
             out = det.infer(img)                # NPU inference (concurrent with the GPU ISP process)
         except Exception as e:

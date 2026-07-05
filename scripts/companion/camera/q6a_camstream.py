@@ -39,6 +39,9 @@ TARGET_MEAN = 95.0                            # tone-map target brightness
 # corruption) but run fine across processes -> no lock, true concurrency. shm layout <-> q6a_detector.py.
 MAX_DET = 32; CTRL_OFF = 32; CTRL_SIZE = CTRL_OFF + MAX_DET * 6 * 4
 DET = None                                     # dict of shm views + the detector subprocess (None if disabled)
+YOLO_FPS = 10                                   # cap NPU YOLO to this rate (0=unlimited ~26fps). A slow robot
+                                               # doesn't need per-frame detection; boxes persist between updates,
+                                               # so 10fps frees the NPU (~60% idle -> cooler, shares HTP w/ the LLM).
 LABELS = [str(i) for i in range(80)]
 def init_gpu():
     global GPU
@@ -309,7 +312,8 @@ def init_detector():
            "dbuf": np.ndarray((MAX_DET, 6), np.float32, buffer=cshm.buf, offset=CTRL_OFF)}
     DET["fseq"][0] = 0; DET["dcnt"][0] = 0
     DET["ow"][0] = OUT_W; DET["oh"][0] = OUT_H          # publish output dims for the detector
-    proc = subprocess.Popen(["python3", os.path.expanduser("~/q6a_detector.py")])
+    proc = subprocess.Popen(["python3", os.path.expanduser("~/q6a_detector.py")],
+                            env={**os.environ, "Q6A_DET_FPS": str(YOLO_FPS)})
     DET["proc"] = proc
 
     def _cleanup():
@@ -446,12 +450,14 @@ if __name__ == "__main__":
     ap.add_argument("--gain", type=int, default=240, help="sensor gain, ctrl 0..480 = 0..48dB (0.1dB/step). Per the IMX296 datasheet ONLY 0..240 (0..24dB) is ANALOG; 240..480 adds DIGITAL gain. Analog is the only stage that lowers input-referred read noise, so 240 (max analog) is the cleanest value + keeps full highlight range; the ISP tone-map handles brightness. Raise toward 480 (digital) or bump --exposure only for genuinely dark scenes.")
     ap.add_argument("--calibrate", action="store_true", help="capture a flat-field color profile (aim at a white/gray surface)")
     ap.add_argument("--no-yolo", action="store_true", help="disable the NPU YOLO detection overlay")
+    ap.add_argument("--yolo-fps", type=float, default=10.0, help="cap YOLO to this detection rate (0=unlimited, ~26fps NPU max). Detections overlay persists between updates, so a low rate saves NPU heat/power with no visual loss on a slow robot.")
     ap.add_argument("--gpu", action="store_true", help="full-res ISP on the Adreno GPU (OpenCL) instead of CPU")
     ap.add_argument("--destripe", action="store_true", help="also remove FPN column/row banding (CPU, ~32ms)")
     ap.add_argument("--bin", action="store_true", help="GPU digital 2x2 binning: half-res (728x544), ~2x less noise + faster")
     ap.add_argument("--sensor-bin", action="store_true", help="2x2 binning ON THE SENSOR (charge-domain FD binning -> 728x544): cleaner than --bin (combines charge before readout) + 1/4 the MIPI/GPU/JPEG load. Needs the FD-binning-patched imx296 driver (build_imx296_fdbin.sh).")
     args = ap.parse_args()
     DESTRIPE = args.destripe
+    YOLO_FPS = args.yolo_fps
     BIN = args.bin
     if BIN:
         OUT_W, OUT_H = W // 2, H // 2
