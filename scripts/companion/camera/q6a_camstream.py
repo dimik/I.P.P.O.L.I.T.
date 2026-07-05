@@ -31,7 +31,12 @@ SHADE = None                                  # optional (H,W,3) radial COLOR-sh
 GPU = None                                    # optional Adreno OpenCL ISP (q6a_gpu.GpuDemosaic)
 DESTRIPE = False                              # optional FPN band removal (CPU, ~32ms); off by default
 TARGET_MEAN = 95.0                            # tone-map target brightness
-ACCEL = threading.Lock()                       # serialize GPU (Adreno) and NPU (Hexagon) — concurrent use crashes
+# YOLO runs in a SEPARATE PROCESS (q6a_detector.py) sharing frames via shared memory. The Adreno (GPU
+# ISP) and Hexagon (NPU) crash if driven concurrently in ONE process (shared userspace allocator
+# corruption) but run fine across processes -> no lock, true concurrency. shm layout <-> q6a_detector.py.
+MAX_DET = 32; CTRL_OFF = 32; CTRL_SIZE = CTRL_OFF + MAX_DET * 6 * 4
+DET = None                                     # dict of shm views + the detector subprocess (None if disabled)
+LABELS = [str(i) for i in range(80)]
 def init_gpu():
     global GPU
     try:
@@ -130,8 +135,7 @@ def debayer(px, full=True):
     """BGGR Bayer -> full-res RGB uint8: black-level + raw WB -> demosaic -> destripe -> tone map."""
     if GPU is not None and full:
         scale = _auto_scale(px)              # cheap CPU auto-exposure metric from the raw subsample
-        with ACCEL:                          # serialize GPU vs NPU — concurrent Adreno+Hexagon crashes
-            out = GPU.isp(px, BLACK_LEVEL, WB_R, WB_G, WB_B, scale)  # full ISP on GPU -> uint8
+        out = GPU.isp(px, BLACK_LEVEL, WB_R, WB_G, WB_B, scale)  # full ISP on GPU -> uint8 (no lock: NPU is a separate process)
         return _destripe_u8(out) if DESTRIPE else out
     # CPU fallback: black+WB+demosaic + shade + destripe + tone map
     px = px.astype(np.float32) - BLACK_LEVEL
@@ -241,38 +245,61 @@ class State:
     dets = []                   # latest YOLO detections (drawn onto every frame)
 
 def process(buf, full):
-    rgb = debayer(unpack_raw10(buf), full)
-    with State.lock:
-        State.rgb = rgb; dets = State.dets
-    rgb = draw_overlay(rgb, dets)                       # draw_overlay returns a new array (PIL)
+    rgb = debayer(unpack_raw10(buf), full)                 # (H,W,3) uint8 (GPU ISP)
+    dets = None
+    if DET is not None:
+        DET["frame"][:] = rgb                              # publish latest frame to the detector (shm)
+        DET["fseq"][0] += 1
+        dets = _read_dets()                                # newest detections (lag ~1 inference)
+    rgb = draw_overlay(rgb, dets)                          # returns a new array (PIL) if dets else same
     bio = BytesIO(); Image.fromarray(rgb).save(bio, "JPEG", quality=80)
     with State.lock:
         State.jpeg = bio.getvalue()
 
-def detector_loop(interval=0.25):
-    """Run YOLO on the latest frame at ~1/interval fps when a viewer is connected. Optional: if the
-    NPU stack or model binary is missing, the detector stays disabled and the stream runs plain."""
-    import time
+def _read_dets():
+    n = int(DET["dcnt"][0])
+    if n <= 0:
+        return None
+    out = []
+    for r in DET["dbuf"][:n]:
+        ci = int(r[5]); lab = LABELS[ci] if 0 <= ci < len(LABELS) else str(ci)
+        out.append((int(r[0]), int(r[1]), int(r[2]), int(r[3]), lab, float(r[4])))
+    return out
+
+def init_detector():
+    """Create the shared-memory frame/dets buffers and spawn q6a_detector.py (NPU, separate process).
+    The GPU ISP (this process) and the NPU YOLO (that process) then run concurrently with no lock."""
+    global DET, LABELS
+    import atexit
+    from multiprocessing import shared_memory
+    lp = os.path.expanduser("~/coco_labels.txt")
+    if os.path.exists(lp):
+        LABELS = [l.strip() for l in open(lp) if l.strip()]
+    for nm in ("q6a_frame", "q6a_ctrl"):                    # clear any stale segments
+        try: shared_memory.SharedMemory(name=nm).unlink()
+        except FileNotFoundError: pass
     try:
-        from q6a_yolo import YoloDetector
-        det = YoloDetector()
-        print("YOLO detector loaded (NPU)", flush=True)
+        fshm = shared_memory.SharedMemory(name="q6a_frame", create=True, size=W * H * 3)
+        cshm = shared_memory.SharedMemory(name="q6a_ctrl", create=True, size=CTRL_SIZE)
     except Exception as e:
-        print(f"YOLO detector disabled: {e}", flush=True); return
-    while True:
-        if State.clients == 0 or State.rgb is None:
-            State.dets = []
-            State.wake.wait(0.5); continue
-        with State.lock:
-            rgb = State.rgb
-        try:
-            with ACCEL:                      # serialize NPU vs GPU demosaic (concurrent accel crashes)
-                dets = det.infer(rgb)
-            with State.lock:
-                State.dets = dets
-        except Exception as e:
-            print("detect error:", e, flush=True); time.sleep(0.5)
-        time.sleep(interval)
+        print(f"YOLO disabled (shm: {e})", flush=True); return
+    DET = {"fshm": fshm, "cshm": cshm,
+           "frame": np.ndarray((H, W, 3), np.uint8, buffer=fshm.buf),
+           "fseq": np.ndarray((1,), np.uint64, buffer=cshm.buf, offset=0),
+           "dcnt": np.ndarray((1,), np.int32, buffer=cshm.buf, offset=16),
+           "dbuf": np.ndarray((MAX_DET, 6), np.float32, buffer=cshm.buf, offset=CTRL_OFF)}
+    DET["fseq"][0] = 0; DET["dcnt"][0] = 0
+    proc = subprocess.Popen(["python3", os.path.expanduser("~/q6a_detector.py")])
+    DET["proc"] = proc
+
+    def _cleanup():
+        try: proc.terminate()
+        except Exception: pass
+        for s in (fshm, cshm):
+            try: s.close(); s.unlink()
+            except Exception: pass
+    atexit.register(_cleanup)
+    print("YOLO detector spawned (separate process, no lock)", flush=True)
 
 def capture_loop(rdi, full):
     """Prefer direct V4L2 mmap streaming (full sensor rate, ~23fps); fall back to the file-tail method."""
@@ -411,8 +438,8 @@ if __name__ == "__main__":
     print("start: setting up pipeline...", flush=True)
     rdi = setup_pipeline(args.cam, args.exposure, args.gain)
     print(f"pipeline ready ({rdi}); starting capture + server", flush=True)
-    threading.Thread(target=capture_loop, args=(rdi, not args.fast), daemon=True).start()
     if not args.no_yolo:
-        threading.Thread(target=detector_loop, daemon=True).start()
+        init_detector()                        # spawn q6a_detector.py (NPU) + set up shared memory
+    threading.Thread(target=capture_loop, args=(rdi, not args.fast), daemon=True).start()
     print(f"MJPEG stream on http://0.0.0.0:{args.port}/  (cam{args.cam})", flush=True)
     ThreadingHTTPServer(("0.0.0.0", args.port), Handler).serve_forever()
