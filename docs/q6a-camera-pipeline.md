@@ -513,3 +513,52 @@ default is the stable fixed-WB ISP (`demosaic+WB+tonemap`, green no longer crush
 slight residual green tint like the CPU version). Lesson: gray-world AWB is unsafe as an always-on default on
 scenes that aren't ~neutral on average; prefer a fixed calibrated WB (or a proper illuminant estimator) and
 keep any adaptive gain clamped tight + slow, or off.
+
+## 14. Final colour pipeline, profile architecture & headless/production guidance (2026-07-05)
+
+**Final ISP (all camera/lens/tuning params live in `profiles/<model>.json`; the scripts are generic):**
+`capture (V4L2 mmap) → GPU: unpack RAW10 → per-channel black → WB → [AWB] → [CCM] → [shade] → tonemap(gamma)
+→ [shadow-tint] → uint8 → CPU: overlay + JPEG → MJPEG`. Bracketed stages are optional/opt-in.
+
+Profile sections and what owns them:
+| Section | Owner | Notes |
+|---|---|---|
+| `sensor` | sensor | geometry, **CFA=RGGB** (not BGGR!), mbus/pixelformat, entity match |
+| `color_defaults` | sensor | fixed WB fallback + black; per-unit `imx296_wb.npz` overrides |
+| `ae` | tuning | target/min/max exposure, gain_max, **gain_analog_max=240** (AE won't exceed → no digital-gain noise) |
+| `awb` | tuning/look | r_gain/b_gain clamp range for the white-patch AWB |
+| `tonemap` | tuning | gamma (single source → GPU `#define GAMMA` + CPU LUT), target_mean |
+| `shadow_tint` | sensor | shadow green compensation (knee/r/b); default r=b=0 = no-op |
+| `shading` | lens | radial vignetting/colour-shade post-processing (smooth/chroma/clamps); from `--calibrate` |
+| `ccm` | sensor | 7-CT RPi tuning matrices (opt-in `--ccm`) |
+
+**AWB = white-patch, not gray-world (§ the fix that finally worked).** Gray-world balances the whole-scene
+average → tints neutral walls green on a warm room. White-patch references the **brightest non-clipped
+blocks** (walls/ceiling — ~always white); brightness is measured on G (WB reference) so selection is
+WB-independent (no chicken-and-egg). Bounded to `awb.r_gain/b_gain`. Opt-in `--awb`.
+
+**Shadow green comp (`shadow_tint`).** A global WB can't fix green shadows (sensor R,B fall off faster than G
+at low signal). In dark output pixels, pull R,B **toward** G (only when below it → reduces green, never
+magenta), tapering to 0 by `knee`. Gap-proportional per channel (the greener channel gets more). imx296:
+knee 165, r=b 0.85.
+
+**Live performance (indoor, dim, `--gpu --bin --awb`, 1–2 viewers):** ~**16 fps** (VMAX fixed at
+max_exposure=6000 for low-light → frame length caps fps here; drop max_exposure to 3000 for ~32 fps at more
+noise). YOLOv8 NPU ~**37–44 ms/infer**, capped to **10 fps** (`--yolo-fps`). Board **64–66 °C** (NPU zone
+63 °C) — far under the 90 °C hot-trip / 110 °C critical. CPU load ~0.7.
+
+### Headless / production (YOLO-only, no human viewer)
+- **KEEP AE on.** It's not a cosmetic compensation — it sets the sensor's real integration time so the scene
+  is well-exposed in any light. Without it a fixed exposure goes black at night / blown in daylight → YOLO
+  sees nothing. (Gain stays capped at 240.)
+- **The colour compensations (AWB, CCM, shadow_tint, shading) are for HUMAN eyes — drop them.** YOLO/COCO is
+  trained with heavy colour augmentation and is robust to casts (it detected fine even through the R↔B swap).
+  Dropping them saves a little CPU/GPU and removes all the tuning surface. Keep a **fixed WB + demosaic +
+  tonemap** (≈free, gives YOLO a normal gamma-encoded RGB). Grayscale would HURT YOLO (removes info) — don't.
+- **Bigger win than the colour stuff: skip the MJPEG server + JPEG encode** when there's no viewer (~10 ms
+  CPU/frame + the HTTP thread). The detector reads the demosaiced RGB straight from shm; the JPEG/HTTP path is
+  only for human viewing. (A `--headless` flag that runs capture→demosaic→shm→detector without the server
+  would be the clean way; not yet implemented.)
+- Practical minimal launch today: `--gpu --bin` (AWB/CCM already opt-in, so off) + a profile with
+  `shadow_tint` r=b=0 and no `shading` (or accept their ~1 ms cost). Keep `--bin` (728×544 is plenty for the
+  640×640 YOLO letterbox). Net: AE-controlled, cast-tolerant, fastest path to the detector.
