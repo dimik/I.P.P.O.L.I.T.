@@ -41,9 +41,9 @@
 
   "shadow_tint": {
     "_comment": "Shadow green compensation (sensor low-light characteristic): R,B fall off faster than G at low signal, so shadows go green even at correct WB. In dark output pixels, pull R,B up toward G (only when below it -> reduces green, never magenta), tapering to 0 by 'knee' (output-green 0..255). r/b = fraction of the G-gap closed in deep shadow.",
-    "knee": 110,
-    "r": 0.4,
-    "b": 0.4
+    "knee": 165,
+    "r": 0.85,
+    "b": 0.85
   },
 
   "shading": {
