@@ -6,6 +6,25 @@ it derives from).
 
 ---
 
+## 2026-07-06 — Native-uint8 input path for w8a8 (skip copyFromFloatToNative) (plan P1.2 cont.)
+
+**What:** `q6a_yolo.py` now constructs the w8a8 context with `input_data_type=DataType.NATIVE`
+(output stays `FLOAT`) and feeds the raw uint8 letterbox directly instead of float `[0,1]`. Gated to the w8a8
+model; the w8a16 fallback keeps the float path (its native input is 16-bit).
+
+**Why:** the w8a8 graph's input quant is scale 1/255, so uint8 pixels *are* the native tensor — feeding them
+directly is bit-identical to the float path but turns the ~5–8 ms `copyFromFloatToNative` quantize into a
+~0.3 ms memcpy.
+
+**Verify:** isolated A/B on the real frame — FLOAT 12.9 ms vs NATIVE 9.1 ms, **detections identical**
+(`match=True`, tv 0.84). Live in the full pipeline: log shows `input_data_type: native`, input copy
+`memscpy ~0.5 ms` (was `copyFromFloatToNative ~5–8 ms`), `model_inference ~9–10 ms`, stream healthy.
+**Cumulative P1.2:** the NPU detector step went from ~30 ms (w8a16 float: ~22 ms infer + ~6 ms quantize) to
+**~10 ms** (~9.5 ms infer + ~0.5 ms memcpy) — roughly **3×**, same detections on confident objects.
+File: `q6a_yolo.py`.
+
+---
+
 ## 2026-07-06 — Deploy w8a8 YOLO as the default detector (plan P1.2, owner-approved)
 
 **What:** `q6a_yolo.py` now selects `~/yolov8_det_w8a8.bin` when present and **falls back** to the w8a16

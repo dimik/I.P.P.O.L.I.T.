@@ -46,9 +46,18 @@ def _nms(boxes, scores, iou_thr):
 
 class YoloDetector:
     def __init__(self, model=MODEL_BIN, labels=LABELS_TXT, conf=0.30, iou=0.45):
-        from qai_appbuilder import QNNContext, QNNConfig, Runtime, LogLevel, ProfilingLevel
+        from qai_appbuilder import QNNContext, QNNConfig, Runtime, LogLevel, ProfilingLevel, DataType
         QNNConfig.Config(Runtime.HTP, LogLevel.WARN, ProfilingLevel.OFF)  # bundled 2.42 v68 backend
-        self.ctx = QNNContext("yolov8_det", model)   # deployed model is YOLOv8 (v11 doesn't run on v68)
+        # w8a8's input is quantized uint8 (scale 1/255), so feeding the raw uint8 letterbox as NATIVE input
+        # is bit-identical to the float[0,1] path (verified: same boxes/conf) but replaces the ~5-8ms
+        # copyFromFloatToNative quantize with a ~0.3ms memcpy. Only valid for the 8-bit-input w8a8 model;
+        # the w8a16 fallback keeps float I/O (its native input is 16-bit, a different encoding).
+        self.native = str(model).endswith("_w8a8.bin")
+        if self.native:
+            self.ctx = QNNContext("yolov8_det", model,
+                                  input_data_type=DataType.NATIVE, output_data_type=DataType.FLOAT)
+        else:
+            self.ctx = QNNContext("yolov8_det", model)   # YOLOv8 (v11 doesn't run on v68); float I/O
         self.conf = conf
         self.iou = iou
         self.labels = ([l.strip() for l in open(labels) if l.strip()]
@@ -91,8 +100,13 @@ class YoloDetector:
     def infer(self, rgb):
         """rgb: (H,W,3) uint8. Returns list of (x1,y1,x2,y2,label,conf) in source-frame pixels."""
         lb, s, ox, oy = self._letterbox(rgb)
-        # model input is NCHW [1,3,640,640], values [0,1]; appbuilder quantises float->uint16 for us
-        x = np.ascontiguousarray((lb.astype(np.float32) / 255.0).transpose(2, 0, 1)).reshape(1, 3, IN, IN)
+        # model input is NCHW [1,3,640,640]. NATIVE path: feed raw uint8 (the graph's input quant = scale
+        # 1/255, so uint8 pixels ARE the native tensor) -> a memcpy, no float quantize. FLOAT path (w8a16):
+        # values [0,1], appbuilder quantises float->native for us.
+        if self.native:
+            x = np.ascontiguousarray(lb.transpose(2, 0, 1)).reshape(1, 3, IN, IN)   # uint8
+        else:
+            x = np.ascontiguousarray((lb.astype(np.float32) / 255.0).transpose(2, 0, 1)).reshape(1, 3, IN, IN)
         out = self.ctx.Inference([x])
         boxes, scores, cls = self._map_outputs(out)
         if boxes is None or scores is None or cls is None:
