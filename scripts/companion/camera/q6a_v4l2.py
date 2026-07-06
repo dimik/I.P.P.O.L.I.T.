@@ -7,7 +7,7 @@ drains all ready buffers and returns only the freshest frame (low latency, full 
 The node is Video-Capture-**Multiplanar**, so we drive the raw ioctls with linuxpy's ctypes structs
 (linuxpy's high-level VideoCapture has no mplane/planes handling). pBAA == V4L2_PIX_FMT_SBGGR10P.
 """
-import ctypes, fcntl, mmap, os, select
+import ctypes, errno, fcntl, mmap, os, select
 import linuxpy.video.raw as r
 
 _MPLANE = r.BufType.VIDEO_CAPTURE_MPLANE
@@ -63,8 +63,10 @@ class V4l2Cam:
             buf, _ = self._mkbuf()
             try:
                 fcntl.ioctl(self.fd, r.IOC.DQBUF, buf)
-            except OSError:                       # EAGAIN — no more ready buffers
-                break
+            except OSError as e:
+                if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                    break                         # no more ready buffers -> normal drain end
+                raise                             # ENODEV/EIO/etc. are real: don't busy-spin, surface it
             if latest is not None:
                 self._qbuf(latest)                # requeue the older frame we're dropping
             latest = int(buf.index)

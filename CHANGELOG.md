@@ -6,6 +6,22 @@ it derives from).
 
 ---
 
+## 2026-07-06 — V4L2 DQBUF: distinguish EAGAIN from real device errors (plan P0.6)
+
+**What:** `read_latest()` in `q6a_v4l2.py` caught *all* `OSError` from `VIDIOC_DQBUF` and treated it as "no
+more ready buffers" (`break`). Now it breaks only on `EAGAIN`/`EWOULDBLOCK` and **re-raises** everything else
+(`ENODEV`, `EIO`, …). Added `import errno`.
+
+**Why:** Fable-5 finding — a genuine device error (camera unplugged, CAMSS fault) was silently swallowed, so
+`read_latest` kept returning `None` and the capture loop looped forever without ever reinitialising the
+device. The caller already wraps `read_latest` in `try/except` (close cam, retry, fall back to file-tail after
+3 fails), so a re-raised error now drives that recovery path instead of a silent stall.
+
+**Verify:** Restarted; `curl /stream` → **62 JPEG frames in 4 s (~15.5 fps)**, `capture error` count = 0
+(normal EAGAIN drain still breaks cleanly, no false positives). File: `q6a_v4l2.py`.
+
+---
+
 ## 2026-07-06 — MJPEG send timeout: drop half-open clients (plan P0.5)
 
 **What:** Added `self.connection.settimeout(10.0)` in the `/stream` handler and widened the write-loop
