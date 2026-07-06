@@ -23,8 +23,15 @@
     "target": 70,
     "min_exposure": 30,
     "max_exposure": 2000,
+    "max_exposure_moving": 1200,
     "gain_max": 480,
     "gain_analog_max": 240
+  },
+
+  "motion": {
+    "_comment": "P1.5 mode-dependent AE: while the robot moves, AE caps exposure at ae.max_exposure_moving (less motion blur; standing still it uses ae.max_exposure for a cleaner, lower-gain image). Motion from the MCU wheel-odom shm ring (type 0x01 lv/rv mm/s). No ring (bench/robot off) -> treated stationary. Set ae.max_exposure_moving to 0 to disable. To instead keep long stationary exposures, RAISE ae.max_exposure (e.g. 6000) and keep max_exposure_moving ~2000 (note: startup VMAX = max of the two, so fps drops to that ceiling's rate).",
+    "mcu_ring": "/tmp/mcu_ring.buf",
+    "wheel_mm_s": 40
   },
 
   "awb": {

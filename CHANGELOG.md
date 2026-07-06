@@ -6,6 +6,33 @@ it derives from).
 
 ---
 
+## 2026-07-06 — Mode-dependent AE: lower exposure ceiling while the robot moves (plan P1.5)
+
+**What:** AE now uses two exposure ceilings — the stationary default (`ae.max_exposure`, 2000) and a lower
+moving ceiling (`ae.max_exposure_moving`, 1200) applied while the robot is in motion. A `motion_monitor()`
+daemon reads the **MCU wheel-odom shm ring** (`/tmp/mcu_ring.buf`, type 0x01 frames: `lv,rv` mm/s, emitted
+~50 Hz regardless of robot state) and sets `State.moving` when `max(|lv|,|rv|) > motion.wheel_mm_s` (40).
+`_ae_ceiling()` returns the moving ceiling when moving. Startup VMAX is sized to `max(both ceilings)` so
+switching never changes frame timing or fps. Feature is off when `max_exposure_moving = 0`.
+
+**Why:** Fable-5 P1.5 — a moving/rotating robot needs short integration to avoid motion blur; standing still
+it can integrate longer for a cleaner, lower-gain image. This keeps the owner's fast 2000/high-fps setup as
+the stationary baseline and only tightens further during motion (both ≤ VMAX, so no fps loss). *(To instead
+favor clean stationary images, raise `ae.max_exposure` and keep `max_exposure_moving` ~2000 — note fps then
+drops to that higher ceiling's rate; documented in the profile.)*
+
+**Robustness:** no ring / not advancing (bench, robot off, tap down) → reported stationary (default ceiling),
+no motion tag in the heartbeat. Monitor **reopens** the ring after ~3 s stale (handles a tap restart / new
+inode). Reads only the newest ~4 KB each 100 ms tick.
+
+**Verify (on-device):** standalone parser test (incl. rotation = opposite wheels, threshold) all pass;
+synthetic-ring integration — **MOVING → `moving` tag + exp clamped to exactly 1200**; **STILL → `still` tag +
+exp released to 2000**; bench (no ring) → no tag, default 2000, no crash, ~31 fps. Live end-to-end against the
+real MCU tap pends the robot being attached (bench has no ring). Files: `q6a_camstream.py`,
+`profiles/imx296.json`.
+
+---
+
 ## 2026-07-06 — Strip the desktop/daemon stack on the Q6A (plan P1.4)
 
 **What:** Switched the Q6A to a headless runtime. `systemctl set-default multi-user.target` (no graphical

@@ -83,6 +83,14 @@ AE_DEADBAND = (0.75, 1.30)                    # hold steady while target/median 
 AE_DAMP = 0.4                                 # partial step toward the target each update (sensor latches ~1-2 frames late)
 AE_GAIN_STEP = 48                             # analogue_gain ctrl step when exposure is floored/ceilinged (~4.8 dB)
 AE_DARK_FRAC = 0.6                            # "still too dark" when median < AE_TARGET*this (at the exposure ceiling -> add gain)
+# P1.5 mode-dependent AE: while the robot MOVES, cap exposure lower to cut motion blur (a moving robot needs
+# short integration; standing still it can integrate longer for a cleaner, lower-gain image). Motion comes
+# from the MCU wheel-odom shm ring (type 0x01 lv/rv mm/s, emitted continuously); absent/stale on the bench ->
+# treated stationary. 0 = feature off (single ceiling). Both ceilings must be <= startup VMAX (sized to the
+# max of the two), so switching never changes frame timing (no 'snow') or fps.
+AE_MAX_EXP_MOVING = 0                         # moving-mode exposure ceiling (lines); from profile ae.max_exposure_moving
+MOTION_RING = "/tmp/mcu_ring.buf"             # MCU serial-tap ring (from profile motion.mcu_ring)
+MOTION_WHEEL_MM_S = 40                        # |wheel velocity| above this = moving (from profile motion.wheel_mm_s)
 # --- Auto white balance (damped, constrained gray-world) --- tracks the illuminant (day<->evening) so
 # adjusts the WB gains (software, GPU reads them next frame -> no glitch). WHITE-PATCH: opt-in via --awb.
 # Plain gray-world tints neutral walls green on a non-gray room; white-patch references the bright (white)
@@ -123,6 +131,7 @@ def load_camera_profile(model):
     bounds, and the ready-made CCM). Returns True if a profile was found."""
     global W, H, STRIDE, FRAME, OUT_W, OUT_H, BAYER, RX, RY, BX, BY, MBUS_CODE, PIXFMT, ENTITY_MATCH
     global BLACK_LEVEL, WB_R, WB_G, WB_B, AE_TARGET, AE_MIN_EXP, AE_MAX_EXP, GAIN_MAX, GAIN_ANALOG_MAX, CCM_MATRICES, CCM_CT
+    global AE_MAX_EXP_MOVING, MOTION_RING, MOTION_WHEEL_MM_S
     global AWB_RMIN, AWB_RMAX, AWB_BMIN, AWB_BMAX
     global SHADE_CHROMA, SHADE_CHROMA_CLAMP, SHADE_GAIN_CLAMP, SHADE_SMOOTH, TARGET_MEAN, TONEMAP_GAMMA, _GAMMA_LUT
     global SHADOW_KNEE, SHADOW_R, SHADOW_B
@@ -144,6 +153,9 @@ def load_camera_profile(model):
     AE_TARGET = float(ae.get("target", AE_TARGET)); AE_MIN_EXP = int(ae.get("min_exposure", AE_MIN_EXP))
     AE_MAX_EXP = int(ae.get("max_exposure", AE_MAX_EXP)); GAIN_MAX = int(ae.get("gain_max", GAIN_MAX))
     GAIN_ANALOG_MAX = int(ae.get("gain_analog_max", GAIN_ANALOG_MAX))
+    AE_MAX_EXP_MOVING = int(ae.get("max_exposure_moving", 0))     # 0 -> P1.5 off (single ceiling)
+    mo = p.get("motion", {})
+    MOTION_RING = str(mo.get("mcu_ring", MOTION_RING)); MOTION_WHEEL_MM_S = int(mo.get("wheel_mm_s", MOTION_WHEEL_MM_S))
     awb = p.get("awb", {})
     if "r_gain" in awb: AWB_RMIN, AWB_RMAX = (float(x) for x in awb["r_gain"])
     if "b_gain" in awb: AWB_BMIN, AWB_BMAX = (float(x) for x in awb["b_gain"])
@@ -272,7 +284,7 @@ def setup_pipeline(cam, exposure, gain):
             # (no noise cost). The old "exposure+200" padded the frame ~1.4x longer than needed.
             # Fix VMAX for the AE ceiling so AE only ever changes exposure (no mid-stream vblank churn ->
             # no per-frame timing glitch / motion 'snow'). fps is then fixed at this VMAX rate (~32).
-            vb_exp = AE_MAX_EXP if AE_ON else exposure
+            vb_exp = max(AE_MAX_EXP, AE_MAX_EXP_MOVING) if AE_ON else exposure   # VMAX fits both AE ceilings
             vblank = max(30, vb_exp - H + 64)
             for c, v in [("exposure", 100), ("vertical_blanking", vblank), ("exposure", exposure),
                          ("analogue_gain", gain)]:
@@ -334,13 +346,14 @@ def auto_exposure(buf):
     if AE_DEADBAND[0] < ratio < AE_DEADBAND[1]:
         return                                      # within deadband -> hold steady (no hunting)
     ratio = min(max(ratio, 0.5), 2.0)
+    ceil = _ae_ceiling()                            # P1.5: lower ceiling while moving (else the default)
     target_exp = EXPOSURE * ratio                   # partial step toward target -> damped, no overshoot/chase
     new_exp = int(EXPOSURE + AE_DAMP * (target_exp - EXPOSURE))
-    new_exp = int(min(max(new_exp, AE_MIN_EXP), AE_MAX_EXP))
+    new_exp = int(min(max(new_exp, AE_MIN_EXP), ceil))
     if new_exp <= AE_MIN_EXP and mid > AE_TARGET and GAIN > 0:
         GAIN = max(0, GAIN - AE_GAIN_STEP)          # exposure floored but still bright -> drop gain
         _set_ctrl(_CID_ANALOGUE_GAIN, GAIN, "analogue_gain")
-    elif new_exp >= AE_MAX_EXP and mid < AE_TARGET * AE_DARK_FRAC and GAIN < GAIN_ANALOG_MAX:
+    elif new_exp >= ceil and mid < AE_TARGET * AE_DARK_FRAC and GAIN < GAIN_ANALOG_MAX:
         GAIN = min(GAIN_ANALOG_MAX, GAIN + AE_GAIN_STEP)  # exposure maxed but dark -> add gain, but only up to the
                                                     # ANALOG max (240): digital gain adds noise + row-lines and
                                                     # shifts the calibration operating point (green drift). The
@@ -602,6 +615,8 @@ class State:
     dets = []                   # latest YOLO detections (drawn onto every frame)
     throttle = 0.0              # thermal governor: seconds to sleep between frames (0 = full rate)
     temp = 0.0                  # last max SoC temperature (°C), for the heartbeat
+    moving = False              # P1.5: robot is moving/rotating (from the MCU wheel-odom ring)
+    motion_fresh = False        # P1.5: the motion signal is live (ring present + advancing)
 
 # Thermal governor: the board's binding limit is heat (kernel trip at 90°C), and the NPU has no kernel
 # throttle, so we pace the whole pipeline in software. Throttling the STREAMER's frame rate cascades: the
@@ -621,6 +636,82 @@ def _max_temp():
         except Exception:
             pass
     return hi / 1000.0
+
+def _mcu_crc16(d):
+    """Modbus-16 (reflected, poly 0xA001) — matches the MCU frame CRC."""
+    c = 0xFFFF
+    for b in d:
+        c ^= b
+        for _ in range(8):
+            c = (c >> 1) ^ 0xA001 if c & 1 else c >> 1
+    return c
+
+def _ae_ceiling():
+    """Exposure ceiling AE clamps to: the lower moving-mode ceiling while the robot moves, else the
+    stationary default. Feature off (AE_MAX_EXP_MOVING==0) -> always the default."""
+    if AE_MAX_EXP_MOVING and State.moving:
+        return AE_MAX_EXP_MOVING
+    return AE_MAX_EXP
+
+def motion_monitor():
+    """P1.5: poll the MCU wheel-odom shm ring and set State.moving. Type 0x01 frames (26-byte payload:
+    ts,x,y,yaw,yawi,lv,rv,...) carry left/right wheel velocity in mm/s and arrive continuously regardless
+    of robot state, so |wheel| tells moving-vs-stationary (rotation spins the wheels too). The ring is
+    written by libserialtap on the robot; on the bench (no ring / not advancing) we report stationary so
+    AE keeps the default ceiling. Reads only the newest bytes each tick -> cheap."""
+    import mmap, struct
+    HDR, RING = 64, 256 * 1024
+    fd = mm = None; last_wp = -1; stale = 0
+    while True:
+        try:
+            if mm is None:
+                if not os.path.exists(MOTION_RING):
+                    State.motion_fresh = False; State.moving = False
+                    time.sleep(1.0); continue
+                fd = os.open(MOTION_RING, os.O_RDONLY)
+                mm = mmap.mmap(fd, HDR + RING, mmap.MAP_SHARED, mmap.PROT_READ)
+                last_wp = -1; stale = 0
+            wp = struct.unpack_from('<Q', mm, 0)[0]                 # ring write position (bytes written)
+            if wp == last_wp:                                      # not advancing -> robot off / tap down
+                State.motion_fresh = False; State.moving = False
+                stale += 1
+                if stale > 15:                                     # ~3s stale -> reopen (tap restart = new inode)
+                    try: mm.close(); os.close(fd)
+                    except Exception: pass
+                    fd = mm = None
+                time.sleep(0.2); continue
+            stale = 0
+            n = min(4096, wp)                                      # newest bytes (0x01 frame = 32B, ~50Hz)
+            s, e = (wp - n) % RING, wp % RING
+            raw = (mm[HDR + s:HDR + RING] + mm[HDR:HDR + e]) if s >= e else mm[HDR + s:HDR + e]
+            raw = bytes(raw); last_wp = wp
+            lv = rv = None; i = 0
+            while i < len(raw) - 1:                                # scan; keep the LAST valid 0x01 frame
+                if raw[i] != 0x3C:
+                    i += 1; continue
+                ln = raw[i + 1]; total = ln + 6
+                if i + total > len(raw):
+                    break
+                fr = raw[i:i + total]
+                if fr[-1] != 0x3E:
+                    i += 1; continue
+                body = fr[1:3 + ln]; stored = (fr[-3] << 8) | fr[-2]
+                if _mcu_crc16(body) == stored:
+                    if fr[2] == 0x01 and ln == 26:
+                        v = struct.unpack('<Iiihhhhhhh', fr[3:3 + ln]); lv, rv = v[5], v[6]
+                    i += total
+                else:
+                    i += 1
+            if lv is not None:
+                State.motion_fresh = True
+                State.moving = max(abs(lv), abs(rv)) > MOTION_WHEEL_MM_S
+        except Exception:
+            try:
+                if mm is not None: mm.close()
+                if fd is not None: os.close(fd)
+            except Exception: pass
+            fd = mm = None; last_wp = -1; time.sleep(1.0)
+        time.sleep(0.1)
 
 def thermal_governor():
     """Poll SoC temperature and set State.throttle (inter-frame sleep) with hysteresis. Never restarts or
@@ -804,7 +895,8 @@ def capture_loop(rdi, full):
                 _hbn += 1                        # heartbeat: server-side publish rate (server froze? -> 0)
                 if _t.time() - _hbt >= 2.0:
                     thr = f" throttle={State.throttle:.2f}s" if State.throttle else ""
-                    print(f"[hb] publish {_hbn/(_t.time()-_hbt):.0f} fps jseq={State.jseq} clients={State.clients} jpeg={0 if State.jpeg is None else len(State.jpeg)//1024}KB exp={EXPOSURE} wb=({WB_R:.2f},{WB_B:.2f}) temp={State.temp:.0f}C{thr}", flush=True)
+                    mv = (" moving" if State.moving else " still") if AE_MAX_EXP_MOVING and State.motion_fresh else ""
+                    print(f"[hb] publish {_hbn/(_t.time()-_hbt):.0f} fps jseq={State.jseq} clients={State.clients} jpeg={0 if State.jpeg is None else len(State.jpeg)//1024}KB exp={EXPOSURE} wb=({WB_R:.2f},{WB_B:.2f}) temp={State.temp:.0f}C{thr}{mv}", flush=True)
                     _hbn = 0; _hbt = _t.time()
         except Exception as e:
             print("capture error (v4l2):", e, flush=True)
@@ -985,6 +1077,10 @@ if __name__ == "__main__":
     if not args.no_yolo:
         init_detector()                        # spawn q6a_detector.py (NPU) + set up shared memory
     threading.Thread(target=thermal_governor, daemon=True).start()   # pace the pipeline under the 90°C trip
+    if AE_MAX_EXP_MOVING:                                             # P1.5: only when a moving ceiling is set
+        threading.Thread(target=motion_monitor, daemon=True).start()
+        print(f"mode-dependent AE: moving ceiling {AE_MAX_EXP_MOVING} (vs {AE_MAX_EXP} still), "
+              f"src {MOTION_RING} @>{MOTION_WHEEL_MM_S}mm/s", flush=True)
     if HEADLESS:                               # production: no HTTP server; capture->demosaic->shm->YOLO
         print(f"pipeline ready ({rdi}); HEADLESS: capture -> shm -> YOLO (no MJPEG server)", flush=True)
         capture_loop(rdi, not args.fast)       # runs in the main thread, unconditionally (no client gating)
