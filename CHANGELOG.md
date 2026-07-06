@@ -6,6 +6,35 @@ it derives from).
 
 ---
 
+## 2026-07-07 — Fix q6a-llmd: recover from a cDSP SSR + add self-healing (was dead ~22 h)
+
+**Root cause:** at Jul 6 00:51:41 the **cDSP had a subsystem restart (SSR)** — the fastrpc session got
+`errno 0x68 Broken pipe`, the listener thread exited, and the daemon's Genie/HTP remote handle died. The
+daemon had **no recovery**: the Python process stayed alive (so systemd's `Restart=on-failure` never fired)
+holding a dead handle. Every query then failed (empty reply / Broken pipe / hang) until a query at 22:31
+finally closed the handle (`num of open handles: 0`). Net: the LLM was **silently dead for ~22 h**. The cDSP
+itself had recovered — the detector + depth open fresh handles on it fine — so only the daemon was stuck.
+
+**Fix:**
+1. **Restored it** — a single `systemctl restart` reloaded the model onto the healed cDSP. Verified: "Blue"/
+   "Green"/"Mars"/"Healthy" replies at ~0.8 s (normal warm latency).
+2. **Self-healing (`q6a_llmd.py`)** — each request now tracks health (`ok = query SUCCESS AND tokens actually
+   generated`). A healthy query resets the counter; **2 consecutive dead-context failures → `os._exit(1)`** so
+   systemd reloads the daemon fresh (a new process re-does `fastrpc_apps_user_init` on the recovered cDSP —
+   the only reliable in-field recovery from an SSR). Empty-input connections don't count.
+3. **Anti-restart-storm (unit)** — `StartLimitIntervalSec=300` + `StartLimitBurst=4`: if the cDSP is *genuinely*
+   wedged, systemd stops after 4 reloads/5 min and leaves it failed (a human/monitor intervenes) rather than
+   restart-storming, which per hard-won experience wedges the cDSP → needs a reboot.
+
+**Verify (on-device):** deployed the hardened daemon + unit, `daemon-reload`, restart → model loaded, socket
+up, **3 consecutive queries correct with the pid stable** (happy path does not false-trigger the exit),
+`StartLimitBurst=4` / interval 5 min confirmed active, holds the cDSP. Files: `q6a_llmd.py`,
+`systemd/q6a-llmd.service`. *(Note: the true 3-way-active coexistence test — detector+LLM-decoding+depth,
+gated in the P2.3 entries — can now be run since the LLM serves again; still pending the pinned-memory
+re-measure.)*
+
+---
+
 ## 2026-07-07 — P2.3 depth runtime: MiDaS process publishing inverse-depth, coexists with the detector
 
 **What:** New `q6a_depth.py` — a 3rd accelerator process (mirrors the detector's hardened structure) that reads

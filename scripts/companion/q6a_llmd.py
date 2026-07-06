@@ -62,8 +62,31 @@ TEMPLATE = ("<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n"
 
 npu_lock = threading.Lock()   # the dialog/NPU is single: serialize queries
 
+# SSR / dead-context recovery. A cDSP subsystem restart (SSR) breaks the fastrpc session -> the Genie
+# dialog handle dies and every query then fails (Broken pipe, or SUCCESS with an empty reply). The daemon
+# cannot re-init fastrpc in-process, so on repeated dead-context failures it EXITS and lets systemd reload
+# it fresh on the recovered cDSP (a fresh process re-does fastrpc_apps_user_init). The unit's
+# StartLimitBurst caps the rate so a genuinely-wedged cDSP is not restart-stormed (which would need a reboot).
+# Before this, an SSR left the daemon alive-but-dead until the next reboot (observed: ~22 h outage).
+_fails = 0
+_FAIL_LIMIT = 2               # consecutive dead-context failures before a self-restart
+
+
+def _recover_or_reset(ok):
+    global _fails
+    if ok:
+        _fails = 0
+        return
+    _fails += 1
+    if _fails >= _FAIL_LIMIT:
+        sys.stderr.write(f"[q6a-llmd] {_fails} consecutive dead-context query failures "
+                         f"(cDSP SSR / Broken-pipe?); exiting for a clean systemd reload\n")
+        sys.stderr.flush()
+        os._exit(1)           # systemd Restart=on-failure reloads the model on the recovered cDSP
+
 
 def handle(conn):
+    ok = False
     try:
         conn.settimeout(120)
         data = b""
@@ -82,8 +105,11 @@ def handle(conn):
                 return
             prompt = TEMPLATE.format(msg=msg).encode("utf-8")
 
+        produced = 0
         def cb(resp, code, ud):
+            nonlocal produced
             if resp:
+                produced += len(resp)
                 try:
                     conn.sendall(resp)           # stream raw bytes as tokens arrive
                 except OSError:
@@ -94,6 +120,7 @@ def handle(conn):
             st = lib.GenieDialog_query(dlg, prompt, SENTENCE_COMPLETE, c_cb, None)
         if st != SUCCESS:
             conn.sendall(f"\n[q6a-llmd: query status {st}]\n".encode())
+        ok = (st == SUCCESS and produced > 0)    # healthy = success AND actually generated tokens
     except Exception as e:                       # noqa: BLE001 - report to client
         try:
             conn.sendall(f"\n[q6a-llmd error: {e}]\n".encode())
@@ -105,6 +132,7 @@ def handle(conn):
         except OSError:
             pass
         conn.close()
+    _recover_or_reset(ok)                        # dead-context self-heal (see _recover_or_reset)
 
 
 if os.path.exists(SOCK_PATH):

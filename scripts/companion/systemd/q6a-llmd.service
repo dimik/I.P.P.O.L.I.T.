@@ -2,6 +2,11 @@
 Description=Q6A resident Genie LLM daemon (Llama 3.2 1B on Hexagon NPU)
 After=llama-prewarm.service
 Wants=llama-prewarm.service
+# Anti-restart-storm: the daemon self-exits on a dead cDSP context (SSR) so systemd reloads it, but a
+# genuinely-wedged cDSP must NOT be restart-stormed (that needs a reboot to clear). Cap to 4 starts / 5 min;
+# past that systemd stops trying and leaves it failed (a human/monitor intervenes) rather than storming.
+StartLimitIntervalSec=300
+StartLimitBurst=4
 
 [Service]
 Type=simple
