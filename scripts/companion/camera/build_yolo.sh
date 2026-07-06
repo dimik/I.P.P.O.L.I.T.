@@ -17,6 +17,11 @@
 # Run ON the Odyssey. Produces models/<MODEL>.bin (context binary) committed for turnkey deploy.
 set -euo pipefail
 MODEL="${1:-yolov8_det}"
+# Precision: w8a16 (current, safe) or w8a8 (P1.2: ~half the infer time via native int8 I/O, but int8
+# activations may cost accuracy AND may fail to compose on v68 at step 3 -> validate before deploying).
+# A w8a8 build should output a DIFFERENT name so it can be A/B-tested without clobbering the live w8a16 .bin:
+#   PRECISION=w8a8 ./build_yolo.sh yolov8_det_w8a8
+PRECISION="${PRECISION:-w8a16}"
 Q6A="ippolit-lan"
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 VENV="${QHM_VENV:-$HOME/qhm-venv/bin/python}"
@@ -24,12 +29,15 @@ QAIRT_X86="$HOME/qairt-x86"
 WORK="$HOME/${MODEL}-q6a-onnx"
 SDK_REMOTE="~/qairt_2.42.0.251225"; ABI="aarch64-oe-linux-gcc11.2"
 
-echo "== 1/4 export quantized ONNX (w8a16) from AI Hub =="
+echo "== 1/4 export quantized ONNX ($PRECISION) from AI Hub =="
 mkdir -p "$WORK"
-"$VENV" -m qai_hub_models.models.${MODEL}.export \
-  --target-runtime onnx --chipset qualcomm-qcs6490 --precision w8a16 \
+# NB: the AI-Hub export module name is the base model (yolov8_det); MODEL may be a build alias (e.g.
+# yolov8_det_w8a8) used only for output naming. Strip a trailing _w8a8/_w8a16 to get the module.
+EXPORT_MODULE="${MODEL%_w8a8}"; EXPORT_MODULE="${EXPORT_MODULE%_w8a16}"
+"$VENV" -m qai_hub_models.models.${EXPORT_MODULE}.export \
+  --target-runtime onnx --chipset qualcomm-qcs6490 --precision "$PRECISION" \
   --skip-profiling --skip-inferencing --output-dir "$WORK"
-ONNX="$(find "$WORK" -name "${MODEL}.onnx" | head -1)"
+ONNX="$(find "$WORK" -name "${EXPORT_MODULE}.onnx" | head -1)"
 echo "   ONNX: $ONNX"
 
 echo "== 2/4 convert ONNX -> 2.42 DLC (x86 qairt-converter, no AVX2 needed) =="

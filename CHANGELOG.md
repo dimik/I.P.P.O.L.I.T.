@@ -6,6 +6,24 @@ it derives from).
 
 ---
 
+## 2026-07-06 — Parameterize build_yolo.sh for precision (enables the P1.2 w8a8 build)
+
+**What:** `build_yolo.sh` now takes a `PRECISION` env var (default `w8a16` = current behavior) passed to the
+AI-Hub export, and derives the export module name from the `MODEL` alias (strips a trailing `_w8a8`/`_w8a16`)
+so a w8a8 build can be produced under a *separate* output name (`PRECISION=w8a8 ./build_yolo.sh
+yolov8_det_w8a8`) without clobbering the live `yolov8_det.bin`. **No build was run** — this is tooling prep.
+
+**Why:** P1.2 (w8a8 YOLO) is the last high-leverage compute item, but it's qualitatively different from the
+landed fixes: it runs a **cloud AI-Hub compile**, **swaps the working detector**, may **lose accuracy** (int8
+activations), the plan itself gates it on "confirm w8a8 v8 composes on v68", and the real speedup also needs a
+native-uint8 input path in `q6a_yolo.py` (to drop `copyFromFloatToNative`, ~10–15 ms/infer). That combination
+warrants owner sign-off before executing, so the autonomous batch stops here with the toolchain made ready.
+Toolchain confirmed available: qhm venv, qairt-x86, AI-Hub token, and `w8a8` is a supported export precision.
+
+Files: `build_yolo.sh`.
+
+---
+
 ## 2026-07-06 — Held-fd VIDIOC_S_CTRL for AE (drop the per-tick v4l2-ctl fork) (plan P1.3)
 
 **What:** AE now sets `exposure`/`analogue_gain` through a **held-open sensor-subdev fd + `VIDIOC_S_CTRL`
