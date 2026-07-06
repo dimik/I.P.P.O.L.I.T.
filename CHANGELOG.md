@@ -6,6 +6,33 @@ it derives from).
 
 ---
 
+## 2026-07-06 — Software thermal governor: pace the pipeline under the 90°C trip (plan P0.9)
+
+**What:** Added a `thermal_governor()` daemon thread that polls the hottest of the 34 SoC thermal zones every
+2 s and sets `State.throttle` (an inter-frame sleep) with hysteresis:
+- ≥ **87 °C** (CRIT) → 0.40 s sleep (~2.5 fps ceiling), shed heat fast
+- ≥ **82 °C** (HI) → 0.12 s sleep (~8 fps ceiling)
+- ≤ **76 °C** (LO) → release (full rate); the HI/LO gap prevents oscillation
+
+Both capture loops (mmap `capture_loop` **and** the `_capture_loop_file` fallback) honour `State.throttle`
+after each `process()`. The heartbeat now prints `temp=NN C` (+ `throttle=…s` when active).
+
+**Why:** Fable-5's binding constraint — the board's real limit is heat (kernel trip at 90 °C) and the **NPU has
+no kernel throttle**, so nothing stops the pipeline cooking the SoC. Throttling the *streamer's* frame cadence
+cascades: the detector only infers on new frames (`fseq`), so slowing publish cools **both** the GPU ISP and
+the NPU from one control point — no cross-process IPC needed.
+
+**Verify (on-device, with thresholds temporarily lowered to force it):** governor engaged at real temps
+(logged `[thermal] CRIT 56.7°C → hard throttle`), and delivered rate dropped to **17 frames / 8 s (~2 fps)**
+vs **~155 / 8 s (~19 fps)** unthrottled — throttle demonstrably reduces load on both paths. Restored real
+thresholds: production runs full-rate at 60–78 °C (78 frames/5 s), heartbeat shows `temp`. **Debugging notes
+for future me:** running a copy from `/tmp` silently forces the file-tail path (can't import `~/q6a_v4l2`);
+launch the streamer so ssh returns immediately then measure in a *separate* ssh (a trailing `sleep` in the
+launching session SIGHUPs the child); QNN warnings are `\r`-terminated and interleave stdout — normalize with
+`tr '\r' '\n'` before grep. File: `q6a_camstream.py`.
+
+---
+
 ## 2026-07-06 — Detector supervision + clean NPU/shm teardown + staleness cutoff (plan P0.3, P0.4)
 
 **What:** Made the two-process split survive detector death and shut down cleanly.

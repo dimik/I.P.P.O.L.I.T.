@@ -575,6 +575,44 @@ class State:
     wake = threading.Event()    # signalled when a viewer connects
     rgb = None                  # latest full-res RGB frame (for the detector to consume)
     dets = []                   # latest YOLO detections (drawn onto every frame)
+    throttle = 0.0              # thermal governor: seconds to sleep between frames (0 = full rate)
+    temp = 0.0                  # last max SoC temperature (°C), for the heartbeat
+
+# Thermal governor: the board's binding limit is heat (kernel trip at 90°C), and the NPU has no kernel
+# throttle, so we pace the whole pipeline in software. Throttling the STREAMER's frame rate cascades: the
+# detector only infers on NEW frames (fseq), so slowing publish cools BOTH the GPU ISP and the NPU at once.
+THERMAL_HI = 82.0    # °C: engage throttling above this
+THERMAL_LO = 76.0    # °C: release throttling below this (hysteresis band avoids oscillation)
+THERMAL_CRIT = 87.0  # °C: hard throttle just under the 90°C kernel trip
+
+def _max_temp():
+    """Hottest of the 34 SoC thermal zones, in °C (whatever is hottest gates the pipeline)."""
+    import glob
+    hi = 0
+    for p in glob.glob("/sys/class/thermal/thermal_zone*/temp"):
+        try:
+            v = int(open(p).read())
+            if v > hi: hi = v
+        except Exception:
+            pass
+    return hi / 1000.0
+
+def thermal_governor():
+    """Poll SoC temperature and set State.throttle (inter-frame sleep) with hysteresis. Never restarts or
+    kills anything — it just slows the frame cadence so the board stays under the 90°C trip."""
+    hot = False
+    while True:
+        t = _max_temp(); State.temp = t
+        if t >= THERMAL_CRIT:
+            State.throttle = 0.40; hot = True                # ~2.5 fps ceiling: shed heat fast
+            print(f"[thermal] CRIT {t:.1f}°C -> hard throttle (~2.5fps)", flush=True)
+        elif t >= THERMAL_HI:
+            State.throttle = 0.12; hot = True                # ~8 fps ceiling
+            print(f"[thermal] {t:.1f}°C >= {THERMAL_HI:.0f} -> throttle (~8fps)", flush=True)
+        elif hot and t <= THERMAL_LO:
+            State.throttle = 0.0; hot = False                # cooled off -> full rate
+            print(f"[thermal] {t:.1f}°C <= {THERMAL_LO:.0f} -> throttle released", flush=True)
+        time.sleep(2.0)
 
 def process(buf, full):
     rgb = debayer(buf, full)                                # packed RAW10 in -> (H,W,3) uint8 (GPU unpacks)
@@ -728,9 +766,12 @@ def capture_loop(rdi, full):
                 except Exception as e:
                     print("AE/AWB error (non-fatal):", e, flush=True)  # never crash the capture -> reinit
                 process(data, full)
+                if State.throttle:                # thermal governor active -> pace down (cools GPU+NPU)
+                    _t.sleep(State.throttle)
                 _hbn += 1                        # heartbeat: server-side publish rate (server froze? -> 0)
                 if _t.time() - _hbt >= 2.0:
-                    print(f"[hb] publish {_hbn/(_t.time()-_hbt):.0f} fps jseq={State.jseq} clients={State.clients} jpeg={0 if State.jpeg is None else len(State.jpeg)//1024}KB exp={EXPOSURE} wb=({WB_R:.2f},{WB_B:.2f})", flush=True)
+                    thr = f" throttle={State.throttle:.2f}s" if State.throttle else ""
+                    print(f"[hb] publish {_hbn/(_t.time()-_hbt):.0f} fps jseq={State.jseq} clients={State.clients} jpeg={0 if State.jpeg is None else len(State.jpeg)//1024}KB exp={EXPOSURE} wb=({WB_R:.2f},{WB_B:.2f}) temp={State.temp:.0f}C{thr}", flush=True)
                     _hbn = 0; _hbt = _t.time()
         except Exception as e:
             print("capture error (v4l2):", e, flush=True)
@@ -777,6 +818,7 @@ def _capture_loop_file(rdi, full, batch=300):
                     buf = f.read(FRAME)
                     if len(buf) == FRAME:
                         process(buf, full); last = n
+                        if State.throttle: time.sleep(State.throttle)   # thermal governor (same as mmap path)
                 elif proc.poll() is not None:   # batch finished -> restart
                     break
                 elif time.time() - grew > 2.5:  # capture stalled -> kill + restart
@@ -909,6 +951,7 @@ if __name__ == "__main__":
     rdi = setup_pipeline(args.cam, args.exposure, args.gain)
     if not args.no_yolo:
         init_detector()                        # spawn q6a_detector.py (NPU) + set up shared memory
+    threading.Thread(target=thermal_governor, daemon=True).start()   # pace the pipeline under the 90°C trip
     if HEADLESS:                               # production: no HTTP server; capture->demosaic->shm->YOLO
         print(f"pipeline ready ({rdi}); HEADLESS: capture -> shm -> YOLO (no MJPEG server)", flush=True)
         capture_loop(rdi, not args.fast)       # runs in the main thread, unconditionally (no client gating)
