@@ -620,13 +620,19 @@ class State:
     temp = 0.0                  # last max SoC temperature (°C), for the heartbeat
     moving = False              # P1.5: robot is moving/rotating (from the MCU wheel-odom ring)
     motion_fresh = False        # P1.5: the motion signal is live (ring present + advancing)
+    park = threading.Event()    # P0.9: thermal governor parks the detector (sheds NPU load) when set
 
 # Thermal governor: the board's binding limit is heat (kernel trip at 90°C), and the NPU has no kernel
 # throttle, so we pace the whole pipeline in software. Throttling the STREAMER's frame rate cascades: the
 # detector only infers on NEW frames (fseq), so slowing publish cools BOTH the GPU ISP and the NPU at once.
-THERMAL_HI = 82.0    # °C: engage throttling above this
-THERMAL_LO = 76.0    # °C: release throttling below this (hysteresis band avoids oscillation)
-THERMAL_CRIT = 87.0  # °C: hard throttle just under the 90°C kernel trip
+THERMAL_HI = 82.0        # °C: engage throttling above this
+THERMAL_LO = 76.0        # °C: release throttling below this (hysteresis band avoids oscillation)
+THERMAL_CRIT = 87.0      # °C: hard throttle just under the 90°C kernel trip
+THERMAL_PARK = 88.0      # °C: PARK the detector — stop ALL NPU inference (the biggest heat source, and the
+                         # NPU has no kernel throttle). Detections pause (overlay clears via the staleness
+                         # cutoff) until cooled back to THERMAL_HI, then the supervisor respawns it.
+THERMAL_SHUTDOWN = 95.0  # °C: last resort — orderly SIGTERM (clean NPU release + shm) before the 110°C PMIC
+                         # hard power-off. Does NOT auto-restart (avoid re-entering a thermal runaway).
 
 def _max_temp():
     """Hottest of the 34 SoC thermal zones, in °C (whatever is hottest gates the pipeline)."""
@@ -716,21 +722,49 @@ def motion_monitor():
             fd = mm = None; last_wp = -1; time.sleep(1.0)
         time.sleep(0.1)
 
+def _thermal_step(t, hot):
+    """One governor tick for temperature `t` (°C); `hot` carries throttle-engaged state across ticks for
+    hysteresis. Returns (hot, shutdown). Pure except for State/DET side effects — unit-tested by _selftest."""
+    import signal
+    shutdown = False
+    if t >= THERMAL_SHUTDOWN:                                # last resort: clean stop before the 110°C PMIC
+        print(f"[thermal] EMERGENCY {t:.1f}°C >= {THERMAL_SHUTDOWN:.0f} -> orderly shutdown (SIGTERM self)", flush=True)
+        os.kill(os.getpid(), signal.SIGTERM)                 # -> _term -> atexit _cleanup (release NPU, clean shm)
+        return hot, True
+    if t >= THERMAL_PARK:                                    # shed the NPU: kill the detector, hold it down
+        State.throttle = 0.40; hot = True
+        if not State.park.is_set():
+            State.park.set()                                 # supervisor holds the detector down until cleared
+            print(f"[thermal] {t:.1f}°C >= {THERMAL_PARK:.0f} -> PARK detector (shed NPU load)", flush=True)
+            if DET and DET.get("proc"):
+                try: DET["proc"].terminate()                 # SIGTERM -> detector releases the HTP context cleanly
+                except Exception: pass
+    elif t >= THERMAL_CRIT:
+        State.throttle = 0.40; hot = True                    # ~2.5 fps ceiling: shed heat fast
+        print(f"[thermal] CRIT {t:.1f}°C -> hard throttle (~2.5fps)", flush=True)
+    elif t >= THERMAL_HI:
+        State.throttle = 0.12; hot = True                    # ~8 fps ceiling
+        print(f"[thermal] {t:.1f}°C >= {THERMAL_HI:.0f} -> throttle (~8fps)", flush=True)
+    elif hot and t <= THERMAL_LO:
+        State.throttle = 0.0; hot = False                    # cooled off -> full rate
+        print(f"[thermal] {t:.1f}°C <= {THERMAL_LO:.0f} -> throttle released", flush=True)
+    if State.park.is_set() and t <= THERMAL_HI:              # cooled into the safe band -> let it respawn
+        State.park.clear()
+        print(f"[thermal] {t:.1f}°C <= {THERMAL_HI:.0f} -> UNPARK detector (respawn)", flush=True)
+    return hot, shutdown
+
 def thermal_governor():
-    """Poll SoC temperature and set State.throttle (inter-frame sleep) with hysteresis. Never restarts or
-    kills anything — it just slows the frame cadence so the board stays under the 90°C trip."""
+    """Poll SoC temperature and defend the board under the 90°C kernel trip / 110°C PMIC cut. Ladder:
+    82 → throttle (~8fps), 87 → hard throttle (~2.5fps), 88 → PARK the detector (shed the NPU entirely;
+    respawn when cooled to 82), 95 → orderly SIGTERM (clean shutdown). Frame-cadence throttle cools the GPU
+    ISP + NPU together (the detector only infers on new frames); parking removes the NPU heat the throttle
+    can't fully reach; shutdown is the last software line before the PMIC hard-cut."""
     hot = False
     while True:
         t = _max_temp(); State.temp = t
-        if t >= THERMAL_CRIT:
-            State.throttle = 0.40; hot = True                # ~2.5 fps ceiling: shed heat fast
-            print(f"[thermal] CRIT {t:.1f}°C -> hard throttle (~2.5fps)", flush=True)
-        elif t >= THERMAL_HI:
-            State.throttle = 0.12; hot = True                # ~8 fps ceiling
-            print(f"[thermal] {t:.1f}°C >= {THERMAL_HI:.0f} -> throttle (~8fps)", flush=True)
-        elif hot and t <= THERMAL_LO:
-            State.throttle = 0.0; hot = False                # cooled off -> full rate
-            print(f"[thermal] {t:.1f}°C <= {THERMAL_LO:.0f} -> throttle released", flush=True)
+        hot, shutdown = _thermal_step(t, hot)
+        if shutdown:
+            return
         time.sleep(2.0)
 
 def process(buf, full):
@@ -832,6 +866,14 @@ def init_detector():
             rc = proc.wait()                           # blocks until the detector exits
             if DET["stop"].is_set():
                 break
+            if State.park.is_set():                    # P0.9: thermal park — the governor killed it on purpose.
+                print("[detector] parked (thermal); holding until cooled", flush=True)
+                while State.park.is_set() and not DET["stop"].is_set():
+                    if DET["stop"].wait(1.0): break
+                if DET["stop"].is_set(): break
+                DET["spawn_t"] = time.monotonic(); DET["proc"] = _spawn(); fails = 0
+                print("[detector] unparked; respawned", flush=True)
+                continue                               # not a crash -> no backoff penalty
             ran = time.monotonic() - DET.get("spawn_t", 0)
             fails = 0 if ran > 60 else fails + 1
             delay = min(60, 5 * (2 ** min(fails, 4)))

@@ -6,6 +6,34 @@ it derives from).
 
 ---
 
+## 2026-07-06 — Harden P0.9: add the thermal hard-cutoff rungs (detector-park + orderly shutdown)
+
+**What:** The thermal governor was a frame-cadence throttle only (82/87 °C + hysteresis) with **no hard
+cutoff**. Added the two missing safety rungs above the throttle band:
+- **PARK @ 88 °C** — sheds the NPU entirely: sets `State.park`, SIGTERMs the detector (clean HTP-context
+  release), and the supervisor **holds it down** (no respawn, no backoff penalty) until temp falls back to
+  `THERMAL_HI` (82 °C), then respawns. The 82↔88 hysteresis band stops respawn flapping. Overlay clears via
+  the existing staleness cutoff while parked. This removes the NPU heat that frame-throttling alone can't
+  reach (the detector is a separate process; throttling only slows how often it's *fed*).
+- **EMERGENCY @ 95 °C** — orderly `SIGTERM` self (`os.kill(getpid())` → the `_term` handler → atexit
+  `_cleanup`: release NPU + clean shm), the last software line before the **110 °C PMIC hard power-off**.
+  Deliberately does **not** auto-restart (avoid re-entering a thermal runaway).
+
+Refactored the per-tick decision into a pure `_thermal_step(t, hot)` so the ladder is unit-testable.
+
+**Why:** Fable-5 P0.9 (audit-corrected — was ⚠️ partial). The NPU has no kernel throttle and the 110 °C PMIC
+cut was already hit once; before P2.3 adds a **third** sustained accelerator (depth), the board needs an
+actual cutoff, not just a slowdown.
+
+**Verify:** (1) **Unit test** `_thermal_step` across the ladder — 11/11 pass: 60 °C idle, 83 °C→0.12 s, 87.5 °C
+→0.40 s, **88.5 °C→park set + detector `terminate()` called**, 85 °C→park held (hysteresis, no re-terminate),
+80 °C→unpark, **96 °C→shutdown flagged + `os.kill(SIGTERM)` invoked**. (2) **On-device:** redeployed, restarted
+`--gpu --bin --awb` → streamer+detector up, `curl /stream` 44 fps, heartbeat `temp=59–63 °C`, **0 false
+PARK/EMERGENCY** at real idle temps. Full park→respawn / emergency-shutdown at real 88/95 °C is validated in
+the (still-pending) in-compartment thermal soak. File: `q6a_camstream.py`.
+
+---
+
 ## 2026-07-06 — Finish P0.8: open-time FRAME assert + delete the /dev/shm file-tail fallback
 
 **What:** Completed the half of P0.8 the earlier "P0.7, P0.8" entry left undone.

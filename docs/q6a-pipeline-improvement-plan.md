@@ -44,7 +44,7 @@ title — the "P0.7, P0.8" entry landed only P0.7). ✅ done · ⚠️ partial/d
 | P0.6 errno re-raise | ✅ | EAGAIN-only break, else raise |
 | P0.7 `--fast`+YOLO | ✅ | OUT dims halved before shm alloc + shape guard |
 | P0.8 assert + drop file-tail | ✅ | open-time `frame_size==FRAME` assert added (`expect_size`); file-tail fallback + `q6a_cap.raw` deleted; fault recovery = reinit+backoff (fixed 2026-07-06) |
-| **P0.9 thermal governor** | ⚠️ | **2-rung frame-cadence throttle (76/82/87 °C) + hysteresis ONLY. Missing: 88 °C clean detector-park, 95 °C orderly SIGTERM, force-bin, LLM-refuse. No hard cutoff exists.** |
+| P0.9 thermal governor | ✅ | throttle (82/87) **+ hard cutoffs added 2026-07-06**: 88 °C clean detector-park (respawn at 82, hysteresis) + 95 °C orderly SIGTERM before the 110 °C PMIC; unit-tested. (force-bin + LLM-refuse still deferred → see **P1.7** decode-contention scheduling) |
 | P0.10 label rename | ✅ | `yolov8_det` |
 | P1.1 ISP-at-cadence | ✅ | headless paces ISP to YOLO_FPS |
 | P1.2 w8a8 + native input | ✅ | deployed default; ~3× vs w8a16; reproducible w/o any `.pt` |
