@@ -41,6 +41,25 @@ def _die(msg, st=None):
     sys.exit(1)
 
 
+# ---- pre-load memory guard ----
+# The model needs ~1.8 GB. On a leaked board (unclean NPU-client exits / cDSP SSRs orphan fastrpc PDs, which
+# are unreclaimable until reboot and accumulate as "used" memory), loading here OOM-THRASHES THE WHOLE BOARD
+# into a wedge (observed 2026-07-07: MemAvail ~1.8 GB -> load -> 6 OOMs -> reboot). Fail fast + loud instead:
+# the box stays usable, the cause is obvious, and systemd's StartLimit caps the (pointless) restart loop.
+MIN_FREE_MB = int(os.environ.get("Q6A_LLM_MIN_FREE_MB", "2500"))
+def _mem_available_mb():
+    try:
+        for ln in open("/proc/meminfo"):
+            if ln.startswith("MemAvailable"):
+                return int(ln.split()[1]) // 1024
+    except Exception:
+        pass
+    return 1 << 30   # can't read -> don't block
+_avail = _mem_available_mb()
+if _avail < MIN_FREE_MB:
+    _die(f"MemAvailable {_avail} MB < {MIN_FREE_MB} MB needed to load the model — board likely low on RAM from "
+         f"accumulated NPU/dma leak (orphaned cDSP PDs); REBOOT to reclaim. Refusing to load (would OOM-wedge the board)")
+
 # ---- load the model ONCE ----
 with open(CONFIG, "rb") as f:
     cfg_json = f.read()
@@ -86,6 +105,7 @@ def _recover_or_reset(ok):
 
 
 def handle(conn):
+    attempted = False   # only an actual NPU query counts toward SSR detection (not socket/read issues)
     ok = False
     try:
         conn.settimeout(120)
@@ -115,6 +135,7 @@ def handle(conn):
                 except OSError:
                     pass
         c_cb = CALLBACK(cb)
+        attempted = True                         # from here a failure is a query/context failure, not socket
         with npu_lock:
             lib.GenieDialog_reset(dlg)           # stateless per request
             st = lib.GenieDialog_query(dlg, prompt, SENTENCE_COMPLETE, c_cb, None)
@@ -132,7 +153,8 @@ def handle(conn):
         except OSError:
             pass
         conn.close()
-    _recover_or_reset(ok)                        # dead-context self-heal (see _recover_or_reset)
+    if attempted:
+        _recover_or_reset(ok)                    # dead-context self-heal (only for real query attempts)
 
 
 if os.path.exists(SOCK_PATH):

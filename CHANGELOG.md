@@ -6,6 +6,26 @@ it derives from).
 
 ---
 
+## 2026-07-07 — q6a-llmd pre-load memory guard: fail fast instead of OOM-wedging the board (leak fix C)
+
+**What:** `q6a_llmd.py` now checks `MemAvailable` before loading the ~1.8 GB model. If it's below
+`Q6A_LLM_MIN_FREE_MB` (default 2500), it logs a clear message ("board likely low on RAM from accumulated
+NPU/dma leak — REBOOT to reclaim") and exits **before** touching the model, socket, or NPU — instead of
+loading into a depleted box and OOM-thrashing the whole board into a wedge.
+
+**Why:** this is exactly what turned the q6a-llmd SSR recovery into a board-wide crisis today — a blind reload
+onto ~1.8 GB free drove 6 OOMs → thrash → wedge → reboot. The guard converts that into a clean, diagnosable
+failure with the board still usable; systemd's `StartLimitBurst` caps the (harmless, fast-failing) restart
+loop, and the fix is a reboot. Complements leak-fix A (graceful stop, which reduces the *rate* of leak) — this
+one prevents the *consequence* when a leak has already accumulated.
+
+**Verify (on-device):** ran the daemon with `Q6A_LLM_MIN_FREE_MB=99999999` → it printed the refusal and
+exited(1) **without loading the model or binding the socket** (no OOM, no NPU touch); the live service (default
+threshold, 9.1 GB free) was untouched and still answered "OK". Takes effect on the daemon's next restart.
+File: `q6a_llmd.py`.
+
+---
+
 ## 2026-07-07 — Stop leaking NPU memory on restart: graceful SIGTERM stop + harness ctx.release (leak fix A)
 
 **What:** `view_q6a_cam.sh`'s `stop_streamer` was `kill -9` on the streamer + `pkill -9` the detector — SIGKILL
