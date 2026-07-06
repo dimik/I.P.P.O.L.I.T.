@@ -6,6 +6,33 @@ it derives from).
 
 ---
 
+## 2026-07-06 — ByteTrack: stable per-object track IDs on the detector (plan P2.1)
+
+**What:** New `q6a_bytetrack.py` — a numpy-only ByteTrack (no scipy): two-stage per-class IoU association
+(match HIGH-confidence detections first, then recover tracks with the LEFTOVER low-confidence detections a
+plain tracker discards) + a constant-velocity Kalman filter for predict/smooth. It runs in the **detector
+process** right after `infer()` (<1 ms for tens of boxes on a Silver core). The detector now runs YOLO at
+`conf=0.1` so ByteTrack gets the low-confidence pool it needs — new tracks still only spawn from high-conf
+(≥0.4) boxes, so low-conf dets can only *extend* an existing track, never fabricate one. The detection shm
+row grows **6→7 floats** (`x1,y1,x2,y2,conf,cls,track_id`); the streamer reads `track_id`, colours each box
+by its **stable track id** (an object keeps its colour) and labels it `#<id> <label> <conf>`. Publishing
+stays under the P0.1/P0.2 seqlock on both channels.
+
+**Why:** Fable-5 P2.1 — per-frame boxes flicker identity; a stable track_id is the prerequisite for any
+downstream temporal logic (counting, "did this object move", ROS tracking). ByteTrack's low-conf recovery
+keeps an object's ID through brief confidence dips instead of dropping/re-numbering it.
+
+**Verify (on-device, live):** with a client pulling the stream — capture ~93 fps, **detector published at
+exactly the 10 fps `DET_FPS` cap** (`dseq` +60 over 3 s = 30 sets), 7-float shm protocol clean in both
+directions under the seqlock. **Track IDs stable across ~30 frames** — `tid=1` (tvmonitor) and `tid=2`
+(person) held the whole window (one transient re-acquire id, expected with greedy IoU). **Low-conf recovery
+confirmed:** `tid=2` retained its ID down to **conf 0.23** (well below the 0.4 spawn threshold) — a box that
+would flicker/vanish without ByteTrack. No crash; P0.4 shm-unlink safety honoured on both sides (the detector
+unregisters attached shm from the Py3.12 resource_tracker). Files: `q6a_bytetrack.py` (new), `q6a_detector.py`,
+`q6a_camstream.py`, `view_q6a_cam.sh` (deploys the new module).
+
+---
+
 ## 2026-07-06 — Mode-dependent AE: lower exposure ceiling while the robot moves (plan P1.5)
 
 **What:** AE now uses two exposure ceilings — the stationary default (`ae.max_exposure`, 2000) and a lower

@@ -48,6 +48,7 @@ scp -q "$REPO_DIR/q6a_yolo.py" "$Q6A:~/q6a_yolo.py"
 scp -q "$REPO_DIR/q6a_gpu.py" "$Q6A:~/q6a_gpu.py"           # Adreno OpenCL ISP
 scp -q "$REPO_DIR/q6a_v4l2.py" "$Q6A:~/q6a_v4l2.py"         # V4L2 mmap capture
 scp -q "$REPO_DIR/q6a_detector.py" "$Q6A:~/q6a_detector.py" # NPU YOLO (separate process, no lock)
+scp -q "$REPO_DIR/q6a_bytetrack.py" "$Q6A:~/q6a_bytetrack.py" # ByteTrack (track IDs, P2.1)
 [ -f "$REPO_DIR/models/yolov8_det.bin" ] && scp -q "$REPO_DIR/models/yolov8_det.bin" "$Q6A:~/yolov8_det.bin" 2>/dev/null || true
 [ -f "$REPO_DIR/models/yolov8_det_w8a8.bin" ] && scp -q "$REPO_DIR/models/yolov8_det_w8a8.bin" "$Q6A:~/yolov8_det_w8a8.bin" 2>/dev/null || true  # preferred (faster); q6a_yolo picks it if present
 [ -f "$REPO_DIR/models/coco_labels.txt" ] && scp -q "$REPO_DIR/models/coco_labels.txt" "$Q6A:~/coco_labels.txt" 2>/dev/null || true

@@ -8,8 +8,8 @@ lock). Separate address spaces + the kernel's multi-client arbitration = no lock
 
 Shared-memory layout (must match q6a_camstream.py):
   q6a_frame : H*W*3 uint8 RGB  (single writer = streamer)
-  q6a_ctrl  : [0]=frame_seq u64  [8]=det_seq u64  [16]=det_count i32  [32:]=MAX_DET x 6 f32
-              det row = (x1, y1, x2, y2, conf, class_idx)
+  q6a_ctrl  : [0]=frame_seq u64  [8]=det_seq u64  [16]=det_count i32  [32:]=MAX_DET x 7 f32
+              det row = (x1, y1, x2, y2, conf, class_idx, track_id)   # track_id from ByteTrack (P2.1)
 """
 import os, signal, time
 import numpy as np
@@ -59,7 +59,7 @@ def main():
     dcnt = np.ndarray((1,), np.int32, buffer=cshm.buf, offset=16)
     ow_a = np.ndarray((1,), np.uint16, buffer=cshm.buf, offset=24)
     oh_a = np.ndarray((1,), np.uint16, buffer=cshm.buf, offset=26)
-    dbuf = np.ndarray((MAX_DET, 6), np.float32, buffer=cshm.buf, offset=CTRL_OFF)
+    dbuf = np.ndarray((MAX_DET, 7), np.float32, buffer=cshm.buf, offset=CTRL_OFF)
     for _ in range(300):                       # wait for the streamer to publish output dims
         if int(ow_a[0]) > 0 and int(oh_a[0]) > 0: break
         time.sleep(0.05)
@@ -67,8 +67,12 @@ def main():
     frame = np.ndarray((oh, ow, 3), np.uint8, buffer=fshm.buf)
     print(f"[detector] frame {ow}x{oh}", flush=True)
 
-    det = YoloDetector()
+    # conf=0.1 so ByteTrack gets the LOW-confidence pool it needs for the recovery stage (it only spawns
+    # tracks from high-conf dets, so low-conf boxes can't create false tracks — they only extend existing).
+    det = YoloDetector(conf=0.1)
     labels = det.labels
+    from q6a_bytetrack import ByteTracker
+    tracker = ByteTracker(high_thresh=0.4, low_thresh=0.1)
     print("[detector] YOLO ready on NPU (separate process, no lock)", flush=True)
     print(f"[detector] rate cap: {DET_FPS:g} fps" if MIN_PERIOD else "[detector] rate: unlimited (NPU ceiling)", flush=True)
     last = 0; t_prev = 0.0
@@ -93,15 +97,19 @@ def main():
             out = det.infer(img)                # NPU inference (concurrent with the GPU ISP process)
         except Exception as e:
             print("[detector] infer error:", e, flush=True); time.sleep(0.2); continue
-        n = min(len(out), MAX_DET)
+        # ByteTrack: assign stable track IDs (Kalman predict + two-stage IoU association). <1ms.
+        boxes = [(d[0], d[1], d[2], d[3]) for d in out]
+        scores = [d[5] for d in out]
+        clsi = [labels.index(d[4]) if d[4] in labels else -1 for d in out]
+        tracked = tracker.update(boxes, scores, clsi)     # (x1,y1,x2,y2,score,cls_idx,track_id)
+        n = min(len(tracked), MAX_DET)
         # seqlock publish (mirror of the frame channel): ODD while writing dbuf+dcnt, EVEN when done,
         # so the streamer never overlays a half-written detection set (rows not matching dcnt).
         sq = int(dseq[0])
         dseq[0] = sq + 1                        # odd: write in progress
         for i in range(n):
-            x1, y1, x2, y2, lab, cf = out[i]
-            ci = labels.index(lab) if lab in labels else -1
-            dbuf[i] = (x1, y1, x2, y2, cf, ci)
+            x1, y1, x2, y2, cf, ci, tid = tracked[i]
+            dbuf[i] = (x1, y1, x2, y2, cf, ci, tid)
         dcnt[0] = n
         dseq[0] = sq + 2                        # even: complete
     finally:

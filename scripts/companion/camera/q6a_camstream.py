@@ -108,7 +108,7 @@ AWB_BMIN, AWB_BMAX = 1.2, 4.2
 # YOLO runs in a SEPARATE PROCESS (q6a_detector.py) sharing frames via shared memory. The Adreno (GPU
 # ISP) and Hexagon (NPU) crash if driven concurrently in ONE process (shared userspace allocator
 # corruption) but run fine across processes -> no lock, true concurrency. shm layout <-> q6a_detector.py.
-MAX_DET = 32; CTRL_OFF = 32; CTRL_SIZE = CTRL_OFF + MAX_DET * 6 * 4
+MAX_DET = 32; CTRL_OFF = 32; CTRL_SIZE = CTRL_OFF + MAX_DET * 7 * 4   # det row: x1,y1,x2,y2,conf,cls,track_id
 DET = None                                     # dict of shm views + the detector subprocess (None if disabled)
 YOLO_FPS = 10                                   # cap NPU YOLO to this rate (0=unlimited ~26fps). A slow robot
                                                # doesn't need per-frame detection; boxes persist between updates,
@@ -592,14 +592,17 @@ _PALETTE = [(255, 64, 64), (64, 200, 64), (64, 160, 255), (255, 200, 0), (255, 6
             (0, 220, 220), (255, 128, 0), (160, 96, 255)]
 
 def draw_overlay(rgb, dets=None):
-    """Draw YOLO detections. dets: list of (x1,y1,x2,y2,label,conf) in rgb pixel coords."""
+    """Draw YOLO detections. dets: (x1,y1,x2,y2,label,conf[,track_id]) in rgb pixel coords.
+    Box colour keys off the TRACK id (stable per object) when present, so an object keeps its colour."""
     if not dets:
         return rgb
     im = Image.fromarray(rgb); d = ImageDraw.Draw(im)
-    for x1, y1, x2, y2, label, conf in dets:
-        col = _PALETTE[hash(label) % len(_PALETTE)]
+    for det in dets:
+        x1, y1, x2, y2, label, conf = det[:6]
+        tid = det[6] if len(det) > 6 else None
+        col = _PALETTE[(tid if tid else hash(label)) % len(_PALETTE)]
         d.rectangle([x1, y1, x2, y2], outline=col, width=3)
-        tag = f"{label} {conf:.2f}"
+        tag = f"#{tid} {label} {conf:.2f}" if tid else f"{label} {conf:.2f}"
         tw = d.textlength(tag, font=_FONT); th = 12
         d.rectangle([x1, y1 - th - 2, x1 + tw + 4, y1], fill=col)
         d.text((x1 + 2, y1 - th - 2), tag, fill=(0, 0, 0), font=_FONT)
@@ -776,7 +779,7 @@ def _read_dets():
         out = []
         for r in rows:
             ci = int(r[5]); lab = LABELS[ci] if 0 <= ci < len(LABELS) else str(ci)
-            out.append((int(r[0]), int(r[1]), int(r[2]), int(r[3]), lab, float(r[4])))
+            out.append((int(r[0]), int(r[1]), int(r[2]), int(r[3]), lab, float(r[4]), int(r[6])))  # +track_id
         _read_dets.cache = out
         return out
     return getattr(_read_dets, "cache", None)              # torn every retry -> reuse last good
@@ -809,7 +812,7 @@ def init_detector():
            "dcnt": np.ndarray((1,), np.int32, buffer=cshm.buf, offset=16),
            "ow": np.ndarray((1,), np.uint16, buffer=cshm.buf, offset=24),
            "oh": np.ndarray((1,), np.uint16, buffer=cshm.buf, offset=26),
-           "dbuf": np.ndarray((MAX_DET, 6), np.float32, buffer=cshm.buf, offset=CTRL_OFF)}
+           "dbuf": np.ndarray((MAX_DET, 7), np.float32, buffer=cshm.buf, offset=CTRL_OFF)}
     DET["fseq"][0] = 0; DET["dcnt"][0] = 0
     DET["ow"][0] = OUT_W; DET["oh"][0] = OUT_H          # publish output dims for the detector
     DET["stop"] = threading.Event()                    # set at teardown so the supervisor stops respawning
