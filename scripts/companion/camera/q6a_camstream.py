@@ -579,8 +579,14 @@ class State:
 def process(buf, full):
     rgb = debayer(buf, full)                                # packed RAW10 in -> (H,W,3) uint8 (GPU unpacks)
     if DET is not None:
+        # seqlock publish: bump to ODD before the copy (write in progress), EVEN after (complete).
+        # The reader rejects an odd seq and any seq that changed across its copy, so it never
+        # consumes a torn frame. A bare post-increment (old code) left a window where the reader
+        # could copy mid-write and see an unchanged seq on both sides.
+        seq = int(DET["fseq"][0])
+        DET["fseq"][0] = seq + 1                            # odd: write in progress
         DET["frame"][:] = rgb                              # publish latest frame to the detector (shm)
-        DET["fseq"][0] += 1
+        DET["fseq"][0] = seq + 2                            # even: write complete
     if HEADLESS:                                           # production: feed YOLO only, no human-view work
         return                                             # skip overlay draw + JPEG encode (saves ~10 ms/frame)
     dets = _read_dets() if DET is not None else None       # newest detections (lag ~1 inference)
@@ -590,14 +596,30 @@ def process(buf, full):
         State.jpeg = bio.getvalue(); State.jseq += 1
 
 def _read_dets():
-    n = int(DET["dcnt"][0])
-    if n <= 0:
-        return None
-    out = []
-    for r in DET["dbuf"][:n]:
-        ci = int(r[5]); lab = LABELS[ci] if 0 <= ci < len(LABELS) else str(ci)
-        out.append((int(r[0]), int(r[1]), int(r[2]), int(r[3]), lab, float(r[4])))
-    return out
+    # seqlock read of the detection return channel: reject an odd dseq (write in progress) and any
+    # snapshot whose dseq changed across the copy. On a torn read keep the previously overlaid boxes
+    # (cosmetic-only, so a bounded retry then fall back to cache — never block the display path).
+    for _ in range(4):
+        s = int(DET["dseq"][0])
+        if s & 1:
+            continue                                       # detector mid-write
+        n = int(DET["dcnt"][0])
+        rows = np.array(DET["dbuf"][:n]) if n > 0 else None  # snapshot before re-check
+        if int(DET["dseq"][0]) != s:
+            continue                                       # changed during copy -> retry
+        _read_dets.last_seq = s
+        if n <= 0:
+            _read_dets.cache = None
+            return None
+        out = []
+        for r in rows:
+            ci = int(r[5]); lab = LABELS[ci] if 0 <= ci < len(LABELS) else str(ci)
+            out.append((int(r[0]), int(r[1]), int(r[2]), int(r[3]), lab, float(r[4])))
+        _read_dets.cache = out
+        return out
+    return getattr(_read_dets, "cache", None)              # torn every retry -> reuse last good
+_read_dets.cache = None
+_read_dets.last_seq = -1
 
 def init_detector():
     """Create the shared-memory frame/dets buffers and spawn q6a_detector.py (NPU, separate process).
@@ -619,6 +641,7 @@ def init_detector():
     DET = {"fshm": fshm, "cshm": cshm,
            "frame": np.ndarray((OUT_H, OUT_W, 3), np.uint8, buffer=fshm.buf),
            "fseq": np.ndarray((1,), np.uint64, buffer=cshm.buf, offset=0),
+           "dseq": np.ndarray((1,), np.uint64, buffer=cshm.buf, offset=8),
            "dcnt": np.ndarray((1,), np.int32, buffer=cshm.buf, offset=16),
            "ow": np.ndarray((1,), np.uint16, buffer=cshm.buf, offset=24),
            "oh": np.ndarray((1,), np.uint16, buffer=cshm.buf, offset=26),

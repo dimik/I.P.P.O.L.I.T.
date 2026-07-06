@@ -73,12 +73,16 @@ def main():
         except Exception as e:
             print("[detector] infer error:", e, flush=True); time.sleep(0.2); continue
         n = min(len(out), MAX_DET)
+        # seqlock publish (mirror of the frame channel): ODD while writing dbuf+dcnt, EVEN when done,
+        # so the streamer never overlays a half-written detection set (rows not matching dcnt).
+        sq = int(dseq[0])
+        dseq[0] = sq + 1                        # odd: write in progress
         for i in range(n):
             x1, y1, x2, y2, lab, cf = out[i]
             ci = labels.index(lab) if lab in labels else -1
             dbuf[i] = (x1, y1, x2, y2, cf, ci)
         dcnt[0] = n
-        dseq[0] += 1                            # publish
+        dseq[0] = sq + 2                        # even: complete
 
 
 if __name__ == "__main__":
