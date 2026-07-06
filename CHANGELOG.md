@@ -6,6 +6,30 @@ it derives from).
 
 ---
 
+## 2026-07-07 — Incident + root cause: NPU/dma memory leaks monotonically until reboot (leak fix B / record)
+
+**Incident:** getting `q6a-llmd` healthy (reloading its 1.8 GB model) drove the board into OOM-thrash and a
+wedge; recovery was a **reboot** (~clean boot → **11 GB free**, vs ~1.8 GB before).
+
+**Root cause (evidence, persistent journal boot -1, Jul 5 05:27 → Jul 6 23:15):** on the QCS6490 every NPU
+client opens a fastrpc **process-domain (PD)** + rpcmem/dma-heap buffers on the cDSP. An **unclean exit
+(`kill -9`, or a client killed mid-op) or a cDSP SSR** (`Broken pipe` on the fastrpc session — ×18 over the
+boot) **orphans** those mappings; the host kernel can't reclaim DSP-pinned memory, so it stays "used" but is
+**invisible in `ps`/RSS/slab/cache** (peak process RSS was 16 MB while 11 GB was "used"). It **accumulates
+monotonically until reboot** — `err 5005` / `remote_munmap failed` ×16-18 are the reclaim-failure signatures;
+182 PDs were created over the uptime. Over ~1.5 days this built to ~9 GB. The 6 OOMs were clustered in one
+4-minute window — the LLM reload consuming the last headroom the leak had left, not the cause of the bulk.
+The sysfs cdsp SSR that *would* reset it **hangs on this kernel**, so reboot is the only reclaim.
+
+**Operational takeaway:** treat **periodic reboot as maintenance**; watch `MemAvailable` (huge "used" + tiny
+top-RSS = this leak; confirm via `/sys/kernel/debug/dma_buf/bufinfo`). The three fixes below attack it from
+both ends — **A** (graceful stop, `ctx.release`) cuts the self-inflicted leak *rate*; **C** (pre-load mem
+guard) prevents the *consequence* (OOM-wedge) once a leak has accumulated; and the daemon self-recovery +
+`StartLimit` keep an SSR from silently killing the LLM. None *prevent* SSR-stranding — reboot remains the cure.
+Recorded in the [[project_q6a_adaptive_genie]] memory note too.
+
+---
+
 ## 2026-07-07 — q6a-llmd pre-load memory guard: fail fast instead of OOM-wedging the board (leak fix C)
 
 **What:** `q6a_llmd.py` now checks `MemAvailable` before loading the ~1.8 GB model. If it's below
