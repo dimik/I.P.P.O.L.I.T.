@@ -6,6 +6,37 @@ it derives from).
 
 ---
 
+## 2026-07-07 — P2.3 depth runtime: MiDaS process publishing inverse-depth, coexists with the detector
+
+**What:** New `q6a_depth.py` — a 3rd accelerator process (mirrors the detector's hardened structure) that reads
+the streamer's frame shm, resizes to 256×256, runs the w8a8 MiDaS-V2 on the NPU, and publishes a 256×256
+inverse-depth map to a new **`q6a_depth` shm** (`[0]=depth_seq u64, [8]=dw, [10]=dh, [16]=scale f32,
+[20]=shift f32, [64:]=256×256 u8`) under the same odd/even seqlock. Streamer gains `--depth` (+ `--depth-fps`,
+default 5): `init_depth()` creates the shm and spawns/supervises the process with the same anti-restart-storm
+backoff **and thermal-park awareness** as the detector — the P0.9 governor now parks **both** NPU consumers at
+88 °C. Opt-in only (`DEPTH=1 ./view_q6a_cam.sh`); off by default pending in-compartment thermal validation.
+
+Input is native uint8 NCHW (dequant ≈ pixel/255; the small approximation is absorbed by the affine metric
+rescale since MiDaS output is affine-invariant). The `scale`/`shift` shm fields are the **metric affine fit**
+(`metric = 1/(scale·disp + shift)`) — currently 0/unset: **LiDAR/floor-plane scaling is the remaining piece**
+and needs the robot's `/scan` (no LiDAR on the bench).
+
+**Why:** P2.3 — off-plane obstacle sense + metric depth for ~0.2 W without a 2nd SLAM. The coexistence test
+cleared depth+detector (leak-free), so the runtime proceeds on that basis (owner-approved).
+
+**Verify (on-device, `--depth` + active detector):** all three processes up (camstream + detector + depth),
+`q6a_depth` shm 65600 B created. **Depth publishes at the 5 fps cap** (`depth_seq` +30/3 s = 15) while the
+**detector coexists at ~10 fps** (dseq +58/3 s) — 2 NPU processes publishing concurrently, no wedge.
+**Depth map is qualitatively correct**: std 66.5 (strong structure, not flat) and the vertical gradient is
+physically right — row-band inverse-depth **top=15.9 (far) → mid=101 → bottom=134 (near)**, i.e. the floor by
+the robot reads nearest and the far wall farthest. Baseline (no-depth) restored after. Files: `q6a_depth.py`
+(new), `q6a_camstream.py`, `view_q6a_cam.sh`.
+
+**Next:** LiDAR/floor-plane metric scaling (needs the robot), a depth consumer (overlay / ROS publish), and
+the in-compartment thermal + pinned-memory re-measure before depth runs by default alongside a healthy LLM.
+
+---
+
 ## 2026-07-07 — P2.3 coexistence + dmabuf-growth test: depth+detector clean, no leak; LLM gate found
 
 **What:** Ran `depth_coexist.py` — MiDaS depth at 10 Hz as a 3rd NPU context alongside the live,

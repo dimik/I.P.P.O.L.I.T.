@@ -110,6 +110,10 @@ AWB_BMIN, AWB_BMAX = 1.2, 4.2
 # corruption) but run fine across processes -> no lock, true concurrency. shm layout <-> q6a_detector.py.
 MAX_DET = 32; CTRL_OFF = 32; CTRL_SIZE = CTRL_OFF + MAX_DET * 7 * 4   # det row: x1,y1,x2,y2,conf,cls,track_id
 DET = None                                     # dict of shm views + the detector subprocess (None if disabled)
+DEPTH = None                                   # P2.3: dict of shm views + the depth subprocess (None if off)
+DEPTH_FPS = 5.0                                # cap NPU MiDaS depth to this rate (a 3rd accelerator load)
+DEPTH_RES = 256                               # MiDaS-v21-small is 256x256; q6a_depth shm = 64B hdr + 256*256 u8
+DEPTH_SHM_SIZE = 64 + DEPTH_RES * DEPTH_RES
 YOLO_FPS = 10                                   # cap NPU YOLO to this rate (0=unlimited ~26fps). A slow robot
                                                # doesn't need per-frame detection; boxes persist between updates,
                                                # so 10fps frees the NPU (~60% idle -> cooler, shares HTP w/ the LLM).
@@ -735,10 +739,11 @@ def _thermal_step(t, hot):
         State.throttle = 0.40; hot = True
         if not State.park.is_set():
             State.park.set()                                 # supervisor holds the detector down until cleared
-            print(f"[thermal] {t:.1f}°C >= {THERMAL_PARK:.0f} -> PARK detector (shed NPU load)", flush=True)
-            if DET and DET.get("proc"):
-                try: DET["proc"].terminate()                 # SIGTERM -> detector releases the HTP context cleanly
-                except Exception: pass
+            print(f"[thermal] {t:.1f}°C >= {THERMAL_PARK:.0f} -> PARK detector+depth (shed NPU load)", flush=True)
+            for D in (DET, DEPTH):                            # shed BOTH NPU consumers (SIGTERM -> clean HTP release)
+                if D and D.get("proc"):
+                    try: D["proc"].terminate()
+                    except Exception: pass
     elif t >= THERMAL_CRIT:
         State.throttle = 0.40; hot = True                    # ~2.5 fps ceiling: shed heat fast
         print(f"[thermal] CRIT {t:.1f}°C -> hard throttle (~2.5fps)", flush=True)
@@ -900,6 +905,65 @@ def init_detector():
     atexit.register(_cleanup)
     print("YOLO detector spawned (separate process, no lock; supervised)", flush=True)
 
+def init_depth():
+    """P2.3: create the q6a_depth shm and spawn q6a_depth.py (MiDaS on the NPU, separate process). A 3rd
+    accelerator process reading the same frame shm as the detector — proven to coexist leak-free (2026-07-07).
+    Supervised + thermal-park-aware exactly like the detector (parked/respawned by the governor)."""
+    global DEPTH
+    import atexit
+    from multiprocessing import shared_memory
+    try: shared_memory.SharedMemory(name="q6a_depth").unlink()      # clear a stale segment
+    except FileNotFoundError: pass
+    try:
+        zshm = shared_memory.SharedMemory(name="q6a_depth", create=True, size=DEPTH_SHM_SIZE)
+    except Exception as e:
+        print(f"depth disabled (shm: {e})", flush=True); return
+    DEPTH = {"zshm": zshm,
+             "dseq": np.ndarray((1,), np.uint64, buffer=zshm.buf, offset=0),
+             "dmap": np.ndarray((DEPTH_RES, DEPTH_RES), np.uint8, buffer=zshm.buf, offset=64),
+             "stop": threading.Event()}
+    DEPTH["dseq"][0] = 0
+
+    def _spawn():
+        return subprocess.Popen(["python3", os.path.expanduser("~/q6a_depth.py")],
+                                env={**os.environ, "Q6A_DEPTH_FPS": str(DEPTH_FPS)})
+    DEPTH["proc"] = _spawn()
+
+    def _supervise():
+        fails = 0
+        while not DEPTH["stop"].is_set():
+            rc = DEPTH["proc"].wait()
+            if DEPTH["stop"].is_set(): break
+            if State.park.is_set():                        # P0.9 thermal park — governor killed it on purpose
+                print("[depth] parked (thermal); holding until cooled", flush=True)
+                while State.park.is_set() and not DEPTH["stop"].is_set():
+                    if DEPTH["stop"].wait(1.0): break
+                if DEPTH["stop"].is_set(): break
+                DEPTH["spawn_t"] = time.monotonic(); DEPTH["proc"] = _spawn(); fails = 0
+                print("[depth] unparked; respawned", flush=True); continue
+            ran = time.monotonic() - DEPTH.get("spawn_t", 0)
+            fails = 0 if ran > 60 else fails + 1
+            delay = min(60, 5 * (2 ** min(fails, 4)))       # same anti-restart-storm backoff as the detector
+            print(f"[depth] exited rc={rc} after {ran:.0f}s; respawn in {delay}s (fail #{fails})", flush=True)
+            if DEPTH["stop"].wait(delay): break
+            DEPTH["spawn_t"] = time.monotonic(); DEPTH["proc"] = _spawn()
+            print("[depth] respawned", flush=True)
+    DEPTH["spawn_t"] = time.monotonic()
+    threading.Thread(target=_supervise, daemon=True).start()
+
+    def _cleanup():
+        DEPTH["stop"].set()
+        proc = DEPTH.get("proc")
+        try:
+            proc.terminate()
+            try: proc.wait(timeout=3)
+            except Exception: proc.kill()
+        except Exception: pass
+        try: zshm.close(); zshm.unlink()
+        except Exception: pass
+    atexit.register(_cleanup)
+    print("depth process spawned (separate process, no lock; supervised)", flush=True)
+
 def capture_loop(rdi, full):
     """Direct V4L2 mmap streaming (full sensor rate, ~23fps). On fault: reinit the device + back off
     (the old file-tail fallback was deleted per plan P0.8 — it wrote ~595 MB/batch to /dev/shm)."""
@@ -1021,6 +1085,8 @@ if __name__ == "__main__":
     ap.add_argument("--calibrate", action="store_true", help="capture a flat-field color profile (aim at a white/gray surface)")
     ap.add_argument("--calibrate-dark", action="store_true", help="dark-frame black calibration (COVER THE LENS): measures per-channel black to fix the brightness-dependent color cast; then re-run --calibrate")
     ap.add_argument("--no-yolo", action="store_true", help="disable the NPU YOLO detection overlay")
+    ap.add_argument("--depth", action="store_true", help="P2.3: also run MiDaS mono-depth on the NPU (3rd process, q6a_depth.py) publishing an inverse-depth map to the q6a_depth shm. Coexists with the detector leak-free; parked with it by the thermal governor.")
+    ap.add_argument("--depth-fps", type=float, default=5.0, help="cap MiDaS depth to this rate (a 3rd NPU/accelerator load; default 5)")
     ap.add_argument("--no-ae", action="store_true", help="disable sensor auto-exposure (use the fixed --exposure/--gain). AE nudges real integration time so bright scenes don't clip; --exposure is just the starting point.")
     ap.add_argument("--awb", action="store_true", help="enable ANCHORED auto white balance: gray-world clamped +-15%% around the calibrated WB, so it tracks the sensor's thermal drift + modest light changes but cannot run away to magenta. OFF by default (bare runs use fixed WB); view_q6a_cam.sh enables it.")
     ap.add_argument("--camera-model", default="imx296", help="profiles/<model>.json to load all sensor config from (geometry, CFA, format, defaults, AE, CCM). Add a camera = add a profile.")
@@ -1073,6 +1139,9 @@ if __name__ == "__main__":
     rdi = setup_pipeline(args.cam, args.exposure, args.gain)
     if not args.no_yolo:
         init_detector()                        # spawn q6a_detector.py (NPU) + set up shared memory
+    if args.depth:
+        DEPTH_FPS = args.depth_fps
+        init_depth()                           # P2.3: spawn q6a_depth.py (NPU MiDaS) + q6a_depth shm
     threading.Thread(target=thermal_governor, daemon=True).start()   # pace the pipeline under the 90°C trip
     if AE_MAX_EXP_MOVING:                                             # P1.5: only when a moving ceiling is set
         threading.Thread(target=motion_monitor, daemon=True).start()

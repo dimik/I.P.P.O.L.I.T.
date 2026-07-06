@@ -54,7 +54,7 @@ title — the "P0.7, P0.8" entry landed only P0.7). ✅ done · ⚠️ partial/d
 | P1.6 constants + rename | ✅ | 12 GB / ~15 GB/s in CLAUDE.md |
 | P2.1 ByteTrack | ✅ | verified live; stable IDs, low-conf recovery to 0.23 |
 | **P2.2 CAM3** | ❌ | **all four landmines still hardcoded (`/dev/video0`, shm names, `pkill v4l2-ctl`, `.npz` path); only the media-graph `--cam` is parameterized** |
-| P2.3 mono-depth | ⚠️ | model gate DONE (w8a8 composes on v68, 5.28 ms); **coexistence: depth+active-detector clean, no dmabuf/mem leak, 7.6–7.9 ms under contention (2026-07-07)**; still NOT done: runtime process, LiDAR scale, and **true 3-way-active** (blocked — `q6a-llmd` dormant/fresh-load-fails + pinned-mem re-measure: does LLM 1.7 GB + detector + depth fit in 12 GB?) |
+| P2.3 mono-depth | ⚠️ | model gate ✅ (w8a8 v68, 5.28 ms); coexistence ✅ (depth+detector leak-free); **runtime ✅ — `q6a_depth.py` publishes inverse-depth at 5 fps, correct near/far structure, parks with the detector (2026-07-07)**; still NOT done: **LiDAR/floor-plane metric scale** (needs robot `/scan`), a depth consumer, and true 3-way-active (blocked on `q6a-llmd` health + pinned-mem re-measure) |
 | P3.1 ROS/Nav2 · P3.2 power HW | ❌ | not started |
 
 **Before P2.3 goes live:** land P0.8, harden P0.9 (add the 88/95 °C hard rungs), then run the 3-process
