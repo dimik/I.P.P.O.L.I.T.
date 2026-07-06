@@ -7,7 +7,20 @@ Q6A="ippolit-lan"                 # wired link (192.168.20.2)
 HOST_IP="192.168.20.2"; PORT=8092
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-stop_streamer() { ssh "$Q6A" "p=\$(ss -ltnp 2>/dev/null|grep ':$PORT '|grep -oP 'pid=\K[0-9]+'|head -1); [ -n \"\$p\" ] && kill -9 \$p; pkill -9 -f '[q]6a_detector'; pkill -9 -f '[v]4l2-ctl'; rm -f /dev/shm/q6a_*; sleep 2" || true; }
+# GRACEFUL stop (matters for the NPU): SIGKILL orphans the detector/depth fastrpc PD + rpcmem on the cDSP,
+# which is UNRECLAIMABLE until reboot (accumulates -> OOM; see CHANGELOG 2026-07-07). SIGTERM instead lets the
+# streamer's atexit cascade run each NPU child's ctx.release() (clean HTP teardown). Escalate to -9 only if it
+# won't exit in ~10s.
+stop_streamer() { ssh "$Q6A" "
+    p=\$(ss -ltnp 2>/dev/null|grep ':$PORT '|grep -oP 'pid=\K[0-9]+'|head -1)
+    if [ -n \"\$p\" ]; then
+      kill -TERM \$p 2>/dev/null
+      for i in \$(seq 1 20); do kill -0 \$p 2>/dev/null || break; sleep 0.5; done
+      kill -9 \$p 2>/dev/null || true
+    fi
+    pkill -TERM -f '[q]6a_detector'; pkill -TERM -f '[q]6a_depth'; sleep 2   # clean NPU release (ctx.release)
+    pkill -9 -f '[q]6a_detector'; pkill -9 -f '[q]6a_depth'; pkill -9 -f '[v]4l2-ctl'   # fallback only
+    rm -f /dev/shm/q6a_*" || true; }
 
 if [ "${1:-}" = calibrate-dark ]; then
     # Dark-frame black calibration -> fixes the brightness-dependent color cast (green shadows / magenta

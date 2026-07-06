@@ -85,3 +85,7 @@ print(f"LLM queries: {llm_ok}/{llm_n} ok" + (f", latency med={np.median(llm_lat)
 print(f"mem_avail: start={mem_series[0]}MB end={mem_series[-1]}MB min={min(mem_series)}MB delta={mem_series[-1]-mem_series[0]}MB", flush=True)
 if all(dmabuf_series): print(f"dmabuf: start={dmabuf_series[0]}B end={dmabuf_series[-1]}B delta={dmabuf_series[-1]-dmabuf_series[0]}B", flush=True)
 print(f"temp: baseline={t0:.1f}C peak={temp_hi:.1f}C", flush=True)
+try:
+    ctx.release()   # clean HTP teardown — else this test orphans its fastrpc PD on the cDSP (unreclaimable)
+except Exception as e:
+    print("[coexist] ctx release:", e, flush=True)

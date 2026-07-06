@@ -22,3 +22,7 @@ dt = (time.time() - t0) / N * 1000.0
 o = np.array(out[0]) if isinstance(out, (list, tuple)) else np.array(out)
 print(f"[depth] inference: {dt:.2f} ms/frame over {N} iters", flush=True)
 print(f"[depth] output size={o.size} (expect 256*256={256*256}), min={o.min()} max={o.max()}", flush=True)
+try:
+    ctx.release()   # clean HTP teardown — else this bench orphans its fastrpc PD on the cDSP (unreclaimable)
+except Exception as e:
+    print("[depth] ctx release:", e, flush=True)

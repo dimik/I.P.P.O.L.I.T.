@@ -6,6 +6,27 @@ it derives from).
 
 ---
 
+## 2026-07-07 — Stop leaking NPU memory on restart: graceful SIGTERM stop + harness ctx.release (leak fix A)
+
+**What:** `view_q6a_cam.sh`'s `stop_streamer` was `kill -9` on the streamer + `pkill -9` the detector — SIGKILL
+**orphans** each NPU client's fastrpc PD + rpcmem on the cDSP, which is **unreclaimable until reboot** and
+accumulates → OOM (root-caused in the q6a-llmd incident, same day). Now it **SIGTERMs** the streamer first
+(its atexit cascade runs each NPU child's `ctx.release()` for a clean HTP teardown), waits up to ~10 s, and
+only escalates to `-9` as a fallback; detector/depth get SIGTERM→(2 s)→SIGKILL too. Also added `ctx.release()`
+to the two depth diagnostics (`depth_bench.py`, `depth_coexist.py`), which previously just exited and orphaned
+their MiDaS context every run.
+
+**Why:** every dev-cycle restart (there are many) was stranding an NPU context. This is the *self-inflicted*
+half of the leak — it doesn't stop SSR-stranding (nothing does), but it stops the bleed we control.
+
+**Verify (on-device, A/B on the mechanism):** started streamer+detector (dma_buf 23 objects / 1.862 GB,
+MemAvail 9.20 GB) → ran the new graceful stop → detector logged **"releasing NPU context + shm"** (clean
+`ctx.release`, not a kill), dma_buf **dropped to 15 objects / 1.855 GB** (contexts freed, no orphan), and
+**MemAvailable rose to 9.37 GB** (~+170 MB reclaimed). A SIGKILL would have left those orphaned. Files:
+`view_q6a_cam.sh`, `depth_bench.py`, `depth_coexist.py`.
+
+---
+
 ## 2026-07-07 — Fix q6a-llmd: recover from a cDSP SSR + add self-healing (was dead ~22 h)
 
 **Root cause:** at Jul 6 00:51:41 the **cDSP had a subsystem restart (SSR)** — the fastrpc session got
