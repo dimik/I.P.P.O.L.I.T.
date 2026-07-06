@@ -859,14 +859,14 @@ def init_detector():
     print("YOLO detector spawned (separate process, no lock; supervised)", flush=True)
 
 def capture_loop(rdi, full):
-    """Prefer direct V4L2 mmap streaming (full sensor rate, ~23fps); fall back to the file-tail method."""
+    """Direct V4L2 mmap streaming (full sensor rate, ~23fps). On fault: reinit the device + back off
+    (the old file-tail fallback was deleted per plan P0.8 — it wrote ~595 MB/batch to /dev/shm)."""
     import time
     subprocess.run(["pkill", "-9", "-f", "v4l2-ctl"], check=False)   # free the device
-    try:
-        from q6a_v4l2 import V4l2Cam
-    except Exception as e:
-        print(f"V4L2 mmap unavailable ({e}); using file-tail capture", flush=True)
-        return _capture_loop_file(rdi, full)
+    # The mmap path is the ONLY supported capture path. The old file-tail fallback (v4l2-ctl --stream-to a
+    # /dev/shm file, ~595 MB/batch) was itself the crash-loop path — deleted per plan P0.8. Import failure
+    # is now fatal (loud) rather than a silent degrade into that path.
+    from q6a_v4l2 import V4l2Cam
     import time as _t
     cam = None; fails = 0; _hbn = 0; _hbt = _t.time()
     # Headless: no human viewer, so run the expensive GPU ISP only as fast as the detector consumes it
@@ -881,7 +881,7 @@ def capture_loop(rdi, full):
             State.wake.wait(); State.wake.clear(); continue
         try:
             if cam is None:
-                cam = V4l2Cam("/dev/video0", W, H, pixelformat=_fourcc(PIXFMT)); fails = 0
+                cam = V4l2Cam("/dev/video0", W, H, pixelformat=_fourcc(PIXFMT), expect_size=FRAME); fails = 0
             data = cam.read_latest(timeout=1.0)  # drains to the freshest frame (low latency)
             if _isp_period and data is not None and (_t.monotonic() - _last_isp) < _isp_period:
                 continue                         # headless ISP cadence: drop pre-debayer, keep draining
@@ -908,59 +908,11 @@ def capture_loop(rdi, full):
                 except Exception: pass
                 cam = None
             fails += 1
-            if fails >= 3:
-                print("V4L2 capture failing; falling back to file-tail", flush=True)
-                return _capture_loop_file(rdi, full)
-            time.sleep(0.5)
-
-def _capture_loop_file(rdi, full, batch=300):
-    """Fallback: v4l2-ctl --stream-count=0-to-pipe HANGS this CAMSS driver, and a
-    capture-then-process batch stutters (freeze during capture). Instead: run a large finite batch
-    writing to a tmpfs file while we *tail* it, always seeking to the LATEST complete frame (dropping
-    any we can't keep up with -> low latency, no stutter). Brief hiccup only every ~batch frames."""
-    import time, os
-    tmp = "/dev/shm/q6a_cap.raw"
-    subprocess.run(["pkill", "-9", "-f", "v4l2-ctl"], check=False)  # clear orphans once at startup
-    while True:
-        if State.clients == 0 and not HEADLESS:   # no viewer -> stop capturing (headless runs always)
-            State.jpeg = None
-            subprocess.run(["pkill", "-9", "-f", "v4l2-ctl"], check=False)
-            State.wake.wait(); State.wake.clear()
-            continue
-        proc = None
-        try:
-            open(tmp, "wb").close()             # truncate before the new batch
-            proc = subprocess.Popen(
-                ["v4l2-ctl", "-d", "/dev/video0",
-                 f"--set-fmt-video=width={W},height={H},pixelformat={PIXFMT}",
-                 "--stream-mmap", f"--stream-count={batch}", f"--stream-to={tmp}"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            f = open(tmp, "rb"); last = 0; last_sz = -1; grew = time.time()
-            while State.clients > 0:
-                sz = os.path.getsize(tmp)
-                if sz != last_sz:
-                    last_sz = sz; grew = time.time()
-                n = sz // FRAME
-                if n > last:                    # new frame -> jump to the freshest one
-                    f.seek((n - 1) * FRAME)
-                    buf = f.read(FRAME)
-                    if len(buf) == FRAME:
-                        process(buf, full); last = n
-                        if State.throttle: time.sleep(State.throttle)   # thermal governor (same as mmap path)
-                elif proc.poll() is not None:   # batch finished -> restart
-                    break
-                elif time.time() - grew > 2.5:  # capture stalled -> kill + restart
-                    break
-                else:
-                    time.sleep(0.01)
-            f.close()
-        except Exception as e:
-            print("capture error:", e, flush=True); time.sleep(1)
-        finally:
-            if proc and proc.poll() is None:
-                proc.terminate()
-                try: proc.wait(timeout=2)
-                except Exception: proc.kill()
+            # No file-tail fallback (deleted, P0.8). Recovery for a transient fault is a device reinit
+            # (cam=None -> reopen next loop; P0.6 re-raises real errno so we land here). Back off
+            # progressively and keep retrying LOUDLY rather than dropping into a 595 MB/batch crash-loop;
+            # a persistent config mismatch surfaces as the V4l2Cam open-time FRAME assert on each retry.
+            time.sleep(min(0.5 * fails, 5.0))
 
 PAGE = (b"<!doctype html><html><head><title>Q6A IMX296</title>"
         b"<style>body{margin:0;background:#111}img{width:100vw;height:100vh;object-fit:contain}</style>"

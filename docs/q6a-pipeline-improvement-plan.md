@@ -43,7 +43,7 @@ title — the "P0.7, P0.8" entry landed only P0.7). ✅ done · ⚠️ partial/d
 | P0.5 MJPEG timeout | ✅ | `settimeout(10)` + widened except |
 | P0.6 errno re-raise | ✅ | EAGAIN-only break, else raise |
 | P0.7 `--fast`+YOLO | ✅ | OUT dims halved before shm alloc + shape guard |
-| **P0.8 assert + drop file-tail** | ❌ | **no open-time `frame_size==FRAME` assert; the ~595 MB `/dev/shm` file-tail fallback was NOT deleted and is still reachable** |
+| P0.8 assert + drop file-tail | ✅ | open-time `frame_size==FRAME` assert added (`expect_size`); file-tail fallback + `q6a_cap.raw` deleted; fault recovery = reinit+backoff (fixed 2026-07-06) |
 | **P0.9 thermal governor** | ⚠️ | **2-rung frame-cadence throttle (76/82/87 °C) + hysteresis ONLY. Missing: 88 °C clean detector-park, 95 °C orderly SIGTERM, force-bin, LLM-refuse. No hard cutoff exists.** |
 | P0.10 label rename | ✅ | `yolov8_det` |
 | P1.1 ISP-at-cadence | ✅ | headless paces ISP to YOLO_FPS |

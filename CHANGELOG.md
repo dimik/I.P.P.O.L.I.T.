@@ -6,6 +6,30 @@ it derives from).
 
 ---
 
+## 2026-07-06 — Finish P0.8: open-time FRAME assert + delete the /dev/shm file-tail fallback
+
+**What:** Completed the half of P0.8 the earlier "P0.7, P0.8" entry left undone.
+- **Open-time assert:** `V4l2Cam.__init__` takes `expect_size` and raises a named `RuntimeError` if the
+  driver-negotiated `sizeimage` ≠ the caller's `FRAME` (stride/padding/format mismatch). `capture_loop` passes
+  `expect_size=FRAME`. Previously a mismatch made `read_latest` return frames the caller silently dropped
+  (`len != FRAME`) → **0 fps forever with no error**; now it fails loud at open.
+- **Deleted the file-tail fallback:** removed `_capture_loop_file()` and both call sites. It ran
+  `v4l2-ctl --stream-to=/dev/shm/q6a_cap.raw` in ~595 MB (300×FRAME) batches and was itself the crash-loop
+  path. The mmap path is now the only capture path: import failure is fatal (loud), and a transient capture
+  fault recovers by **device reinit + progressive backoff** (`min(0.5·fails, 5) s`) instead of dropping into
+  the huge-write loop. A persistent config mismatch now surfaces as the open-time FRAME assert on each retry.
+
+**Why:** Fable-5 P0.8 (audit-corrected). The fallback masked faults, wrote ~0.6 GB/batch to tmpfs, and could
+crash-loop; the missing assert turned any format mismatch into a silent 0 fps. Both are prerequisites before
+adding load (P2.3).
+
+**Verify (on-device):** redeployed `q6a_camstream.py` + `q6a_v4l2.py`, restarted `--gpu --bin --awb`; streamer
++ detector up, shm allocated, `curl /stream` pulled **19.25 MB** with **no capture errors, no assert failure,
+no `q6a_cap.raw`** — i.e. the open-time assert passed for the correct `pBAA` format and the huge-write path is
+gone. Files: `q6a_v4l2.py`, `q6a_camstream.py`.
+
+---
+
 ## 2026-07-06 — Correct the improvement plan against a critical implementation audit
 
 **What:** Audited every plan item against the live code + device (not CHANGELOG titles) and corrected

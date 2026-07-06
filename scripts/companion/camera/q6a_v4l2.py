@@ -16,7 +16,7 @@ _FIELD_NONE = 1
 
 
 class V4l2Cam:
-    def __init__(self, dev="/dev/video0", width=1456, height=1088, nbufs=4, pixelformat=None):
+    def __init__(self, dev="/dev/video0", width=1456, height=1088, nbufs=4, pixelformat=None, expect_size=None):
         self.fd = os.open(dev, os.O_RDWR | os.O_NONBLOCK)
         try:
             f = r.v4l2_format(); f.type = _MPLANE
@@ -26,6 +26,13 @@ class V4l2Cam:
             f.fmt.pix_mp.field = _FIELD_NONE
             fcntl.ioctl(self.fd, r.IOC.S_FMT, f)
             self.frame_size = int(f.fmt.pix_mp.plane_fmt[0].sizeimage)
+            # P0.8: fail LOUD at open on any stride/padding/format mismatch. Without this, a mismatch made
+            # read_latest return frames the caller silently dropped (len != FRAME) -> 0 fps forever, no error.
+            if expect_size is not None and self.frame_size != expect_size:
+                raise RuntimeError(
+                    f"V4L2 negotiated sizeimage={self.frame_size} but caller expects FRAME={expect_size} "
+                    f"({dev} {width}x{height} fmt=0x{f.fmt.pix_mp.pixelformat:08x}) — stride/padding/format "
+                    f"mismatch; refusing to stream (would silently produce 0 fps)")
 
             req = r.v4l2_requestbuffers(); req.count = nbufs; req.type = _MPLANE; req.memory = _MMAP
             fcntl.ioctl(self.fd, r.IOC.REQBUFS, req)
