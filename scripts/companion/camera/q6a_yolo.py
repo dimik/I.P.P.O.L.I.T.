@@ -45,7 +45,7 @@ class YoloDetector:
     def __init__(self, model=MODEL_BIN, labels=LABELS_TXT, conf=0.30, iou=0.45):
         from qai_appbuilder import QNNContext, QNNConfig, Runtime, LogLevel, ProfilingLevel
         QNNConfig.Config(Runtime.HTP, LogLevel.WARN, ProfilingLevel.OFF)  # bundled 2.42 v68 backend
-        self.ctx = QNNContext("yolov11_det", model)
+        self.ctx = QNNContext("yolov8_det", model)   # deployed model is YOLOv8 (v11 doesn't run on v68)
         self.conf = conf
         self.iou = iou
         self.labels = ([l.strip() for l in open(labels) if l.strip()]

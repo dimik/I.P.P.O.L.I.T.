@@ -6,6 +6,22 @@ it derives from).
 
 ---
 
+## 2026-07-06 — Fix wrong planning constants + stale model label (plan P1.6, P0.10)
+
+**What:** (1) CLAUDE.md RAM `up to 16GB` → **12GB on this board** (11.5GB usable, avail ~2.8GB) with the
+correct DDR figures (~22 GB/s theoretical / ~15 GB/s practical, not 40-50); fixed the LLM-section bandwidth
+claim too. (2) `q6a_yolo.py` `QNNContext("yolov11_det", …)` → `"yolov8_det"` — the deployed model is YOLOv8
+(v11 doesn't run on v68), so logs no longer mislabel it.
+
+**Why:** Fable-5 review verified against `free` (11558 MB) and single-core memcpy — the 16GB/40-50GB/s figures
+were wrong and would mis-size the LLM+Nav2+2nd-cam budgets. The `yolov11_det` string was a copy-paste label,
+not the model.
+
+**Verify:** `free` confirms 12GB; label is cosmetic (QNN context name), takes effect on next detector restart.
+Files: `CLAUDE.md`, `scripts/companion/camera/q6a_yolo.py`.
+
+---
+
 ## 2026-07-06 — Start the review-driven improvement batch; add this changelog
 
 **What:** Established `CHANGELOG.md` and kicked off the architecture-improvement batch derived from the

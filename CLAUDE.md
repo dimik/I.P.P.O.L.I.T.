@@ -42,7 +42,12 @@ Turn a Dreame D10s Pro robot vacuum into an open AI platform:
 - CPU: 1× Kryo Prime @ 2.7GHz + 3× Gold @ 2.4GHz + 4× Silver @ 1.9GHz
 - NPU: **12 TOPS** (Hexagon DSP, 6th-gen Qualcomm AI Engine)
 - GPU: Adreno 643L (OpenCL, Vulkan)
-- RAM: up to 16GB LPDDR5
+- RAM: **12GB LPDDR5** on THIS board (11.5GB usable; QCS6490 SKU tops out at 16GB but ours is 12GB — measured
+  `free` = 11558MB, avail ~2.8GB with the vision pipeline + resident LLM running). DDR is **~22 GB/s
+  theoretical** (Radxa ships LPDDR5-5500 on a 2×16 bus; SoC-optimal 6400 = 25.6 GB/s), **~15 GB/s practical
+  multi-master** (single-core memcpy ~8 GB/s measured) — NOT the ~40-50 GB/s some older notes assume. A 1B LLM
+  decode alone needs ~9-10 GB/s effective (half the practical bus), which is why GPU llama.cpp ≈ NPU decode
+  speed and why ISP/YOLO frame-time jitters during LLM decode.
 - Connectivity: GbE, WiFi 6, BT 5.4, USB 3.1 + 3× USB 2.0, 3× MIPI CSI, 40-pin GPIO
 - Power: 12V, 18–30W (powered from robot 14.8V battery via 12V buck converter)
 - OS: **Ubuntu 24.04.4 LTS (Radxa OS, `rsdk-r2`) — installed on the M.2 2230 NVMe** (`/dev/nvme0n1p3`,
@@ -199,8 +204,8 @@ See `scripts/companion/gpu/setup_gpu_llm.sh`.
 - **Build gotcha:** `qcom-adreno-cl-dev` **conflicts** with generic `opencl-*-headers` — install it alone.
   Then llama.cpp `-DGGML_OPENCL=ON` (build tools: `git build-essential cmake`; glslc only for Vulkan).
 - **Measured (Llama-3.2 Q4, `-ngl 99`):** **1B = ~11.7 tok/s gen / ~82 tok/s prompt — identical to the NPU
-  (~12).** Decode is memory-bandwidth bound and GPU+NPU share the ~40-50 GB/s LPDDR5, so **the GPU is NOT
-  faster.** (Community "20-55 tok/s" is flagship Snapdragons w/ LPDDR5X, not this 2021 Adreno 643.)
+  (~12).** Decode is memory-bandwidth bound and GPU+NPU share the LPDDR5 bus (**~15 GB/s practical**, not
+  40-50 — see the RAM line above), so **the GPU is NOT faster.** (Community "20-55 tok/s" is flagship Snapdragons w/ LPDDR5X, not this 2021 Adreno 643.)
 - **⚠️ THERMAL — the 3B GPU full-offload run CRASHED the board (thermal shutdown).** Trips: **critical 110°C,
   hot 90°C**; the board idles ~65-70°C (passive cooling, enclosed in the D10s compartment). Sustained
   GPU/CPU compute → 110°C → PMIC emergency power-off (whole board dies: both NICs + SSH, hard hang, needs
