@@ -6,6 +6,42 @@ it derives from).
 
 ---
 
+## 2026-07-06 — Repo hygiene: untrack stock YOLO .pt checkpoints; archive the raw Fable review
+
+**What:** (1) Added `scripts/companion/camera/*.pt` to `.gitignore` and `git rm --cached`'d the
+already-tracked `yolo11n.pt`. Neither `.pt` is a build input — `build_yolo.sh` exports its model from the
+Qualcomm AI-Hub module, not a local checkpoint; `yolo11n.pt` had been swept into an unrelated white-balance
+commit by accident, and the untracked `yolov8n.pt` is a redundant stock ultralytics checkpoint. (2) Committed
+`docs/fable5-review.md` — the raw Fable-5 review session (the conversational source; `q6a-pipeline-review-
+findings.md` is its durable synthesis and stays the canonical one) — for provenance.
+
+**Why:** P1.2 is fully reproducible without either `.pt` (AI-Hub holds the reference weights; the committed
+`.bin`/`.dlc` artifacts are byte-identical to what's deployed). Tracking 6 MB stock checkpoints that nothing
+reads only bloats the repo. Verified: repo-wide grep finds no `ultralytics`/`YOLO(`/`torch.load` reference to
+either file.
+
+Files: `.gitignore`, `docs/fable5-review.md` (new), untracked `yolo11n.pt`.
+
+---
+
+## 2026-07-06 — Commit the post-CFA-fix WB recalibration (imx296_wb.npz)
+
+**What:** Updated the committed `imx296_wb.npz` to the recalibrated profile that is **currently live on the
+device**. The white-balance gain vector drops from a mean **1.807** (roughly R≈2.4 / G≈1.0 / B≈2.0 — the
+over-correction left over from the green-fighting "white-patch AWB" era, commit `b90cda2`) to a **near-neutral
+`(1.104, 1.000, 1.144)`**, and the 24×32×3 radial shading map is refreshed (mean 1.017→1.165). Per-channel
+black levels are unchanged (58.5).
+
+**Why:** After the CFA red↔blue fix (RGGB, not BGGR), the sensor no longer needs the heavy chroma correction
+the old profile baked in; a fresh flat-field calibration yields near-unity gains, which is what a correctly
+demosaiced IMX296 should have. The repo profile had drifted from the deployed one — this realigns them.
+
+**Verify:** the streamer loads exactly this profile on the Q6A (`loaded WB profile: … wb=(1.104,1.000,1.144)
++ shading map (24, 32)`), stream + detections healthy (person/tv detected with correct colour). Regenerate
+with `./view_q6a_cam.sh calibrate 2` (grey card) / `calibrate-dark 2` (covered lens). File: `imx296_wb.npz`.
+
+---
+
 ## 2026-07-06 — ByteTrack: stable per-object track IDs on the detector (plan P2.1)
 
 **What:** New `q6a_bytetrack.py` — a numpy-only ByteTrack (no scipy): two-stage per-class IoU association
