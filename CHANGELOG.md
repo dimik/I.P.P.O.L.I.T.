@@ -6,6 +6,30 @@ it derives from).
 
 ---
 
+## 2026-07-06 — Correct the improvement plan against a critical implementation audit
+
+**What:** Audited every plan item against the live code + device (not CHANGELOG titles) and corrected
+`docs/q6a-pipeline-improvement-plan.md`: added an authoritative **Implementation status** table and a
+**Restored from the review** section. Corrections of record:
+- **P0.8 — NOT done** (was implied done by the "P0.7, P0.8" entry): no open-time `frame_size==FRAME` assert
+  exists, and the ~595 MB `/dev/shm` file-tail fallback the plan said to *delete* is still present + reachable.
+- **P0.9 — partial:** a 2-rung frame-cadence throttle + hysteresis only; the 88 °C detector-park, 95 °C
+  SIGTERM, force-bin and LLM-refuse rungs are missing → **no hard thermal cutoff exists.**
+- **P2.2 — not done:** all four CAM3 landmines still hardcoded.
+- **P1.5 — done differently** (owner capped AE at 2000 not the plan's 6000; legitimate).
+- **3 review suggestions plan v1 silently dropped**, now tracked: **P1.7** NPU decode-contention scheduling
+  (contention- not temperature-triggered; matters more once depth is a 3rd NPU load), **P2.4** VO-lite for the
+  LiDAR-parked manual-drive blind spot (the dropped half of the review's stereo substitute), **P3.3**
+  Gemma-3-1B + GBNF CPU-LLM for constrained-JSON ROS handlers.
+
+**Why:** the owner asked for a critical audit — is each suggestion done / not done / done differently — rather
+than trusting the plan's forward-looking framing. Establishes a single source of truth before the P2.3 runtime.
+
+**Sequence agreed:** land P0.8 → harden P0.9 (hard rungs) → *then* the depth runtime + coexistence test.
+File: `docs/q6a-pipeline-improvement-plan.md`.
+
+---
+
 ## 2026-07-06 — MiDaS-V2 mono-depth composes + runs on v68 (plan P2.3, model gate)
 
 **What:** Stood up `build_depth.sh` (mirrors the YOLO 3-hop toolchain: AI-Hub ONNX → x86 2.42 DLC →
@@ -339,6 +363,11 @@ mode/alloc mismatch into a named error instead of a cryptic NumPy broadcast fail
 **Verify:** `--fast --awb` (no --bin/--gpu, the formerly-broken path) → **61 frames, 0 mismatch/capture
 errors**, detector correctly at 728×544 (would have crashed before). Restored production `--gpu --bin --awb`
 → 61 frames, 0 errors, 728×544. File: `q6a_camstream.py`.
+
+> **Correction (2026-07-06 audit):** this landed **P0.7 only**. P0.8 was NOT completed — the shape guard
+> here is a per-frame `process()` check, not the planned **open-time `frame_size==FRAME` assert**, and the
+> **`/dev/shm` file-tail fallback was not deleted** (it's still reachable). Tracked as ❌ in the plan; fixed
+> in a later entry.
 
 ---
 

@@ -29,6 +29,40 @@ architectural leverage, cheap). P2 = capability additions. P3 = larger/condition
 
 ---
 
+## Implementation status (audited 2026-07-06)
+
+Authoritative status of every item, from a critical code+device audit (do NOT infer "done" from a CHANGELOG
+title — the "P0.7, P0.8" entry landed only P0.7). ✅ done · ⚠️ partial/done-differently · ❌ not done.
+
+| Item | Status | Reality |
+|---|---|---|
+| P0.1 seqlock | ✅ | both channels fenced |
+| P0.2 return-channel | ✅ | `dseq` guarded read + fence |
+| P0.3 supervision/teardown | ✅ | respawn + clean NPU release + staleness cutoff |
+| P0.4 resource_tracker | ✅ | detector `unregister()`s attached shm |
+| P0.5 MJPEG timeout | ✅ | `settimeout(10)` + widened except |
+| P0.6 errno re-raise | ✅ | EAGAIN-only break, else raise |
+| P0.7 `--fast`+YOLO | ✅ | OUT dims halved before shm alloc + shape guard |
+| **P0.8 assert + drop file-tail** | ❌ | **no open-time `frame_size==FRAME` assert; the ~595 MB `/dev/shm` file-tail fallback was NOT deleted and is still reachable** |
+| **P0.9 thermal governor** | ⚠️ | **2-rung frame-cadence throttle (76/82/87 °C) + hysteresis ONLY. Missing: 88 °C clean detector-park, 95 °C orderly SIGTERM, force-bin, LLM-refuse. No hard cutoff exists.** |
+| P0.10 label rename | ✅ | `yolov8_det` |
+| P1.1 ISP-at-cadence | ✅ | headless paces ISP to YOLO_FPS |
+| P1.2 w8a8 + native input | ✅ | deployed default; ~3× vs w8a16; reproducible w/o any `.pt` |
+| P1.3 held-fd AE | ✅ | `VIDIOC_S_CTRL`, no per-tick fork |
+| P1.4 strip desktop | ✅ | +~480 MB RAM |
+| P1.5 mode-dependent AE | ⚠️ | **done DIFFERENTLY: owner capped stationary at 2000 (not the plan's 6000) / moving 1200, for high fps. Legitimate override.** |
+| P1.6 constants + rename | ✅ | 12 GB / ~15 GB/s in CLAUDE.md |
+| P2.1 ByteTrack | ✅ | verified live; stable IDs, low-conf recovery to 0.23 |
+| **P2.2 CAM3** | ❌ | **all four landmines still hardcoded (`/dev/video0`, shm names, `pkill v4l2-ctl`, `.npz` path); only the media-graph `--cam` is parameterized** |
+| P2.3 mono-depth | ⚠️ | **model gate DONE (MiDaS-V2 w8a8 composes on v68, 5.28 ms); runtime process + LiDAR scale + 3-accelerator coexistence NOT done** |
+| P3.1 ROS/Nav2 · P3.2 power HW | ❌ | not started |
+
+**Before P2.3 goes live:** land P0.8, harden P0.9 (add the 88/95 °C hard rungs), then run the 3-process
+(detector+LLM+depth) coexistence + in-compartment thermal + pinned-memory re-measure (Investigations §1–2).
+The rule below still holds: no sustained accelerator load without a live guard + an in-compartment re-measure.
+
+---
+
 ## P0 — Correctness & safety (prerequisites; land before adding any load)
 
 Mostly small, but several are architecturally load-bearing (enable tracking, prevent field failures / cDSP
@@ -116,6 +150,32 @@ they *create* the headroom the rest of the roadmap spends.
     ext4 root + a cDSP wedge). *Effort S–M.*
   - **Dock pass-through test** — if the Dreame charger sustains net-positive with ~8 W Q6A load, docked-sentry
     is indefinite. *Test, not code.*
+
+---
+
+## Restored from the review (dropped by plan v1; surfaced by the 2026-07-06 audit)
+
+The review recommended these; the first plan neither carried nor rejected them. They are NOT in the
+deferred/rejected table below — they are real, un-triaged suggestions.
+
+- **P1.7 — NPU decode-contention scheduling** (review findings §1/§5). Throttle YOLO to ~5 Hz *while the LLM
+  is decoding* and coalesce LLM queries. This is **contention-triggered, not temperature-triggered** — P0.9
+  only reacts to heat, so nothing today prevents LLM decode from jittering the vision cadence (or vice-versa).
+  **Directly relevant to P2.3**: a third accelerator (depth) makes NPU/DDR contention worse. *Effort M;
+  cross-process signal (e.g. the LLM daemon sets a flag the detector reads). Do alongside/after P0.9.*
+- **P2.4 — VO-lite (SMF-VO-class, <10 ms/frame, single Silver core)** (review findings §4). The review's
+  stereo substitute was mono-depth **plus** a light visual-odometry for the one real localization gap — the
+  LiDAR-parked manual-drive mode where the robot is currently blind. Plan v1 kept only the mono-depth half
+  (P2.3) and silently dropped VO-lite. *Effort M–L; gate on whether the manual-drive blind spot matters.*
+- **P3.3 — Gemma-3-1B on llama.cpp CPU with GBNF grammar-constrained decoding** (review findings §8). For
+  constrained-JSON event-driven ROS handlers: Genie cannot grammar-constrain, and Gemma-3-1B (IFEval 80.2)
+  beats Llama-1B (59.5) at instruction-following. Two-model split: NPU Llama for free-text, CPU Gemma+GBNF
+  for tool/JSON. *Effort M; revisits the dropped offline-agent problem with the right tool.*
+
+Minor (also dropped): a `qai_hub_models` w8a8 **LLM** export test on qcs6490 (settle if a 2nd NPU-LLM path
+exists); **measure ISP/YOLO frame-time jitter during LLM decode** (quantifies P1.7's payoff); and 3 code nits
+from findings §11 (the `hash(label)` random box colour — now moot, ByteTrack keys colour off track_id; the
+detector dim-fallback crash on a `--bin`-sized shm; the GPU `d_in = W*H*2` ≤10-bit sizing caveat).
 
 ---
 
