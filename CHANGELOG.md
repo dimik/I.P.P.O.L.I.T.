@@ -6,6 +6,35 @@ it derives from).
 
 ---
 
+## 2026-07-06 — Detector supervision + clean NPU/shm teardown + staleness cutoff (plan P0.3, P0.4)
+
+**What:** Made the two-process split survive detector death and shut down cleanly.
+- **Supervision (streamer):** `init_detector()` now runs a daemon supervisor thread that `wait()`s on the
+  detector and respawns it if it dies, with **exponential backoff 5→60 s** (reset after a >60 s stable run) so
+  a crash-looping detector never restart-storms the HTP/fastrpc stack (which can wedge cdsp → reboot). A
+  `DET["stop"]` Event lets teardown stop the supervisor before killing the child.
+- **Clean teardown:** detector installs SIGTERM/SIGINT handlers that break its loop into a `finally` which
+  calls `ctx.release()` (real QNN API) and `close()`s (not unlinks) the shm. Streamer gets a SIGTERM handler
+  that `sys.exit()`s so `atexit._cleanup` actually runs (a bare SIGTERM otherwise skips atexit, orphaning the
+  detector with the NPU held); `_cleanup` now SIGTERMs the child and `wait(3)`→`kill()`.
+- **resource_tracker fix:** detector `unregister()`s the attached segments from Py3.12's `resource_tracker`, so
+  the detector exiting no longer unlinks the streamer's live `q6a_frame`/`q6a_ctrl` (the exact failure I hit
+  when an ad-hoc probe destroyed the running segment).
+- **Staleness cutoff (streamer):** `_read_dets()` tracks when `dseq` last advanced; if it stalls for
+  >`DET_STALE_SEC` (2 s) it clears the overlay instead of drawing stale boxes forever while the detector is
+  dead/respawning.
+
+**Why:** Fable-5 findings — the spawned detector was fire-and-forget (silent permanent loss of detections on
+any crash), teardown SIGKILLed everything (no NPU release, risking fastrpc state), and the Py3.12
+resource_tracker would unlink a segment the detector merely attached to.
+
+**Verify (all on-device):** baseline streamer+detector up, 46 fps stream. `kill -9` the detector → supervisor
+logged `exited rc=-9 … respawn in 10s` then `respawned` + `YOLO ready`, NPU did not wedge, stream continued.
+`kill -TERM` the streamer → streamer gone cleanly, **no orphan detector**, **shm cleaned**, detector logged
+`shutting down: releasing NPU context + shm`. Files: `q6a_camstream.py`, `q6a_detector.py`.
+
+---
+
 ## 2026-07-06 — Fix --fast / GPU-fallback resolution mismatch + add shm shape guard (plan P0.7, P0.8)
 
 **What:** (P0.7) When the half-res CPU debayer is active (`--fast`, or the automatic `--gpu`→CPU fallback when

@@ -9,7 +9,7 @@ serves multipart/x-mixed-replace MJPEG on :8092. View from the Odyssey with view
 Usage:  python3 q6a_camstream.py [--cam 2] [--port 8092] [--full]
   --full : full-res debayer (1456x1088, slower); default is fast half-res super-pixel (728x544).
 """
-import argparse, subprocess, threading, sys, os, json
+import argparse, subprocess, threading, sys, os, json, time
 import numpy as np
 from PIL import Image
 from io import BytesIO
@@ -610,7 +610,12 @@ def _read_dets():
         rows = np.array(DET["dbuf"][:n]) if n > 0 else None  # snapshot before re-check
         if int(DET["dseq"][0]) != s:
             continue                                       # changed during copy -> retry
-        _read_dets.last_seq = s
+        if s != _read_dets.last_seq:
+            _read_dets.last_seq = s
+            _read_dets.last_change = time.monotonic()      # detector is alive & publishing
+        elif time.monotonic() - _read_dets.last_change > DET_STALE_SEC:
+            _read_dets.cache = None                        # detector dead/stalled -> stop drawing stale boxes
+            return None
         if n <= 0:
             _read_dets.cache = None
             return None
@@ -623,6 +628,8 @@ def _read_dets():
     return getattr(_read_dets, "cache", None)              # torn every retry -> reuse last good
 _read_dets.cache = None
 _read_dets.last_seq = -1
+_read_dets.last_change = 0.0
+DET_STALE_SEC = 2.0        # if dseq hasn't advanced in this long the detector is dead -> clear the overlay
 
 def init_detector():
     """Create the shared-memory frame/dets buffers and spawn q6a_detector.py (NPU, separate process).
@@ -651,18 +658,48 @@ def init_detector():
            "dbuf": np.ndarray((MAX_DET, 6), np.float32, buffer=cshm.buf, offset=CTRL_OFF)}
     DET["fseq"][0] = 0; DET["dcnt"][0] = 0
     DET["ow"][0] = OUT_W; DET["oh"][0] = OUT_H          # publish output dims for the detector
-    proc = subprocess.Popen(["python3", os.path.expanduser("~/q6a_detector.py")],
-                            env={**os.environ, "Q6A_DET_FPS": str(YOLO_FPS)})
-    DET["proc"] = proc
+    DET["stop"] = threading.Event()                    # set at teardown so the supervisor stops respawning
+
+    def _spawn():
+        return subprocess.Popen(["python3", os.path.expanduser("~/q6a_detector.py")],
+                                env={**os.environ, "Q6A_DET_FPS": str(YOLO_FPS)})
+    DET["proc"] = _spawn()
+
+    def _supervise():
+        # Respawn the detector if it dies (NPU fault / OOM), but NEVER restart-storm: the HTP/fastrpc stack
+        # can wedge cdsp under rapid re-inits (-> reboot). Exponential backoff 5..60s; reset once a spawn
+        # has run stably for >60s.
+        fails = 0
+        while not DET["stop"].is_set():
+            proc = DET["proc"]
+            rc = proc.wait()                           # blocks until the detector exits
+            if DET["stop"].is_set():
+                break
+            ran = time.monotonic() - DET.get("spawn_t", 0)
+            fails = 0 if ran > 60 else fails + 1
+            delay = min(60, 5 * (2 ** min(fails, 4)))
+            print(f"[detector] exited rc={rc} after {ran:.0f}s; respawn in {delay}s (fail #{fails})", flush=True)
+            if DET["stop"].wait(delay):
+                break
+            DET["spawn_t"] = time.monotonic()
+            DET["proc"] = _spawn()
+            print("[detector] respawned", flush=True)
+    DET["spawn_t"] = time.monotonic()
+    threading.Thread(target=_supervise, daemon=True).start()
 
     def _cleanup():
-        try: proc.terminate()
+        DET["stop"].set()                              # stop the supervisor before killing the child
+        proc = DET.get("proc")
+        try:
+            proc.terminate()                           # SIGTERM -> detector releases the NPU ctx cleanly
+            try: proc.wait(timeout=3)
+            except Exception: proc.kill()              # didn't exit -> force it
         except Exception: pass
         for s in (fshm, cshm):
             try: s.close(); s.unlink()
             except Exception: pass
     atexit.register(_cleanup)
-    print("YOLO detector spawned (separate process, no lock)", flush=True)
+    print("YOLO detector spawned (separate process, no lock; supervised)", flush=True)
 
 def capture_loop(rdi, full):
     """Prefer direct V4L2 mmap streaming (full sensor rate, ~23fps); fall back to the file-tail method."""
@@ -803,6 +840,14 @@ class Handler(BaseHTTPRequestHandler):
                 State.clients -= 1             # last viewer out -> capture loop idles
 
 if __name__ == "__main__":
+    import signal
+    def _term(*_):
+        # A bare SIGTERM would kill us without running atexit, orphaning the detector with the NPU context
+        # held. sys.exit() unwinds to atexit -> _cleanup, which SIGTERMs the detector so it releases the HTP
+        # context cleanly. (The launcher's kill -9 is still the deliberate forced path.)
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, _term)
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--cam", type=int, default=2, choices=(2, 3))
     ap.add_argument("--port", type=int, default=8092)

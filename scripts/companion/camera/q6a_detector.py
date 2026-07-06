@@ -11,9 +11,9 @@ Shared-memory layout (must match q6a_camstream.py):
   q6a_ctrl  : [0]=frame_seq u64  [8]=det_seq u64  [16]=det_count i32  [32:]=MAX_DET x 6 f32
               det row = (x1, y1, x2, y2, conf, class_idx)
 """
-import os, time
+import os, signal, time
 import numpy as np
-from multiprocessing import shared_memory
+from multiprocessing import shared_memory, resource_tracker
 
 W, H = 1456, 1088
 MAX_DET = 32
@@ -21,9 +21,28 @@ CTRL_OFF = 32
 DET_FPS = float(os.environ.get("Q6A_DET_FPS", "10"))   # 0 = unlimited (run at the NPU inference ceiling)
 MIN_PERIOD = (1.0 / DET_FPS) if DET_FPS > 0 else 0.0    # min seconds between inferences (NPU duty-cycle cap)
 
+_stop = False
+
+
+def _on_signal(signum, frame):
+    global _stop
+    _stop = True                               # break the loop -> the finally block releases the NPU + shm
+
+
+def _untrack(shm):
+    """Detach a shm segment we ATTACHED (streamer is the owner). Py3.12's resource_tracker unlinks every
+    segment it knows about at process exit, so without this the detector dying would destroy the streamer's
+    live q6a_frame/q6a_ctrl. We only ever read/write them; the streamer creates and unlinks them."""
+    try:
+        resource_tracker.unregister(shm._name, "shared_memory")
+    except Exception:
+        pass
+
 
 def main():
     from q6a_yolo import YoloDetector
+    signal.signal(signal.SIGTERM, _on_signal)
+    signal.signal(signal.SIGINT, _on_signal)
     fshm = cshm = None
     for _ in range(300):                       # wait for the streamer to create the shm
         try:
@@ -34,6 +53,7 @@ def main():
             time.sleep(0.1)
     if fshm is None:
         print("[detector] shm not found; exiting", flush=True); return
+    _untrack(fshm); _untrack(cshm)             # never let our exit unlink the streamer's segments
     fseq = np.ndarray((1,), np.uint64, buffer=cshm.buf, offset=0)
     dseq = np.ndarray((1,), np.uint64, buffer=cshm.buf, offset=8)
     dcnt = np.ndarray((1,), np.int32, buffer=cshm.buf, offset=16)
@@ -52,7 +72,8 @@ def main():
     print("[detector] YOLO ready on NPU (separate process, no lock)", flush=True)
     print(f"[detector] rate cap: {DET_FPS:g} fps" if MIN_PERIOD else "[detector] rate: unlimited (NPU ceiling)", flush=True)
     last = 0; t_prev = 0.0
-    while True:
+    try:
+      while not _stop:
         s = int(fseq[0])
         if s == last:
             time.sleep(0.004); continue        # no new frame
@@ -83,6 +104,13 @@ def main():
             dbuf[i] = (x1, y1, x2, y2, cf, ci)
         dcnt[0] = n
         dseq[0] = sq + 2                        # even: complete
+    finally:
+        print("[detector] shutting down: releasing NPU context + shm", flush=True)
+        try: det.ctx.release()                  # free the QNN/HTP context cleanly (don't leave fastrpc state)
+        except Exception as e: print("[detector] ctx release:", e, flush=True)
+        for s in (fshm, cshm):
+            try: s.close()                       # detach only (unregistered above) — the streamer unlinks
+            except Exception: pass
 
 
 if __name__ == "__main__":
