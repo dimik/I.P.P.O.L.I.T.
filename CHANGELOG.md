@@ -6,6 +6,37 @@ it derives from).
 
 ---
 
+## 2026-07-06 — MiDaS-V2 mono-depth composes + runs on v68 (plan P2.3, model gate)
+
+**What:** Stood up `build_depth.sh` (mirrors the YOLO 3-hop toolchain: AI-Hub ONNX → x86 2.42 DLC →
+v68 context binary) and **proved the make-or-break gate: MiDaS-V2 w8a8 composes on v68 and runs on the NPU.**
+The w8a8 context binary (27.66 MB) builds with **no compose errors**, loads on the HTP, and inferences a
+valid 256×256 depth map at **5.28 ms/frame** in isolation (25 iters; matches the plan's cited official
+~4.117 ms). Model I/O is native uint8: `image[1,3,256,256]` → `depth_estimates[1,1,256,256]` (affine-invariant
+inverse-depth; needs LiDAR/floor-plane scale to become metric — a runtime step, not this build).
+
+**Findings (hard-won, they shape the path):**
+- **Float is impossible on this target** — AI-Hub rejects `--precision float` because the QCS6490 HTP has
+  no fp16 support for compiled models. So depth *must* be int8 (w8a8); there is no float-first shortcut.
+- **From-scratch w8a8 quantize is blocked** — MiDaS calibrates on the **NYUV2** dataset, which is private
+  (manual Kaggle download) → `UnfetchableDatasetError`. YOLO didn't hit this (COCO auto-fetches).
+- **Path that works: `--fetch-static-assets`** — downloads Qualcomm's official pre-quantized w8a8 ONNX
+  (30 MB, from their public S3). MobileNetV2 backbone + conv decoder, **zero attention ops** (`MatMul`/
+  `Softmax`/`LayerNorm` absent) — which is exactly why v68 composes it (unlike the ViT-based Depth-Anything).
+  Env wrinkles: `QAIHM_CI=1` auto-accepts the isl-org repo clone; venv needs `geffnet==1.0.2`/`timm==1.0.15`.
+
+**Verify (on-device, isolation):** context-binary-generator OK (27.66 MB, no errors); standalone HTP bench
+loaded the context and ran 5.28 ms/frame, output size 65536 (=256²), uint8 depth 53–153. Ran with the
+streamer/detector **stopped** — the 3-process (detector+LLM+depth) NPU coexistence is a separate, deliberately
+thermally-gated test (P2.3 depends on it + the pinned-memory re-measure), NOT yet done. Streamer restored after.
+
+**Not yet done (the rest of P2.3):** runtime depth process reading the frame shm, LiDAR/floor-plane metric
+scaling, 3-accelerator coexistence + thermal validation, and P0.9 hardening (no 88/95 °C hard cutoff yet)
+before any sustained depth load goes live. The 27.66 MB `.bin` is reproducible via `build_depth.sh` and is
+**not committed** pending the runtime integration that consumes it. File: `build_depth.sh` (new).
+
+---
+
 ## 2026-07-06 — Repo hygiene: untrack stock YOLO .pt checkpoints; archive the raw Fable review
 
 **What:** (1) Added `scripts/companion/camera/*.pt` to `.gitignore` and `git rm --cached`'d the

@@ -13,3 +13,7 @@ __pycache__/
 
 # Stock ultralytics checkpoints — not build inputs (build_yolo.sh exports from AI-Hub)
 scripts/companion/camera/*.pt
+
+# MiDaS depth artifacts: reproducible via build_depth.sh (--fetch-static-assets); not committed pending runtime integration
+scripts/companion/camera/models/midas_depth_*.bin
+scripts/companion/camera/models/midas_depth_*_242.dlc
