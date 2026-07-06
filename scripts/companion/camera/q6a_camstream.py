@@ -773,6 +773,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 96 * 1024)
+            # Send timeout: a half-open client (network dropped, no RST) would otherwise block wfile.write()
+            # forever -> State.clients never decrements -> the capture loop runs the full ISP for a phantom
+            # viewer indefinitely. 10s is far longer than a healthy client needs to drain one 96KB frame.
+            self.connection.settimeout(10.0)
         except Exception:
             pass
         with State.lock:
@@ -789,8 +793,8 @@ class Handler(BaseHTTPRequestHandler):
                                      b"Content-Length: %d\r\n\r\n" % len(j) + j + b"\r\n")
                 else:
                     time.sleep(0.005)
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+        except (BrokenPipeError, ConnectionResetError, socket.timeout, TimeoutError, OSError):
+            pass                                # incl. stalled/half-open client -> drop it, free the slot
         finally:
             with State.lock:
                 State.clients -= 1             # last viewer out -> capture loop idles

@@ -6,6 +6,22 @@ it derives from).
 
 ---
 
+## 2026-07-06 — MJPEG send timeout: drop half-open clients (plan P0.5)
+
+**What:** Added `self.connection.settimeout(10.0)` in the `/stream` handler and widened the write-loop
+`except` to include `socket.timeout`/`TimeoutError`/`OSError`. A stalled client now raises out of
+`wfile.write()`, hits the `finally`, and decrements `State.clients`.
+
+**Why:** Fable-5 finding — with no timeout, a half-open client (network dropped, no RST) blocks `wfile.write()`
+forever. `State.clients` never returns to 0, so the capture loop keeps running the full GPU ISP (heat, power,
+DDR) for a viewer that will never read another byte. 10 s ≫ the time a healthy client needs to drain one
+96 KB frame, so real viewers are unaffected.
+
+**Verify:** Restarted; normal `curl /stream` → **62 JPEG frames in 4 s (~15.5 fps)**, log shows healthy
+17 fps publish with `clients=1` while connected. No regression. File: `q6a_camstream.py`.
+
+---
+
 ## 2026-07-06 — Seqlock hardening on both shm channels (plan P0.1, P0.2)
 
 **What:** Made the lock-free shared-memory handoff a *correct* seqlock on both directions.
