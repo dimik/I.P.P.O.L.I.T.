@@ -6,6 +6,24 @@ it derives from).
 
 ---
 
+## 2026-07-06 — Fix --fast / GPU-fallback resolution mismatch + add shm shape guard (plan P0.7, P0.8)
+
+**What:** (P0.7) When the half-res CPU debayer is active (`--fast`, or the automatic `--gpu`→CPU fallback when
+the Adreno fails to init), `OUT_W/OUT_H` are now halved to `W//2 x H//2` — previously they were halved only
+for `--bin`. (P0.8) `process()` now asserts `rgb.shape == (OUT_H, OUT_W, 3)` before publishing to shm and
+raises a clear `RuntimeError` naming the mismatch.
+
+**Why:** Fable-5 finding. The half-res debayer emits 728×544 but the shm frame + detector were sized
+1456×1088, so `DET["frame"][:] = rgb` broadcast-crashed. Critically this was reachable *without* asking for
+`--fast`: `--gpu` with a failed GPU init silently sets `args.fast=True`. The shape guard turns any future
+mode/alloc mismatch into a named error instead of a cryptic NumPy broadcast failure.
+
+**Verify:** `--fast --awb` (no --bin/--gpu, the formerly-broken path) → **61 frames, 0 mismatch/capture
+errors**, detector correctly at 728×544 (would have crashed before). Restored production `--gpu --bin --awb`
+→ 61 frames, 0 errors, 728×544. File: `q6a_camstream.py`.
+
+---
+
 ## 2026-07-06 — V4L2 DQBUF: distinguish EAGAIN from real device errors (plan P0.6)
 
 **What:** `read_latest()` in `q6a_v4l2.py` caught *all* `OSError` from `VIDIOC_DQBUF` and treated it as "no

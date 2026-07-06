@@ -579,6 +579,9 @@ class State:
 def process(buf, full):
     rgb = debayer(buf, full)                                # packed RAW10 in -> (H,W,3) uint8 (GPU unpacks)
     if DET is not None:
+        if rgb.shape != (OUT_H, OUT_W, 3):                 # contract with the shm frame + detector geometry
+            raise RuntimeError(f"debayer produced {rgb.shape}, shm expects {(OUT_H, OUT_W, 3)} "
+                               f"— resolution mode / OUT dims mismatch (check --fast/--bin vs shm alloc)")
         # seqlock publish: bump to ODD before the copy (write in progress), EVEN after (complete).
         # The reader rejects an odd seq and any seq that changed across its copy, so it never
         # consumes a torn frame. A bare post-increment (old code) left a window where the reader
@@ -851,6 +854,12 @@ if __name__ == "__main__":
         init_gpu()
         if GPU is None:
             args.fast = True         # GPU unavailable -> half-res CPU (fast) instead of slow full-res CPU
+    if args.fast and not SENSOR_BIN:
+        # Half-res CPU debayer emits W//2 x H//2 (super-pixel). OUT_W/OUT_H are otherwise only halved for
+        # --bin, so without this the shm frame + detector are sized 1456x1088 while process() produces
+        # 728x544 -> a broadcast crash on `DET["frame"][:] = rgb` (and it's reachable via the --gpu fallback
+        # above, not just an explicit --fast). Align OUT dims to what debayer actually returns.
+        OUT_W, OUT_H = W // 2, H // 2
     print("start: setting up pipeline...", flush=True)
     rdi = setup_pipeline(args.cam, args.exposure, args.gain)
     if not args.no_yolo:
