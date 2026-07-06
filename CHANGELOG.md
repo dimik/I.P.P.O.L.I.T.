@@ -6,6 +6,24 @@ it derives from).
 
 ---
 
+## 2026-07-06 — Headless: run the GPU ISP at detector cadence, not capture rate (plan P1.1)
+
+**What:** In `--headless` (production, no viewer) the capture loop now paces the expensive GPU debayer to
+`YOLO_FPS`. Each iteration still *drains* the camera (cheap) to keep the processed frame fresh, but frames
+arriving within `1/YOLO_FPS` of the last ISP run are dropped **before** the debayer instead of being processed
+and then discarded by the detector's frame-drop. Non-headless (viewer watching) is unchanged — full rate for
+smooth video.
+
+**Why:** Fable-5 P1 — with no human viewer the only ISP consumer is the NPU at `YOLO_FPS` (default 10). Running
+the ISP at the ~16-19 fps capture rate burns GPU cycles, heat and DDR on frames nobody reads. This is the
+biggest steady-state compute/thermal saving available without touching the model.
+
+**Verify (on-device, `--headless --yolo-fps 10`):** heartbeat publish rate dropped to **~8 fps** (paced to the
+10 Hz detector cadence) from ~16 fps full-rate — roughly halving GPU ISP work; temp steady ~62 °C, detector
+fed (`fseq` advancing). Restored the non-headless bench config (62 frames/4 s). File: `q6a_camstream.py`.
+
+---
+
 ## 2026-07-06 — Software thermal governor: pace the pipeline under the 90°C trip (plan P0.9)
 
 **What:** Added a `thermal_governor()` daemon thread that polls the hottest of the 34 SoC thermal zones every

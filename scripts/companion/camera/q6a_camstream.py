@@ -750,6 +750,11 @@ def capture_loop(rdi, full):
         return _capture_loop_file(rdi, full)
     import time as _t
     cam = None; fails = 0; _hbn = 0; _hbt = _t.time()
+    # Headless: no human viewer, so run the expensive GPU ISP only as fast as the detector consumes it
+    # (YOLO_FPS). We still DRAIN the camera every iteration (cheap) to keep the processed frame fresh, but
+    # skip the debayer on frames the detector would drop anyway -> ~1/3 less GPU work + heat at YOLO_FPS=10.
+    _isp_period = (1.0 / YOLO_FPS) if (HEADLESS and YOLO_FPS > 0) else 0.0
+    _last_isp = 0.0
     while True:
         if State.clients == 0 and not HEADLESS:   # no viewer -> release camera, idle (headless runs always)
             State.jpeg = None
@@ -759,6 +764,9 @@ def capture_loop(rdi, full):
             if cam is None:
                 cam = V4l2Cam("/dev/video0", W, H, pixelformat=_fourcc(PIXFMT)); fails = 0
             data = cam.read_latest(timeout=1.0)  # drains to the freshest frame (low latency)
+            if _isp_period and data is not None and (_t.monotonic() - _last_isp) < _isp_period:
+                continue                         # headless ISP cadence: drop pre-debayer, keep draining
+            _last_isp = _t.monotonic()
             if data is not None and len(data) == FRAME:
                 try:
                     auto_exposure(data)          # nudge sensor exposure/gain (real AE, no-op if --no-ae)
