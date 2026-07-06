@@ -6,6 +6,24 @@ it derives from).
 
 ---
 
+## 2026-07-06 — Held-fd VIDIOC_S_CTRL for AE (drop the per-tick v4l2-ctl fork) (plan P1.3)
+
+**What:** AE now sets `exposure`/`analogue_gain` through a **held-open sensor-subdev fd + `VIDIOC_S_CTRL`
+ioctl** (`_set_ctrl()`), replacing the three `subprocess.run(["v4l2-ctl", …])` calls. The fd (on `SENSOR_SD`,
+e.g. `/dev/v4l-subdev27`) and the linuxpy/ioctl handles are cached on first use; any failure permanently falls
+back to `v4l2-ctl` (with a one-time log line).
+
+**Why:** Fable-5 P1 — each AE adjustment was a `fork+exec+open` of `v4l2-ctl` (~10–30 ms), several times a
+second while tracking light. The ioctl is a single syscall on an already-open fd — no process churn, lower
+jitter in the capture thread.
+
+**Verify (on-device):** confirmed the ioctl works on the subdev first (`G_CTRL`/`S_CTRL` round-trip), then in
+the pipeline: AE moved exposure **3000→6000** (real control change via the held fd), **0** `held-fd S_CTRL
+unavailable` fallbacks, **0** `v4l2-ctl` subprocesses spawned during the run, 94 frames/6 s healthy. Initial
+sensor config at setup still uses `v4l2-ctl` (one-time, before `SENSOR_SD` is set). File: `q6a_camstream.py`.
+
+---
+
 ## 2026-07-06 — Headless: run the GPU ISP at detector cadence, not capture rate (plan P1.1)
 
 **What:** In `--headless` (production, no viewer) the capture loop now paces the expensive GPU debayer to

@@ -279,14 +279,39 @@ def setup_pipeline(cam, exposure, gain):
                 subprocess.run(["v4l2-ctl", "-d", sd, "--set-ctrl", f"{c}={v}"], check=False)
     return rdi
 
+_CID_EXPOSURE = 0x00980911         # V4L2_CID_EXPOSURE
+_CID_ANALOGUE_GAIN = 0x009e0903    # V4L2_CID_ANALOGUE_GAIN
+_SENSOR_FD = None                  # cached held fd on SENSOR_SD (avoid a v4l2-ctl fork per AE tick)
+_S_CTRL = None                     # cached (linuxpy module, S_CTRL ioctl); None until first use, False if unavailable
+
+def _set_ctrl(cid, value, name):
+    """Set a sensor control via a held-fd VIDIOC_S_CTRL ioctl instead of spawning v4l2-ctl every AE tick
+    (fork+exec+open ~10-30ms, several times/sec). Falls back to v4l2-ctl if the ioctl path is unavailable."""
+    global _SENSOR_FD, _S_CTRL
+    if SENSOR_SD is None:
+        return
+    try:
+        if _S_CTRL is None:
+            import fcntl as _f, linuxpy.video.raw as _r
+            _S_CTRL = (_f, _r)
+        if _S_CTRL:
+            _f, _r = _S_CTRL
+            if _SENSOR_FD is None:
+                _SENSOR_FD = os.open(SENSOR_SD, os.O_RDWR)
+            c = _r.v4l2_control(); c.id = cid; c.value = int(value)
+            _f.ioctl(_SENSOR_FD, _r.IOC.S_CTRL, c)
+            return
+    except Exception as e:
+        _S_CTRL = False                                    # give up on the fast path -> subprocess from now on
+        print(f"held-fd S_CTRL unavailable ({e}); using v4l2-ctl", flush=True)
+    subprocess.run(["v4l2-ctl", "-d", SENSOR_SD, "--set-ctrl", f"{name}={int(value)}"], check=False)
+
 def _set_exposure(exp):
     """Set ONLY the sensor integration time (SHS1 via the exposure control). VMAX/vblank is fixed once at
     setup (for AE_MAX_EXP), so exposure changes are clean per-frame latches. Changing vblank (frame length)
     mid-stream reconfigures the sensor timing and glitches one frame -> full-screen 'snow' on movement
     (motion -> AE adjusts frequently). Exposure-only avoids that; fps is then fixed at the VMAX rate."""
-    if SENSOR_SD is None:
-        return
-    subprocess.run(["v4l2-ctl", "-d", SENSOR_SD, "--set-ctrl", f"exposure={exp}"], check=False)
+    _set_ctrl(_CID_EXPOSURE, exp, "exposure")
 
 _AE_N = 0
 def auto_exposure(buf):
@@ -314,13 +339,13 @@ def auto_exposure(buf):
     new_exp = int(min(max(new_exp, AE_MIN_EXP), AE_MAX_EXP))
     if new_exp <= AE_MIN_EXP and mid > AE_TARGET and GAIN > 0:
         GAIN = max(0, GAIN - AE_GAIN_STEP)          # exposure floored but still bright -> drop gain
-        subprocess.run(["v4l2-ctl", "-d", SENSOR_SD, "--set-ctrl", f"analogue_gain={GAIN}"], check=False)
+        _set_ctrl(_CID_ANALOGUE_GAIN, GAIN, "analogue_gain")
     elif new_exp >= AE_MAX_EXP and mid < AE_TARGET * AE_DARK_FRAC and GAIN < GAIN_ANALOG_MAX:
         GAIN = min(GAIN_ANALOG_MAX, GAIN + AE_GAIN_STEP)  # exposure maxed but dark -> add gain, but only up to the
                                                     # ANALOG max (240): digital gain adds noise + row-lines and
                                                     # shifts the calibration operating point (green drift). The
                                                     # tone-map lifts dim scenes instead.
-        subprocess.run(["v4l2-ctl", "-d", SENSOR_SD, "--set-ctrl", f"analogue_gain={GAIN}"], check=False)
+        _set_ctrl(_CID_ANALOGUE_GAIN, GAIN, "analogue_gain")
     if new_exp != EXPOSURE:
         EXPOSURE = new_exp; _set_exposure(EXPOSURE)
 
