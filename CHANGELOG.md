@@ -6,6 +6,24 @@ it derives from).
 
 ---
 
+## 2026-07-06 — Cap AE max_exposure at 2000 (owner request)
+
+**What:** `profiles/imx296.json` `ae.max_exposure` 6000 → **2000**. The auto-exposure ceiling is now 2000
+lines; AE still adapts below it (bright scenes already sit far lower, e.g. ~485).
+
+**Why:** owner asked to reduce exposure to 2000 — caps the longest integration so dim scenes can't ramp to
+blur-prone long exposures (better for a moving robot / detection).
+
+**Side effect (expected):** publish rate rose **~16 → ~46 fps**. The IMX296 driver fixes frame length (VMAX)
+to the exposure ceiling at startup (deliberately, so AE only changes integration time and never glitches
+timing mid-stream — see `_set_exposure`), so a 2000-line ceiling ≈ 3× shorter max frame ≈ 3× the sensor
+readout rate. Harmless: the thermal governor caps if it heats up, and `--headless` still paces the ISP to
+`YOLO_FPS`. Verified live: profile logs `ae[30-2000]`, exp=485 in the current scene, 46 fps, 64 °C.
+
+Revert: set `max_exposure` back to 6000. File: `profiles/imx296.json`.
+
+---
+
 ## 2026-07-06 — Native-uint8 input path for w8a8 (skip copyFromFloatToNative) (plan P1.2 cont.)
 
 **What:** `q6a_yolo.py` now constructs the w8a8 context with `input_data_type=DataType.NATIVE`
