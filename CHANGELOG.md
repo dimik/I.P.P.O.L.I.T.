@@ -6,6 +6,27 @@ it derives from).
 
 ---
 
+## 2026-07-06 — Strip the desktop/daemon stack on the Q6A (plan P1.4)
+
+**What:** Switched the Q6A to a headless runtime. `systemctl set-default multi-user.target` (no graphical
+boot) and `systemctl disable --now` on: **gdm** (→ frees gnome-shell/Xwayland/mutter/gjs/gsd-*),
+**docker + containerd** (no running containers; the 13.4 GB NPU image is left on disk, only the daemon
+stopped), **cups, fwupd, colord, bluetooth, avahi-daemon, upower, accounts-daemon, udisks2, rtkit-daemon**.
+Untouched (load-bearing): ssh, NetworkManager/wpa_supplicant (our `enp1s0` = 192.168.20.2 link), dbus,
+polkit, systemd-*, **q6a-llmd**, property-vault, serial-getty.
+
+**Why:** Fable-5 P1 — the board is an SSH-only robot companion; the GNOME session + docker/print/firmware
+daemons were pure idle RAM/CPU on a RAM- and thermal-constrained board.
+
+**Verify:** available RAM **1795 → 2272 MB (+~480 MB)** in the same running state (camera + detector + LLM);
+all GNOME/Xwayland/docker processes gone; `q6a-llmd` still active; **GPU ISP re-initialised fine with no
+display server** ("Adreno(TM) 635"), detector up, stream healthy, 65 °C. **Fully reversible:**
+`sudo systemctl set-default graphical.target` + `sudo systemctl enable --now gdm docker …`.
+
+*(System/deployment change — no repo files, but recorded for the revert steps.)*
+
+---
+
 ## 2026-07-06 — Native-uint8 input path for w8a8 (skip copyFromFloatToNative) (plan P1.2 cont.)
 
 **What:** `q6a_yolo.py` now constructs the w8a8 context with `input_data_type=DataType.NATIVE`
