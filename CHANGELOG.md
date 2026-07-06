@@ -6,6 +6,22 @@ it derives from).
 
 ---
 
+## 2026-07-06 — Deploy w8a8 YOLO as the default detector (plan P1.2, owner-approved)
+
+**What:** `q6a_yolo.py` now selects `~/yolov8_det_w8a8.bin` when present and **falls back** to the w8a16
+`~/yolov8_det.bin` otherwise. `view_q6a_cam.sh` deploys the w8a8 binary alongside the w8a16 one. Owner
+approved the accuracy trade-off (identical on confident detections, softer on <~0.5-conf marginals).
+
+**Why:** ~45% faster core inference halves the NPU duty that drives the board's binding thermal constraint,
+with no change to confident detections. w8a16 stays in the repo + on-device as an instant fallback (revert =
+remove/rename the w8a8 bin).
+
+**Verify (live, full pipeline running):** detector loaded w8a8; live `model_inference` **~13–16 ms** (vs
+w8a16 ~20–24 ms — the occasional spike is concurrent GPU-ISP contention, absent in the isolated 12 ms A/B),
+stream healthy at ~15 fps, detections overlaying. Files: `q6a_yolo.py`, `view_q6a_cam.sh`.
+
+---
+
 ## 2026-07-06 — Build + benchmark w8a8 YOLOv8 (plan P1.2); fix build-script success gate
 
 **What:** Built `yolov8_det_w8a8` end-to-end (AI-Hub w8a8 export → 2.42 DLC → v68 context binary) and

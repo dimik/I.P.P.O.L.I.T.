@@ -15,7 +15,10 @@ import os
 import numpy as np
 from PIL import Image
 
-MODEL_BIN = os.path.expanduser("~/yolov8_det.bin")      # context binary (built on-device, v68)
+# Prefer the w8a8 build (~45% faster HTP inference, ~22->~12ms; identical on confident detections, softer on
+# marginal <0.5-conf ones). Fall back to the w8a16 build if the w8a8 binary isn't deployed.
+_W8A8 = os.path.expanduser("~/yolov8_det_w8a8.bin")
+MODEL_BIN = _W8A8 if os.path.exists(_W8A8) else os.path.expanduser("~/yolov8_det.bin")
 LABELS_TXT = os.path.expanduser("~/coco_labels.txt")
 IN = 640                                                # model input size
 
