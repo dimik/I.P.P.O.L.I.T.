@@ -6,6 +6,38 @@ it derives from).
 
 ---
 
+## 2026-07-07 — P2.3 coexistence + dmabuf-growth test: depth+detector clean, no leak; LLM gate found
+
+**What:** Ran `depth_coexist.py` — MiDaS depth at 10 Hz as a 3rd NPU context alongside the live,
+actively-inferring detector (stream pulled), sampling MemAvailable / dmabuf bytes / temp / latency, with an
+84 °C auto-abort (safely under the new 88 °C park). Two runs (120 s + 90 s).
+
+**Results — the good:**
+- **Depth + active detector = 2 concurrent NPU contexts coexist cleanly:** ~1088 depth inferences, **0
+  errors**, no cDSP wedge, no crash. Depth latency **7.6–7.9 ms median** (p95 ≤12 ms) under detector
+  contention vs 5.28 ms isolation — a real slowdown but far inside a 10 Hz budget.
+- **No dmabuf leak:** dmabuf **stable to the byte** (1,892,548,608 B, Δ0) over 100 s. No memory leak
+  (MemAvailable Δ ±4 MB). Thermals 70 → **75 °C peak** bench-side under this load.
+
+**Results — the gate (important):**
+- **The LLM was NOT an active 3rd context** — `q6a-llmd` (pid 1640) has **released its NPU context**: RSS
+  ~102 MB (not the ~1.7 GB model), **no `/dev/fastrpc-cdsp` fd held**, journal shows
+  `closed module libQnnHtpV68Skel.so … num of open handles: 0`, and a fresh load fails
+  (`Qnn getQnnSystemInterface FAILED`). Pre-existing (dormant since ~Jul 6 22:31), **not** caused by depth.
+  So this validated 2-active + depth, **not** a true 3-way-active (detector+LLM-decoding+depth).
+- **Memory is the likely binding gate for full 3-way:** the ~1.77 GB MemAvailable was measured with the LLM
+  model **unloaded**. A healthy resident LLM (~1.7 GB) + detector + depth would push RAM to the edge → this
+  is exactly Investigation §1 (pinned-memory re-measure), now clearly the constraint to settle.
+
+**Verdict:** depth coexists with the vision pipeline with no leak/wedge — the depth *runtime* can proceed on
+that basis. But the full 3-accelerator picture is gated on (a) restoring `q6a-llmd` health (a fresh QNN load
+currently fails; restart is delicate — cdsp-wedge risk), (b) the pinned-memory re-measure (does LLM+detector+
+depth fit in 12 GB?), and (c) in-compartment thermals (bench 75 °C → enclosed +5–10 °C approaches the 88 °C
+park). Device left clean (streamer+detector up, 67 °C). Files: `depth_coexist.py`, `depth_bench.py` (new
+diagnostics).
+
+---
+
 ## 2026-07-06 — Harden P0.9: add the thermal hard-cutoff rungs (detector-park + orderly shutdown)
 
 **What:** The thermal governor was a frame-cadence throttle only (82/87 °C + hysteresis) with **no hard
