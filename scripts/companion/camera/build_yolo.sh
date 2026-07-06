@@ -41,9 +41,14 @@ ONNX="$(find "$WORK" -name "${EXPORT_MODULE}.onnx" | head -1)"
 echo "   ONNX: $ONNX"
 
 echo "== 2/4 convert ONNX -> 2.42 DLC (x86 qairt-converter, no AVX2 needed) =="
+# Log to a file and gate on the DLC actually existing, NOT on grepping the console. The w8a8 converter
+# emits thousands of warnings with no line breaks, so the old `... | grep -vi WARNING` dropped the
+# CONVERSION_SUCCESS token (it shares the same concatenated line as WARNINGs) and pipefail killed the build
+# even though conversion SUCCEEDED. `tr '\r' '\n'` splits that blob so we can still surface the outcome.
 ( source "$QAIRT_X86/env.sh" 2>/dev/null
-  qairt-converter --input_network "$ONNX" --output_path "$WORK/${MODEL}_242.dlc" 2>&1 \
-    | grep -iE "CONVERSION_SUCCESS|WRITE_SUCCESS|CONVERSION_FAIL|ERROR:" | grep -vi WARNING )
+  qairt-converter --input_network "$ONNX" --output_path "$WORK/${MODEL}_242.dlc" > "$WORK/convert.log" 2>&1 ) || true
+tr '\r' '\n' < "$WORK/convert.log" | grep -aE "CONVERSION_SUCCESS|WRITE_SUCCESS|CONVERSION_FAIL|- ERROR -" | tail -3 || true
+[ -s "$WORK/${MODEL}_242.dlc" ] || { echo "FAIL: converter produced no DLC (see $WORK/convert.log)"; exit 1; }
 cp "$WORK/${MODEL}_242.dlc" "$REPO_DIR/models/${MODEL}_242.dlc"
 
 echo "== 3/4 build v68 context binary ON the Q6A =="

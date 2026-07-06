@@ -6,6 +6,37 @@ it derives from).
 
 ---
 
+## 2026-07-06 — Build + benchmark w8a8 YOLOv8 (plan P1.2); fix build-script success gate
+
+**What:** Built `yolov8_det_w8a8` end-to-end (AI-Hub w8a8 export → 2.42 DLC → v68 context binary) and
+A/B-benchmarked it against the deployed w8a16 on a real captured frame. Committed the artifacts
+(`models/yolov8_det_w8a8.bin`, `models/yolov8_det_w8a8_242.dlc`). **Not deployed** — awaiting owner sign-off on
+the accuracy trade-off. Also fixed `build_yolo.sh`'s step-2 gate: it now checks the DLC file exists (with
+`tr '\r' '\n'` to surface the outcome) instead of a `grep -vi WARNING` pipe that failed under `pipefail`
+because the w8a8 converter's success token shares a line with thousands of warnings.
+
+**Gate result:** w8a8 **composes on v68** (the plan's open risk) — 3.77 MB context binary, no errors.
+
+**Benchmark (25 iters, real 728×544 frame, NPU-only):**
+| | core HTP inference | end-to-end (infer+quant+NMS) | detections |
+|---|---|---|---|
+| w8a16 (current) | ~20–24 ms | **median 32.2 ms** | tv 0.859, backpack 0.479 |
+| w8a8 (new) | ~11–13 ms | **median 21.7 ms** | tv 0.840 |
+
+**Read:** ~**45 % faster core inference** (~22→~12 ms, matching ecosystem w8a8 numbers), **~33 % faster
+end-to-end**. `copyFromFloatToNative` is ~5 ms for *both* (float input either way) — the native-uint8 path
+(task #21) could shave that further but is a separate, uncertain change. **Accuracy:** identical on the
+confident detection (tv 0.84 vs 0.86, ~same box); w8a8 dropped the *marginal* backpack (0.479, barely over the
+0.30 threshold) — the expected int8-activation softening on low-confidence detections. Caveat: single frame,
+not a full mAP sweep.
+
+**Why:** Fable-5's best optimization target — halving inference frees the biggest chunk of NPU duty/heat, and
+at YOLO_FPS=10 that directly lowers the thermal load that's the binding constraint.
+
+Files: `build_yolo.sh`, `models/yolov8_det_w8a8.bin`, `models/yolov8_det_w8a8_242.dlc`.
+
+---
+
 ## 2026-07-06 — Parameterize build_yolo.sh for precision (enables the P1.2 w8a8 build)
 
 **What:** `build_yolo.sh` now takes a `PRECISION` env var (default `w8a16` = current behavior) passed to the
