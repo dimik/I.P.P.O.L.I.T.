@@ -1,0 +1,17 @@
+[Unit]
+Description=LiDAR /scan -> ROS 2 (companion; reads robot LDS tap ring via ring_forward over USB)
+# Consumes the robot's /tmp/lds_ring.buf (libserialtap on ttyS3) streamed by ring_forward.py on the robot
+# (tcp 192.168.10.1:9901). Publishes /scan on the Q6A. Data flows only while the LiDAR turret spins
+# (fanoff-gated when docked/idle). Relocated off the robot chroot ROS.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=radxa
+ExecStart=/bin/bash -c "source /opt/ros/jazzy/setup.bash && exec python3 /home/radxa/ros/lds_scan_node.py --ros-args -p source:=192.168.10.1:9901"
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

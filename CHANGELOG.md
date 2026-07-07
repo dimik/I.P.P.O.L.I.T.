@@ -6,6 +6,27 @@ it derives from).
 
 ---
 
+## 2026-07-07 — Phase 1.3 (a+b): companion node services + robot boot hook launches forwarders
+
+**What:**
+- **Companion systemd units** for the two sensor nodes — `mcu-node.service` + `lds-scan-node.service`
+  (`-p source:=192.168.10.1:{9902,9901}`) — alongside the existing `valetudo-bridge.service`. All three ROS
+  nodes are now **supervised + boot-started on the Q6A**.
+- **Robot `_root_postboot.sh`**: replaced the three chroot-ROS launches (`valetudo_bridge`, `lds_scan_node`,
+  `mcu_node`) with the two ROS-free `ring_forward.py` launches (LDS `tcp/9901`, MCU `tcp/9902`). `audio_bridge`
+  kept for now. Deployed to the robot's live `/data/_root_postboot.sh` (backup:
+  `_root_postboot.sh.bak.pre-ros-relocate`); **robot `sh -n` passes**. The gadget/networking setup runs
+  earlier in the hook, so the swap can't affect the USB link. Repo copy synced.
+
+**Verify:** all 3 companion services `active`; `/odom/wheel` live; robot-side boot-hook syntax clean. On the
+next robot reboot it will start the forwarders (not the ROS nodes) — dual-publish risk removed.
+
+**Remaining in 1.3:** relocate `audio_bridge` to the companion (the last chroot-ROS node) → then remove ROS
+from the chroot. Files: `scripts/companion/systemd/{mcu-node,lds-scan-node}.service` (new),
+`scripts/robot/_root_postboot.sh`.
+
+---
+
 ## 2026-07-07 — Phase 1.2: forward robot LiDAR + IMU/odom to companion ROS (taps stay, ROS moves)
 
 **What:** New `ring_forward.py` (robot, **ROS-free**, stdlib-only): streams a serial-tap tmpfs ring's raw bytes

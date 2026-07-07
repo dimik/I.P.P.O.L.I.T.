@@ -126,35 +126,21 @@ logger -t postboot "starting Valetudo"
     sleep 5
 done) &
 
-# --- Valetudo -> ROS 2 bridge (map / odom / pose / status; no MQTT broker) ---
-# Publishes /map (OccupancyGrid), /odom + map->base_link TF, /robot/status from Valetudo's HTTP
-# API into the chroot's ROS 2 Jazzy. Retries until Valetudo's API is up. See valetudo_bridge.py.
-if [ -f $CHROOT/opt/valetudo_bridge.py ]; then
-    setsid chroot $CHROOT bash -lc 'source /opt/ros/jazzy/setup.bash; exec python3 /opt/valetudo_bridge.py' > /tmp/vbridge.log 2>&1 </dev/null &
-    echo "valetudo_bridge (ROS) started"
-    logger -t postboot "valetudo_bridge (ROS) started"
+# --- ROS RELOCATED TO THE COMPANION (Q6A), 2026-07-07 (phase 1.3) ---
+# valetudo_bridge, lds_scan_node, mcu_node now run on the Q6A over the USB link (systemd units there).
+# The robot keeps only the LD_PRELOAD serial taps + these ROS-free ring_forward.py pumps, which stream the
+# tap rings' raw bytes over TCP to the companion ROS nodes. No ROS runs on the robot for map/scan/imu/odom.
+# LiDAR ring (ttyS3) -> tcp/9901 -> Q6A lds-scan-node.service -> /scan
+if [ -f $CHROOT/opt/ring_forward.py ]; then
+    setsid chroot $CHROOT python3 /opt/ring_forward.py --path /tmp/lds_ring.buf --port 9901 --magic 0x0031534444530001 > /tmp/ringfwd_lds.log 2>&1 </dev/null &
+    echo "ring_forward LDS (tcp/9901) started"
+    logger -t postboot "ring_forward LDS started"
 fi
-
-# --- LiDAR -> ROS /scan (libserialtap shm ring -> sensor_msgs/LaserScan) ---
-# libserialtap.so (preloaded onto AVA in _root.sh) tees AVA's ttyS3 reads to /tmp/lds_ring.buf;
-# this node decodes LDS frames and publishes /scan. Zero cost when the turret is gated off
-# (no ttyS3 reads -> empty ring). The /tmp bind-mount above shares the ring into the chroot.
-# See scripts/robot/lds_scan_node.py + docs/ros.md / docs/sensors.md.
-if [ -f $CHROOT/opt/lds_scan_node.py ]; then
-    setsid chroot $CHROOT bash -lc 'source /opt/ros/jazzy/setup.bash; exec python3 /opt/lds_scan_node.py' > /tmp/lds_scan.log 2>&1 </dev/null &
-    echo "lds_scan_node (ROS /scan) started"
-    logger -t postboot "lds_scan_node (ROS /scan) started"
-fi
-
-# --- MCU -> ROS IMU + wheel odom (libserialtap shm ring -> sensor_msgs/Imu, nav_msgs/Odometry) ---
-# libserialtap also tees AVA's ttyS4 (MCU) reads to /tmp/mcu_ring.buf; this node decodes the
-# Status10ms/Status20ms frames and publishes /imu/data + /odom/wheel. The MCU streams continuously
-# (even docked), so it self-calibrates gyro bias at startup assuming the robot is stationary.
-# See scripts/robot/mcu_node.py + docs/sensors.md.
-if [ -f $CHROOT/opt/mcu_node.py ]; then
-    setsid chroot $CHROOT bash -lc 'source /opt/ros/jazzy/setup.bash; exec python3 /opt/mcu_node.py' > /tmp/mcu_node.log 2>&1 </dev/null &
-    echo "mcu_node (ROS /imu/data,/odom/wheel) started"
-    logger -t postboot "mcu_node (ROS imu/odom) started"
+# MCU ring (ttyS4) -> tcp/9902 -> Q6A mcu-node.service -> /imu/data + /odom/wheel
+if [ -f $CHROOT/opt/ring_forward.py ]; then
+    setsid chroot $CHROOT python3 /opt/ring_forward.py --path /tmp/mcu_ring.buf --port 9902 --magic 0x0031534444530001 > /tmp/ringfwd_mcu.log 2>&1 </dev/null &
+    echo "ring_forward MCU (tcp/9902) started"
+    logger -t postboot "ring_forward MCU started"
 fi
 
 # --- audio bridge: /robot/speak -> Dreame mediad (play OGG on the speaker, no ALSA contention) ---
