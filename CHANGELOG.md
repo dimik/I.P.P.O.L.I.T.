@@ -6,6 +6,16 @@ it derives from).
 
 ---
 
+## 2026-07-08 — Docs: sync CLAUDE.md to the robot-brain architecture
+
+**What:** Added a prominent current-architecture banner at the top of `CLAUDE.md` pointing to
+`docs/companion-autonomy.md`, and corrected the two most-drifted sections: the chroot **ROS is removed**
+(runs on the companion; chroot keeps only ROS-free `ring_forward.py`/`speak.py` + video/TTS tools), and the
+**on-device LLM is retired**. Marks the robot-side ROS/vision/LLM descriptions as superseded.
+File: `CLAUDE.md` (`docs/companion-autonomy.md` already current).
+
+---
+
 ## 2026-07-08 — Brownout guard (P3.2): clean poweroff before the robot battery dies
 
 **What:** New `q6a_brownout.py` (non-ROS daemon, `q6a-brownout.service`) watches the robot battery over USB

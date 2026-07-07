@@ -8,6 +8,16 @@ Turn a Dreame D10s Pro robot vacuum into an open AI platform:
 - ROS 2 Jazzy for all AI/autonomy — runs entirely on the companion board
 - Robot hardware (motors, LiDAR, SLAM) stays controlled by the proprietary AVA daemon
 
+> **⚡ CURRENT ARCHITECTURE (2026-07-08) — read [`docs/companion-autonomy.md`](docs/companion-autonomy.md) first.**
+> The robot-brain migration is done: **ROS 2 runs entirely on the Q6A companion** over the USB-gadget link;
+> the robot runs **no ROS** (only AVA/Valetudo + LD_PRELOAD serial taps + ROS-free `ring_forward.py`/`speak.py`).
+> Companion services: `valetudo-bridge` (`/map` `/odom` `/robot/status` `/battery` TF), `mcu-node`
+> (`/imu/data` `/odom/wheel`), `lds-scan-node` (`/scan`), `audio-bridge` (`/robot/speak`), `q6a-vision`
+> (robot OV8856 → YOLO+ByteTrack+MiDaS → `/vision/detections`), `q6a-brownout` (clean poweroff on low battery).
+> Key decisions: **on-device LLM retired** (→ cloud later); **robot OV8856 camera** used for perception, not
+> the IMX296; drive via **Valetudo GoTo** (LiDAR-gate), reuse Valetudo's SLAM map. Sections below that
+> describe ROS/vision/LLM *on the robot chroot* are SUPERSEDED — see the doc + CHANGELOG for the live state.
+
 ---
 
 ## Hardware
@@ -131,8 +141,13 @@ v1.5.0), loader `flat_build/flat_build/spinor/dragon-q6a/prog_firehose_ddr.elf`,
 here (`--host http://<robot-ip>`) + nav2 bringup consuming `/map`+TF (companion role: vision/nav/audio
 per the Architecture section); (3) integrate into robot 12V power; (4) change default password.
 
-### Local LLM on the Q6A NPU (Hexagon, verified 2026-07-02)
-**Works.** Llama 3.2 1B runs on the Hexagon **cDSP/NPU** via Qualcomm **Genie** — coherent output,
+### Local LLM on the Q6A NPU (Hexagon, verified 2026-07-02) — ⚠️ RETIRED 2026-07-07
+**RETIRED** (`systemctl disable --now q6a-llmd llama-prewarm`; freed ~1.8 GB for the autonomy stack). The v68
+NPU caps at ~1B — too weak for the agentic robot-brain role — so LLM needs go to **cloud (Cloudflare Workers
+AI planned)**. Reversible; the daemon + adaptive-libGenie work is kept as reference. See the
+`project_q6a_retire_llm` memory. Historical detail below.
+
+**Works (when enabled).** Llama 3.2 1B runs on the Hexagon **cDSP/NPU** via Qualcomm **Genie** — coherent output,
 ~5.5s per one-shot incl. the 1.78 GB model load (~15 tok/s generation per docs). Set up with
 `scripts/companion/setup_npu_llm.sh`; prompt with **`q6a-llm "..."`** (helper in `~/.local/bin`).
 
@@ -369,7 +384,9 @@ Connecting the laptop to the robot AP (`dreame-vacuum-r2250_miap8E6A`) drops the
 
 ### Ubuntu 24.04 chroot (`/data/chroot/`)
 - Full Ubuntu 24.04.4 arm64 base rootfs
-- ROS 2 Jazzy installed (but NOT used — Dragon Q6A handles all ROS)
+- ROS 2 Jazzy **REMOVED 2026-07-08** (147 MB freed) — all ROS runs on the Q6A companion now. The chroot keeps
+  only ROS-free helpers used by the companion: `ring_forward.py` (LiDAR/MCU tap-ring → TCP), `speak.py` (TTS),
+  plus the camstream/go2rtc video stack + piper/ffmpeg. See `docs/companion-autonomy.md`.
 - Enter: `ssh dreame-wifi` then `sh /data/chroot.sh`
 - apt fix required: `APT::Sandbox::User "root"` in `/etc/apt/apt.conf.d/00no-sandbox`
   (apt's `_apt` sandbox user cannot do DNS on kernel 4.9.191)
