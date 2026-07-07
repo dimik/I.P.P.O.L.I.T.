@@ -1,0 +1,19 @@
+[Unit]
+Description=Valetudo -> ROS 2 bridge (companion; reads robot Valetudo REST/SSE over the USB link)
+# Publishes /map, /odom, map->base_link TF, /robot/status, /battery from the robot's Valetudo at
+# http://192.168.10.1 (robot USB-gadget IP). Pure HTTP/SSE — needs NO ROS on the robot. Relocated off
+# the robot chroot to the Q6A (2026-07-07) so ROS lives entirely on the companion.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=radxa
+# source ROS then exec the bridge (systemd env can't capture ROS's full setup).
+# NB: use the ABSOLUTE path — %h in a *system* unit resolves to /root, not the User='s home.
+ExecStart=/bin/bash -c "source /opt/ros/jazzy/setup.bash && exec python3 /home/radxa/valetudo_bridge.py --host http://192.168.10.1"
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

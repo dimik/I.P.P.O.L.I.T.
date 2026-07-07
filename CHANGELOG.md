@@ -6,6 +6,33 @@ it derives from).
 
 ---
 
+## 2026-07-07 — Robot-brain migration step 1: USB link + relocate valetudo_bridge to the companion
+
+**Context:** repurposing the Q6A as the robot's full autonomy brain over the USB-gadget link (ROS + MiDaS
+depth + obstacle-avoidance/SLAM, driving via Valetudo; a semantic object map is a planned add). Retired the
+on-device LLM first to free RAM (see the retire entry / memory) — MemAvailable ~1.8 → ~11 GB.
+
+**What:**
+- **USB network robot↔Q6A confirmed plug-and-play:** robot ECM gadget `usb0`=192.168.10.1, Q6A auto-DHCPs
+  `enxd67ffa3a49bd`=192.168.10.2, **0.68 ms**; Valetudo REST reachable over it; Q6A→robot SSH via a new
+  `robot-usb` alias (dreame key copied to the Q6A).
+- **Relocated `valetudo_bridge.py`** from the robot chroot ROS to the **companion** as a systemd service
+  (`valetudo-bridge.service`, `--host http://192.168.10.1`) → publishes `/map`, `/odom`, `map→base_link` TF,
+  `/robot/status`, `/battery` on the Q6A ROS. Pure Valetudo HTTP/SSE — **no ROS on the robot needed** for
+  these. Stopped the robot's bridge (runtime) to avoid dual-publish.
+- Gotcha: **`%h` in a *system* systemd unit = `/root`**, not the `User=`'s home — use the absolute path.
+
+**Verify (on-device):** companion bridge `active`; `/battery` = 0.96 (96%, live from the robot over USB),
+`/map` width 176, `/odom` + TF publishing; robot chroot `valetudo_bridge` stopped.
+
+**Next:** the robot still runs `lds_scan_node` (`/scan`), `mcu_node` (IMU/`/odom/wheel`), `audio_bridge` in
+its chroot ROS (DDS-visible on the Q6A over USB). **Phase 1.2** = forward the LiDAR + IMU serial-tap rings to
+companion ROS nodes (robot keeps the LD_PRELOAD taps + a ROS-free forwarder); **1.3** = remove robot ROS +
+edit `_root_postboot.sh` (the robot bridge restarts on reboot until then). File:
+`scripts/companion/systemd/valetudo-bridge.service` (new).
+
+---
+
 ## 2026-07-07 — Incident + root cause: NPU/dma memory leaks monotonically until reboot (leak fix B / record)
 
 **Incident:** getting `q6a-llmd` healthy (reloading its 1.8 GB model) drove the board into OOM-thrash and a
