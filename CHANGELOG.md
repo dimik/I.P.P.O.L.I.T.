@@ -6,6 +6,31 @@ it derives from).
 
 ---
 
+## 2026-07-08 — Phase 2 kickoff: robot-camera decision + companion vision node (YOLO) + decisions doc
+
+**Camera decision (D6):** frame-grab comparison → **use the robot OV8856** (MJPEG `:8090` over USB), **not
+the IMX296**. The OV8856 gives a clean forward-facing room view (TV/table/chair/bed/floor all visible at
+robot height); the IMX296 returned only noise (post-reboot CAMSS bringup fault) and its compartment FOV is
+unknown. Bonus: the robot hands us JPEG, so the Q6A skips the whole GPU-ISP/demosaic stack.
+
+**`q6a_vision` node (2.2):** pulls the robot MJPEG → JPEG decode → **w8a8 YOLOv8 on the NPU + ByteTrack** →
+publishes `/vision/detections` (JSON: label/conf/bbox/track_id) and serves an annotated MJPEG on `:8093`.
+Runs as `q6a-vision.service` (systemd; QAIRT 2.42 + ROS env). Crops to the valid 504 rows (camstream pads
+672×504→672×672).
+
+**Verify (on-device, live room):** detects `tv` (~0.67) and `chair` with stable ByteTrack IDs; annotated
+`:8093` shows correct boxes on the robot's view; `/vision/detections` publishing.
+
+**Docs:** new `docs/companion-autonomy.md` — the robot-brain architecture + decisions **D1–D6** (semantic
+object map, reuse-Valetudo-SLAM, drive-via-Valetudo-GoTo/LiDAR-gate, ROS-on-companion, LLM retirement,
+robot-camera choice) with rationale.
+
+**Next:** MiDaS metric depth on the robot frames (fuse with `/scan`) → semantic object map → "go to kitchen".
+Files: `scripts/companion/q6a_vision.py` (new), `scripts/companion/systemd/q6a-vision.service` (new),
+`docs/companion-autonomy.md` (new).
+
+---
+
 ## 2026-07-08 — Phase 1.3 (c+d) — audio relocated + chroot ROS removed → ROS FULLY on the companion
 
 **1.3c audio:** New robot `speak.py` (ROS-free: piper/espeak-ng + ffmpeg → localhost mediad) + companion

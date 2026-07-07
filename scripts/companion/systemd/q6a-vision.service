@@ -1,0 +1,19 @@
+[Unit]
+Description=Companion vision: robot OV8856 -> YOLO(NPU)+ByteTrack -> /vision/detections + annotated :8093
+# Pulls the robot's forward camera (MJPEG :8090 over USB), runs w8a8 YOLOv8 on the Hexagon NPU with ByteTrack,
+# publishes /vision/detections (JSON) and serves an annotated MJPEG on :8093. Robot-camera vision
+# (decision 2026-07-08: OV8856 > IMX296). Needs the QAIRT 2.42 libs for qai_appbuilder + ROS.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=radxa
+Environment=LD_LIBRARY_PATH=/home/radxa/qairt_2.42.0.251225/lib/aarch64-oe-linux-gcc11.2
+Environment=ADSP_LIBRARY_PATH=/home/radxa/qairt_2.42.0.251225/lib/hexagon-v68/unsigned
+ExecStart=/bin/bash -c "source /opt/ros/jazzy/setup.bash && exec python3 /home/radxa/ros/q6a_vision.py"
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
