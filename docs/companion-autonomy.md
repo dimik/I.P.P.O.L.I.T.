@@ -72,4 +72,6 @@ robot "knows" what's in each room and supports queries like "go to the kitchen t
   verified tv=far, person/chair=near). Next: **metric-scale** the disparity vs `/scan` (needs the turret
   spinning + camera FOV/extrinsics — deferred while docked), then the **semantic object map**, then
   "go to kitchen".
-- **P3 autonomy/power**: local costmap + goal-driving via Valetudo; brownout daemon; dock pass-through test.
+- **P3 autonomy/power**: ✅ **brownout guard** (`q6a-brownout`: clean Q6A poweroff at CRIT battery while
+  discharging — Valetudo level + AVA `charge_state`, since Valetudo's charging flag is broken on the D10S Pro).
+  Remaining: local costmap + goal-driving via Valetudo; dock pass-through test (needs the robot docked).

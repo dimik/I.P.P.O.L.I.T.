@@ -6,6 +6,23 @@ it derives from).
 
 ---
 
+## 2026-07-08 — Brownout guard (P3.2): clean poweroff before the robot battery dies
+
+**What:** New `q6a_brownout.py` (non-ROS daemon, `q6a-brownout.service`) watches the robot battery over USB
+and, while **discharging**, clean-`systemctl poweroff`s the Q6A at CRIT — the Q6A runs off the robot battery,
+so an unclean cut risks the ext4 root + a cDSP wedge (which the Q6A handles badly). Charging state comes from
+**AVA `charge_state`** (robot `/tmp/charge_state`) because **Valetudo's battery flag is broken on the D10S Pro
+(stuck `none`)**; level from Valetudo. Thresholds: **WARN 25%** (log + TTS warning, optional send-home — off by
+default since AVA auto-docks), **CRIT 12%** (clean poweroff). One-shot latches; resets while charging.
+Camera-free, drive-free.
+
+**Verify (on-device):** dry-run with forced thresholds → correctly detected `discharging` (charge_state
+"not charge") and logged the CRIT clean-poweroff + WARN paths without executing; live service `active` at
+91%, monitoring at 60 s poll, no action (above WARN). Files: `scripts/companion/q6a_brownout.py` (new),
+`scripts/companion/systemd/q6a-brownout.service` (new), `docs/companion-autonomy.md`.
+
+---
+
 ## 2026-07-08 — Phase 2.3: MiDaS depth fused into the vision node (per-detection relative range)
 
 **What:** `q6a_vision` now loads **MiDaS-V2 w8a8 as a 2nd NPU context in the same process** (de-risked: YOLO +

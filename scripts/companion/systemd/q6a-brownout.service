@@ -1,0 +1,18 @@
+[Unit]
+Description=Companion brownout guard: clean poweroff before the robot battery dies (protects ext4/cdsp)
+# The Q6A runs off the robot's battery; an unclean cut risks the ext4 root + a cDSP wedge. Watches the
+# robot battery (Valetudo level + AVA charge_state over USB) and clean-poweroffs the Q6A at CRIT while
+# discharging. Non-ROS. Defaults: WARN 25%, CRIT 12%, speak on, send-home off (AVA auto-docks). See
+# q6a_brownout.py for env overrides.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=radxa
+ExecStart=/usr/bin/python3 /home/radxa/ros/q6a_brownout.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
