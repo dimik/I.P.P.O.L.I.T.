@@ -6,6 +6,32 @@ it derives from).
 
 ---
 
+## 2026-07-08 — Phase 1.3 (c+d) — audio relocated + chroot ROS removed → ROS FULLY on the companion
+
+**1.3c audio:** New robot `speak.py` (ROS-free: piper/espeak-ng + ffmpeg → localhost mediad) + companion
+`audio_bridge.py` (ROS `/robot/speak` subscription that pipes each utterance to `speak.py` over ssh). This
+reuses the robot's existing TTS stack (no ~270 MB copy to the Q6A) and works around **mediad binding
+`127.0.0.1`** (so the play trigger must run on the robot). Companion `audio-bridge.service`. Verified
+end-to-end: `ros2 topic pub /robot/speak` → companion node → robot speaker (owner confirmed hearing it).
+Note: had to raise the Valetudo speaker volume **0→60** — it was muted by the fanoff work; safe now since we
+drive via Valetudo GoTo (not manual-control, which is what triggered AVA's voice prompt).
+
+**1.3d:** Removed `/data/chroot/opt/ros/jazzy` (**147 MB**) — ROS 2 is no longer installed on the robot
+(`/data` 62%→58%). Robot ROS node procs swept; `/scan` publisher count = 1 (companion only).
+
+**PHASE 1 COMPLETE — ROS lives entirely on the companion (Q6A):**
+- Services (systemd, boot-enabled): `valetudo-bridge`, `mcu-node`, `lds-scan-node`, `audio-bridge`.
+- Topics: `/map`, `/scan`, `/imu/data`, `/odom`, `/odom/wheel`, `/battery`, `/robot/status`, `/robot/speak`.
+- Robot = LD_PRELOAD taps + ROS-free `ring_forward.py` (LDS/MCU) + `speak.py` + Valetudo. No ROS.
+
+**Follow-up:** CLAUDE.md still documents the old chroot-ROS layout — update to ROS-on-companion. The old
+`scripts/robot/audio_bridge.py` is superseded by `speak.py` + `scripts/companion/audio_bridge.py`.
+
+Files: `scripts/robot/speak.py` (new), `scripts/companion/audio_bridge.py` (new),
+`scripts/companion/systemd/audio-bridge.service` (new), `scripts/robot/_root_postboot.sh`.
+
+---
+
 ## 2026-07-07 — Phase 1.3 (a+b): companion node services + robot boot hook launches forwarders
 
 **What:**

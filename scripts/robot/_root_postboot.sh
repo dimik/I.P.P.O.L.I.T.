@@ -143,14 +143,9 @@ if [ -f $CHROOT/opt/ring_forward.py ]; then
     logger -t postboot "ring_forward MCU started"
 fi
 
-# --- audio bridge: /robot/speak -> Dreame mediad (play OGG on the speaker, no ALSA contention) ---
-# Plays .ogg files through AVA's media daemon (mda_cli protocol over 127.0.0.1:10100), serialized
-# with AVA's own prompts. TTS happens on the companion (OGG -> /tmp -> /robot/speak). See docs/audio.md.
-if [ -f $CHROOT/opt/audio_bridge.py ]; then
-    setsid chroot $CHROOT bash -lc 'source /opt/ros/jazzy/setup.bash; exec python3 /opt/audio_bridge.py' > /tmp/audio_bridge.log 2>&1 </dev/null &
-    echo "audio_bridge (ROS /robot/speak) started"
-    logger -t postboot "audio_bridge started"
-fi
+# --- audio bridge: RELOCATED to the companion (Q6A audio-bridge.service), 2026-07-08 (phase 1.3c) ---
+# The ROS /robot/speak subscription now runs on the Q6A; it pipes each utterance to the robot's ROS-free
+# /opt/speak.py over ssh (piper/espeak + ffmpeg -> localhost mediad). No ROS on the robot for audio.
 
 # --- charge_state poller: Valetudo's battery charging FLAG is stuck 'none' for the D10S Pro (mapping
 # gap); AVA reports the truth via charge_state. Poll it (host avacmd) into /tmp/charge_state so the
