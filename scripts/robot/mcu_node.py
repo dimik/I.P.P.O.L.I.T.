@@ -24,6 +24,7 @@ Run:  source /opt/ros/jazzy/setup.bash && python3 mcu_node.py
 """
 import math
 import mmap
+import socket
 import os
 import struct
 import threading
@@ -84,6 +85,15 @@ class McuNode(Node):
         self.pub_imu = self.create_publisher(Imu, '/imu/data', 50)
         self.pub_odom = self.create_publisher(Odometry, '/odom/wheel', 50)
 
+        # source: '' = local tmpfs ring (on-robot); 'host:port' = raw bytes over TCP from ring_forward.py on
+        # the robot (lets this node run on the COMPANION with ROS off the robot). Decode/publish is identical.
+        self.declare_parameter('source', '')
+        _src = self.get_parameter('source').value
+        self.src = None
+        if _src:
+            _h, _, _p = _src.partition(':')
+            self.src = (_h, int(_p))
+        self.sock = None
         self.mm = None
         self.read_pos = 0
         self.buf = bytearray()
@@ -110,7 +120,39 @@ class McuNode(Node):
                 idle = min(idle + 1, 10)
                 time.sleep(0.005 * idle)            # ring dry -> back off to ~50 ms (was a flat 500 Hz poll)
 
+    def open_tcp(self):
+        if self.sock is not None:
+            return True
+        try:
+            s = socket.create_connection(self.src, timeout=2.0)
+            s.setblocking(False)
+            self.sock = s
+            self.get_logger().info(f'connected to ring_forward {self.src[0]}:{self.src[1]}')
+            return True
+        except Exception as e:
+            self.get_logger().warn(f'ring_forward connect failed: {e}')
+            return False
+
+    def drain_tcp(self):
+        chunks = []
+        try:
+            while True:
+                b = self.sock.recv(65536)
+                if b == b'':
+                    raise ConnectionError('ring_forward closed')
+                chunks.append(b)
+        except BlockingIOError:
+            pass
+        except (OSError, ConnectionError) as e:
+            self.get_logger().warn(f'ring_forward recv: {e}; will reconnect')
+            try: self.sock.close()
+            except Exception: pass
+            self.sock = None
+        return b''.join(chunks)
+
     def open_ring(self):
+        if self.src is not None:
+            return self.open_tcp()
         if self.mm is not None:
             return True
         if not os.path.exists(RING_PATH):
@@ -129,6 +171,8 @@ class McuNode(Node):
             return False
 
     def drain(self):
+        if self.src is not None:
+            return self.drain_tcp()
         wp = struct.unpack_from('<Q', self.mm, 0)[0]
         avail = wp - self.read_pos
         if avail <= 0:

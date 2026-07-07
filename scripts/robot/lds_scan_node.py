@@ -17,6 +17,7 @@ Run:  source /opt/ros/jazzy/setup.bash && python3 lds_scan_node.py
 import math
 import mmap
 import os
+import socket
 import struct
 import sys
 import time
@@ -52,6 +53,15 @@ class LdsScanNode(Node):
         self.rmax = self.get_parameter('range_max').value
         self.pub = self.create_publisher(LaserScan, '/scan', 10)
 
+        # source: '' = local tmpfs ring (on-robot); 'host:port' = raw bytes over TCP from ring_forward.py on
+        # the robot (lets this node run on the COMPANION with ROS off the robot). Decode/publish is identical.
+        self.declare_parameter('source', '')
+        src = self.get_parameter('source').value
+        self.src = None
+        if src:
+            h, _, p = src.partition(':')
+            self.src = (h, int(p))
+        self.sock = None
         self.mm = None
         self.read_pos = 0
         self.buf = bytearray()
@@ -69,7 +79,40 @@ class LdsScanNode(Node):
             self.timer = self.create_timer(p, self.poll)
             self.cur_period = p
 
+    def open_tcp(self):
+        """Connect to ring_forward on the robot; raw ring bytes stream in (non-blocking recv in drain)."""
+        if self.sock is not None:
+            return True
+        try:
+            s = socket.create_connection(self.src, timeout=2.0)
+            s.setblocking(False)
+            self.sock = s
+            self.get_logger().info(f'connected to ring_forward {self.src[0]}:{self.src[1]}')
+            return True
+        except Exception as e:
+            self.get_logger().warn(f'ring_forward connect failed: {e}')
+            return False
+
+    def drain_tcp(self):
+        chunks = []
+        try:
+            while True:
+                b = self.sock.recv(65536)
+                if b == b'':
+                    raise ConnectionError('ring_forward closed')
+                chunks.append(b)
+        except BlockingIOError:
+            pass
+        except (OSError, ConnectionError) as e:
+            self.get_logger().warn(f'ring_forward recv: {e}; will reconnect')
+            try: self.sock.close()
+            except Exception: pass
+            self.sock = None
+        return b''.join(chunks)
+
     def open_ring(self):
+        if self.src is not None:
+            return self.open_tcp()
         if self.mm is not None:
             return True
         if not os.path.exists(RING_PATH):
@@ -91,7 +134,9 @@ class LdsScanNode(Node):
             return False
 
     def drain(self):
-        """Return new bytes written since last drain (handles wrap + reader-fell-behind)."""
+        """Return new bytes since last drain. TCP source (companion) or local ring (on-robot)."""
+        if self.src is not None:
+            return self.drain_tcp()
         wp = struct.unpack_from('<Q', self.mm, 0)[0]
         avail = wp - self.read_pos
         if avail <= 0:

@@ -6,6 +6,31 @@ it derives from).
 
 ---
 
+## 2026-07-07 — Phase 1.2: forward robot LiDAR + IMU/odom to companion ROS (taps stay, ROS moves)
+
+**What:** New `ring_forward.py` (robot, **ROS-free**, stdlib-only): streams a serial-tap tmpfs ring's raw bytes
+over TCP. `lds_scan_node.py` + `mcu_node.py` gained a `source` param — local tmpfs ring (on-robot, the
+unchanged default) **or** `host:port` TCP from the forwarder (on-companion); the decode/publish is byte-for-byte
+identical either way. So the robot keeps only the LD_PRELOAD serial taps + these thin forwarders (no ROS), and
+the ROS nodes run on the Q6A. This is the mechanism that lets ROS leave the robot.
+
+**Deployed/cutover:** robot chroot runs 2 forwarders — LDS `:9901` (`/tmp/lds_ring.buf`), MCU `:9902`
+(`/tmp/mcu_ring.buf`); companion runs `mcu_node` + `lds_scan_node` with `-p source:=192.168.10.1:{9902,9901}`.
+Robot's own `mcu_node` + `lds_scan_node` stopped.
+
+**Verify (on-device):** both nodes logged "connected to ring_forward"; **`/odom/wheel` live at 49 Hz** on the
+companion (wheel odom x/y streaming from the robot MCU over USB, matching the ~50 Hz Status rate); `/imu/data`
+ready (publishes when the robot is active — docked D10s sends no IMU). **`/scan`** node connected + waiting —
+verification pends the LiDAR turret spinning (fanoff-gated while docked); the forwarding mechanism is identical
+to the verified MCU path, so no robot motion was forced to test it.
+
+**Next (1.3):** boot-persistence — companion systemd units for the 3 nodes (bridge is already one) + edit the
+robot `_root_postboot.sh` to launch the **forwarders** instead of the chroot ROS nodes, then remove ROS from
+the chroot. (Forwarders + companion nodes are manually launched right now; a reboot needs 1.3.) Files:
+`scripts/robot/ring_forward.py` (new), `lds_scan_node.py`, `mcu_node.py` (dual-source).
+
+---
+
 ## 2026-07-07 — Robot-brain migration step 1: USB link + relocate valetudo_bridge to the companion
 
 **Context:** repurposing the Q6A as the robot's full autonomy brain over the USB-gadget link (ROS + MiDaS
