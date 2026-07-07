@@ -67,6 +67,9 @@ robot "knows" what's in each room and supports queries like "go to the kitchen t
 
 ## Roadmap (phases)
 - **P1 ✅ ROS → companion**: bridge, `/scan`, `/imu`+`/odom`, audio all relocated; robot ROS removed.
-- **P2 (in progress) perception**: ✅ camera decision + `q6a-vision` (robot cam → YOLO+ByteTrack → detections);
-  next: MiDaS metric depth (fuse with `/scan`), then the semantic object map, then "go to kitchen".
+- **P2 (in progress) perception**: ✅ camera decision; ✅ `q6a-vision` (robot cam → YOLO+ByteTrack+**MiDaS
+  depth** in one process → `/vision/detections` with per-object **relative disparity**, higher=nearer;
+  verified tv=far, person/chair=near). Next: **metric-scale** the disparity vs `/scan` (needs the turret
+  spinning + camera FOV/extrinsics — deferred while docked), then the **semantic object map**, then
+  "go to kitchen".
 - **P3 autonomy/power**: local costmap + goal-driving via Valetudo; brownout daemon; dock pass-through test.

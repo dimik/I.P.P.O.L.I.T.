@@ -6,6 +6,24 @@ it derives from).
 
 ---
 
+## 2026-07-08 — Phase 2.3: MiDaS depth fused into the vision node (per-detection relative range)
+
+**What:** `q6a_vision` now loads **MiDaS-V2 w8a8 as a 2nd NPU context in the same process** (de-risked: YOLO +
+MiDaS coexist in one process — ~13 ms + ~6 ms, no crash). Each frame runs YOLO+ByteTrack + a 256×256 MiDaS
+inverse-depth map; each detection gets the **median disparity in its bbox** (higher = nearer), published in
+`/vision/detections` (`disp`) and drawn in the annotated `:8093` view (`d<value>`). Full depth map kept in
+`Shared.depth` for obstacle use later.
+
+**Verify (live room):** physically correct — **`tv` d7** (far, across the room), **`person` d104** +
+**`chair` d104** (near). One puller, one process, both nets on the NPU.
+
+**Metric scaling — deferred/noted:** disparity→meters needs the camera FOV/extrinsics + LiDAR `/scan`, and
+`/scan` only flows while the turret spins (parked when docked). Relative depth already orders objects by
+distance (feeds the object map 2.4) and flags near obstacles; the metric fit vs `/scan` is a refinement for
+when the robot navigates. Files: `scripts/companion/q6a_vision.py`, `docs/companion-autonomy.md`.
+
+---
+
 ## 2026-07-08 — Phase 2 kickoff: robot-camera decision + companion vision node (YOLO) + decisions doc
 
 **Camera decision (D6):** frame-grab comparison → **use the robot OV8856** (MJPEG `:8090` over USB), **not

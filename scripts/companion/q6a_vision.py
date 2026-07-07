@@ -20,6 +20,7 @@ from PIL import Image, ImageDraw
 sys.path.insert(0, os.path.expanduser('~'))
 from q6a_yolo import YoloDetector
 from q6a_bytetrack import ByteTracker
+from qai_appbuilder import QNNContext, DataType
 
 import rclpy
 from rclpy.node import Node
@@ -31,13 +32,17 @@ VALID_ROWS = int(os.environ.get('Q6A_CAM_VALID_ROWS', '504'))   # camstream pads
 CONF = float(os.environ.get('Q6A_YOLO_CONF', '0.1'))            # low: ByteTrack recovers, spawns only >=0.4
 VIEW_PORT = int(os.environ.get('Q6A_VISION_PORT', '8093'))
 DET_FPS = float(os.environ.get('Q6A_VISION_FPS', '8'))
+MIDAS_BIN = os.path.expanduser('~/midas_depth_w8a8.bin')
+MIDAS_RES = 256                                                # MiDaS-v21-small is 256x256
+DEPTH = os.environ.get('Q6A_VISION_DEPTH', '1') != '0'         # run MiDaS depth alongside YOLO
 _PALETTE = [(255, 64, 64), (64, 200, 64), (64, 160, 255), (255, 200, 0),
             (255, 64, 255), (0, 220, 220), (255, 128, 0), (160, 96, 255)]
 
 
 class Shared:
     rgb = None            # latest decoded frame (valid rows), numpy HxWx3 RGB
-    dets = []             # [(x1,y1,x2,y2,label,conf,track_id)]
+    dets = []             # [(x1,y1,x2,y2,label,conf,track_id,disp)]
+    depth = None          # latest MiDaS 256x256 relative disparity map (for obstacle use later)
     annot = None          # latest annotated JPEG bytes (for the view server)
     seq = 0
     lock = threading.Lock()
@@ -74,10 +79,11 @@ def puller():
 
 def annotate(rgb, dets):
     im = Image.fromarray(rgb); d = ImageDraw.Draw(im)
-    for x1, y1, x2, y2, lab, cf, tid in dets:
+    for x1, y1, x2, y2, lab, cf, tid, dep in dets:
         col = _PALETTE[(tid if tid else hash(lab)) % len(_PALETTE)]
         d.rectangle([x1, y1, x2, y2], outline=col, width=3)
-        d.text((x1 + 2, y1 + 1), f'#{tid} {lab} {cf:.2f}', fill=col)
+        tag = f'#{tid} {lab} {cf:.2f}' + (f' d{dep}' if dep >= 0 else '')   # d = relative disparity (higher=nearer)
+        d.text((x1 + 2, y1 + 1), tag, fill=col)
     b = io.BytesIO(); im.save(b, 'JPEG', quality=80)
     return b.getvalue()
 
@@ -105,11 +111,36 @@ class VisionNode(Node):
     def __init__(self):
         super().__init__('q6a_vision')
         self.pub = self.create_publisher(String, '/vision/detections', 10)
-        self.det = YoloDetector(conf=CONF)
+        self.det = YoloDetector(conf=CONF)          # Configs the HTP backend + loads the YOLO context
         self.labels = self.det.labels
         self.tracker = ByteTracker(high_thresh=0.4, low_thresh=CONF)
-        self.get_logger().info(f'q6a_vision up: {MJPEG_URL} -> YOLO(NPU)+ByteTrack -> /vision/detections + :{VIEW_PORT}')
+        self.midas = None
+        if DEPTH and os.path.exists(MIDAS_BIN):     # 2nd NPU context in the same process (verified OK)
+            self.midas = QNNContext('midas_depth_w8a8', MIDAS_BIN,
+                                    input_data_type=DataType.NATIVE, output_data_type=DataType.NATIVE)
+            self.get_logger().info('MiDaS depth context loaded (per-detection relative disparity)')
+        self.get_logger().info(f'q6a_vision up: {MJPEG_URL} -> YOLO(NPU)+ByteTrack{"+MiDaS" if self.midas else ""} '
+                               f'-> /vision/detections + :{VIEW_PORT}')
         threading.Thread(target=self.infer_loop, daemon=True).start()
+
+    def depth_map(self, rgb):
+        """MiDaS inverse-depth (disparity) at 256x256; higher = nearer. affine-invariant (see D1)."""
+        if self.midas is None:
+            return None
+        small = np.ascontiguousarray(
+            np.asarray(Image.fromarray(rgb).resize((MIDAS_RES, MIDAS_RES), Image.BILINEAR))
+            .transpose(2, 0, 1)[None].astype(np.uint8))
+        out = self.midas.Inference([small])
+        return np.asarray(out[0] if isinstance(out, (list, tuple)) else out, dtype=np.uint8).reshape(MIDAS_RES, MIDAS_RES)
+
+    @staticmethod
+    def _det_disp(dmap, x1, y1, x2, y2, w, h):
+        """Median MiDaS disparity inside a bbox (bbox in frame px -> 256 grid). -1 if no depth."""
+        if dmap is None:
+            return -1
+        sx, sy = MIDAS_RES / w, MIDAS_RES / h
+        patch = dmap[max(0, int(y1 * sy)):int(y2 * sy) + 1, max(0, int(x1 * sx)):int(x2 * sx) + 1]
+        return int(np.median(patch)) if patch.size else -1
 
     def infer_loop(self):
         period = 1.0 / DET_FPS if DET_FPS > 0 else 0.0
@@ -126,9 +157,14 @@ class VisionNode(Node):
             scores = [d[5] for d in out]
             clsi = [self.labels.index(d[4]) if d[4] in self.labels else -1 for d in out]
             tracked = self.tracker.update(boxes, scores, clsi)   # (x1,y1,x2,y2,score,cls_idx,tid)
-            dets = [(int(x1), int(y1), int(x2), int(y2),
-                     self.labels[int(ci)] if 0 <= int(ci) < len(self.labels) else str(int(ci)),
-                     float(cf), int(tid)) for (x1, y1, x2, y2, cf, ci, tid) in tracked]
+            h, w = int(rgb.shape[0]), int(rgb.shape[1])
+            dmap = self.depth_map(rgb)                            # 256x256 relative disparity (or None)
+            Shared.depth = dmap
+            dets = []
+            for (x1, y1, x2, y2, cf, ci, tid) in tracked:
+                lab = self.labels[int(ci)] if 0 <= int(ci) < len(self.labels) else str(int(ci))
+                disp = self._det_disp(dmap, x1, y1, x2, y2, w, h)
+                dets.append((int(x1), int(y1), int(x2), int(y2), lab, float(cf), int(tid), disp))
             Shared.dets = dets
             Shared.annot = annotate(rgb, dets)
             Shared.seq += 1
@@ -142,8 +178,8 @@ class VisionNode(Node):
         msg.data = json.dumps({
             'stamp': self.get_clock().now().nanoseconds,
             'w': int(shape[1]), 'h': int(shape[0]),
-            'dets': [{'label': l, 'conf': round(cf, 3), 'bbox': [x1, y1, x2, y2], 'id': tid}
-                     for (x1, y1, x2, y2, l, cf, tid) in dets],
+            'dets': [{'label': l, 'conf': round(cf, 3), 'bbox': [x1, y1, x2, y2], 'id': tid, 'disp': dep}
+                     for (x1, y1, x2, y2, l, cf, tid, dep) in dets],
         })
         self.pub.publish(msg)
 
