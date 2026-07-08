@@ -33,7 +33,10 @@ Turn a Dreame D10s Pro robot vacuum into an open AI platform:
 - Writable partition: `/data/` (ext4, ~3.3GB total, ~2GB free after setup)
 - SSH access: `root@192.168.10.1` (USB gadget link — fastest, WiFi-independent), `root@192.168.1.213`
   (home WiFi), `root@192.168.5.1` (robot AP mode). `sshd` listens on `0.0.0.0:22`.
-- SSH key: `~/.ssh/id_rsa_dreame`. Local `~/.ssh/config` aliases: `dreame-usb`, `dreame-wifi`, `dreame` (AP).
+- SSH key: `~/.ssh/id_rsa_dreame`. ⚠️ STALE (found 2026-07-08): the Mac's `~/.ssh/config` no longer
+  has the `dreame-usb`/`dreame-wifi`/`dreame` aliases, and the Mac's `id_rsa_dreame` is **rejected**
+  by the robot. Working path: **via the Q6A** (`ssh q6a` → aliases `robot-usb`/`robot-wifi`, its
+  `id_rsa_dreame` copy works). Valetudo REST at `http://192.168.1.213` still reachable from the Mac.
 - **Rebooting:** `reboot` / `reboot -f` **HANG** on this robot (the kernel restart path stalls in a
   driver `.shutdown` hook — likely the USB-gadget teardown; no power-cycle happens, just piles up
   stuck `reboot` procs). Use the **sysrq emergency reboot**, which skips device shutdown:
@@ -733,7 +736,7 @@ Base URL: `http://192.168.1.213` (or `http://localhost` from on-robot)
 | QuirksCapability | `/api/v2/robot/capabilities/QuirksCapability` | quirk array | PUT `{"id":"...","value":"low"/"medium"/"high"}` — only exposes Carpet Mode Sensitivity |
 | CarpetModeControlCapability | `/api/v2/robot/capabilities/CarpetModeControlCapability` | `{"enabled":false}` | `{"enabled":true/false}` |
 | CleanRouteControlCapability | `/api/v2/robot/capabilities/CleanRouteControlCapability` | `{"route":"normal"}` | `{"route":"normal"/"..."}` |
-| LocateCapability | `/api/v2/robot/capabilities/LocateCapability` | — | PUT (no body) — robot beeps |
+| LocateCapability | `/api/v2/robot/capabilities/LocateCapability` | — | `{"action":"locate"}` — robot beeps (PUT with NO body = 400; verified live 2026-07-08) |
 | KeyLockCapability | `/api/v2/robot/capabilities/KeyLockCapability` | `{"enabled":false}` | `{"enabled":true/false}` |
 | DoNotDisturbCapability | `/api/v2/robot/capabilities/DoNotDisturbCapability` | DND schedule | schedule object |
 | MapSegmentationCapability | `/api/v2/robot/capabilities/MapSegmentationCapability` | — | segment clean commands |
@@ -923,6 +926,11 @@ scripts/
     setup_npu_llm.sh       NPU Genie LLM daemon (Llama-3.2-1B) + q6a_llmd.py, q6a-llm[-remote], systemd units
     qnn/                   from-source adaptive libGenie (PHASE3.md, genie-build/) + QNN-direct recon
     camera/                IMX296 bring-up: build_imx296.sh, deploy_imx296.sh [CAM 2|3], cam2/cam3 overlays (.dts/.dtbo)
+    q6a_voice.py           voice control: USB mic + VAD -> Cloudflare voice Worker -> /robot/speak + Valetudo actions
+  ask.sh                   workstation: text -> voice Worker LLM -> robot speaks the reply (Piper)
+cloud/
+  voice-worker/            Cloudflare Worker (personal acct, DEPLOYED): Whisper STT + Llama-3.3-70B
+                           JSON-mode intent for voice control — see docs/voice-cloud.md
 robot/
   boot/README.md           deployment instructions for boot hooks
   valetudo/valetudo.json   Valetudo configuration
@@ -943,6 +951,8 @@ docs/
   sensors.md               sensors & data access (LiDAR, camera, IMU, mic) + how to read each
   ros.md                   ROS 2 integration: Valetudo bridge topics/QoS/frames, chroot ROS,
                            cross-host DDS to the Q6A, parked IMU, roadmap
+  voice-cloud.md           voice control via Cloudflare Workers AI (Whisper + Llama): architecture,
+                           deploy checklist, action contract, cost/latency
   device-test-checklist.md manual smoke test after shim/stream/bridge changes
 ```
 

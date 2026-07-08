@@ -1,0 +1,19 @@
+[Unit]
+Description=Voice control via Cloudflare voice Worker (companion; USB mic -> STT+LLM -> actions)
+# Captures the USB mic, ships utterances to the ippolit-voice Worker (Whisper + Llama), speaks the
+# reply via /robot/speak and executes actions against Valetudo REST. See docs/voice-cloud.md.
+# Needs /etc/default/ippolit-voice with VOICE_ENDPOINT + VOICE_TOKEN (secret — not in the repo).
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=radxa
+EnvironmentFile=-/etc/default/ippolit-robot
+EnvironmentFile=/etc/default/ippolit-voice
+ExecStart=/bin/bash -c "source /opt/ros/jazzy/setup.bash && exec python3 /home/radxa/ros/q6a_voice.py --ros-args -p mic_device:=$${VOICE_MIC:-default}"
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

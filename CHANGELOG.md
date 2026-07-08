@@ -6,6 +6,44 @@ it derives from).
 
 ---
 
+## 2026-07-08 — Cloud voice brain live: Cloudflare Workers AI endpoint (STT + LLM) + robot speaks LLM replies
+
+**Milestone:** the cloud half of voice control is **deployed and verified end-to-end** — the planned
+replacement for the retired on-device 1B LLM. `scripts/ask.sh "hello robot"` made the robot answer
+*"I am IPPOLIT, a converted Dreame robot vacuum now serving as an autonomous AI rover"* through its
+own Piper voice, with the reply generated in the cloud. New doc: **`docs/voice-cloud.md`**.
+
+**Worker (`cloud/voice-worker/`, live at `https://ippolit-voice.poklonskiydmitry.workers.dev`):** one
+HTTPS round trip — 16 kHz WAV in → Whisper (`@cf/openai/whisper-large-v3-turbo`) → Llama
+(`@cf/meta/llama-3.3-70b-instruct-fp8-fast`, JSON mode) → `{transcript, reply, voice, actions[]}`.
+Routes: `POST /voice` (audio), `POST /text` (typed/testing), `GET /healthz`. Auth = shared bearer
+secret (`AUTH_TOKEN` Worker secret ↔ gitignored `.dev.vars`). Live robot context (battery, status,
+`/object_map` objects) rides in every request, so status questions are answered in the same single
+LLM call — no tool loop by design (the hallucinated-tool failure mode killed the offline agent).
+Free tier 10k neurons/day ≈ hundreds of commands/day.
+
+**Verified:** intent suite via `/text` — goto-object with correct coords, battery Q&A from context,
+refusal on unknown targets, **Polish in → Polish reply + `gosia` voice**, stop; `/voice` with real
+spoken audio = perfect transcript + correct action in **3.8 s** round trip; 401 on bad token.
+
+**Two Workers-AI gotchas burned in** (handled in `src/index.ts`, documented so they stay learned):
+(1) **JSON mode is model-gated** — llama-4-scout (first pick) is not on the supported list and
+*silently ignores* `response_format`, free-styling the JSON shape; (2) in JSON mode the AI binding
+returns `response` as an **already-parsed object**, not a string — `JSON.parse` throws.
+
+**Companion side (ready, awaiting a USB mic — the robot has NO mic, both paths dead per
+`docs/sensors.md`):** `scripts/companion/q6a_voice.py` (arecord + energy-VAD or `/voice/trigger`
+push-to-talk → Worker → `/robot/speak` + Valetudo actions: dock/stop/pause/locate/goto_point with
+the meters→mm inverse of the bridge transform) + `q6a-voice.service` + `ippolit-voice.env.example`.
+`goto_point` sign convention still needs one live calibration drive.
+
+**Fixed along the way:** CLAUDE.md `LocateCapability` row was wrong — verified live: PUT **needs**
+`{"action":"locate"}` (200); empty body = 400. Also marked the Mac's `dreame-*` ssh aliases as stale
+(gone from `~/.ssh/config`; the Mac's `id_rsa_dreame` is rejected by the robot — access path is via
+the Q6A's `robot-usb`/`robot-wifi` aliases, whose key works).
+
+---
+
 ## 2026-07-08 — Working semantic object map via companion laser-SLAM odometry (2.4 done)
 
 **Milestone:** the companion now builds a semantic object map during a manual drive, localizing **itself**
