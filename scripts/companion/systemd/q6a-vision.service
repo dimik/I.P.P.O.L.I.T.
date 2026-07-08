@@ -11,7 +11,8 @@ Type=simple
 User=radxa
 Environment=LD_LIBRARY_PATH=/home/radxa/qairt_2.42.0.251225/lib/aarch64-oe-linux-gcc11.2
 Environment=ADSP_LIBRARY_PATH=/home/radxa/qairt_2.42.0.251225/lib/hexagon-v68/unsigned
-ExecStart=/bin/bash -c "source /opt/ros/jazzy/setup.bash && exec python3 /home/radxa/ros/q6a_vision.py"
+EnvironmentFile=-/etc/default/ippolit-robot        # ROBOT_ADDR (USB 192.168.10.1 / WiFi 192.168.1.213)
+ExecStart=/bin/bash -c "source /opt/ros/jazzy/setup.bash && exec env Q6A_CAM_URL=http://$${ROBOT_ADDR:-192.168.10.1}:8090/ python3 /home/radxa/ros/q6a_vision.py"
 Restart=on-failure
 RestartSec=3
 

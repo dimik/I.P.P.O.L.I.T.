@@ -10,7 +10,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=radxa
-ExecStart=/usr/bin/python3 /home/radxa/ros/q6a_brownout.py
+EnvironmentFile=-/etc/default/ippolit-robot        # ROBOT_ADDR + ROBOT_SSH (USB / WiFi)
+ExecStart=/bin/bash -c "exec env Q6A_ROBOT_HOST=http://$${ROBOT_ADDR:-192.168.10.1} Q6A_ROBOT_SSH=$${ROBOT_SSH:-robot-usb} python3 /home/radxa/ros/q6a_brownout.py"
 Restart=on-failure
 RestartSec=10
 

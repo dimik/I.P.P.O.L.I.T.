@@ -9,7 +9,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=radxa
-ExecStart=/bin/bash -c "source /opt/ros/jazzy/setup.bash && exec python3 /home/radxa/ros/lds_scan_node.py --ros-args -p source:=192.168.10.1:9901"
+EnvironmentFile=-/etc/default/ippolit-robot        # ROBOT_ADDR (USB 192.168.10.1 / WiFi 192.168.1.213)
+ExecStart=/bin/bash -c "source /opt/ros/jazzy/setup.bash && exec python3 /home/radxa/ros/lds_scan_node.py --ros-args -p source:=$${ROBOT_ADDR:-192.168.10.1}:9901"
 Restart=on-failure
 RestartSec=3
 

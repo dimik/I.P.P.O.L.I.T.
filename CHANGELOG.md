@@ -6,6 +6,25 @@ it derives from).
 
 ---
 
+## 2026-07-08 — Companion robot-link switchable USB<->WiFi (enables free-roam driving)
+
+**What:** All 6 companion services (valetudo-bridge, mcu-node, lds-scan-node, audio-bridge, q6a-vision,
+q6a-brownout) now read the robot address + ssh alias from a single optional `/etc/default/ippolit-robot`
+(`ROBOT_ADDR`, `ROBOT_SSH`), defaulting to the USB gadget (192.168.10.1 / robot-usb) when absent (current
+behavior unchanged). Set `ROBOT_ADDR=192.168.1.213 ROBOT_SSH=robot-wifi` + restart -> the companion talks to
+the robot over **home WiFi** instead of the USB cable, so the robot can **drive free** (the USB tether would
+yank when it moves). Robot-side services bind 0.0.0.0 - no robot change. (systemd `$$` escaping so bash does
+the `${VAR:-default}` expansion.)
+
+**Why:** the object-map / SLAM work needs the robot moving; WiFi frees it from the cable. WiFi is
+higher-latency/jitterier than USB - fine for the slow Valetudo-GoTo object-map drive; USB stays preferred for
+tight obstacle avoidance. **Deploy-tested when the devices are next powered on.** Caveat: needs the AP to
+allow client-to-client traffic (no AP isolation).
+
+Files: `scripts/companion/systemd/ippolit-robot.env` (new) + the 6 unit files.
+
+---
+
 ## 2026-07-08 — Docs: sync CLAUDE.md to the robot-brain architecture
 
 **What:** Added a prominent current-architecture banner at the top of `CLAUDE.md` pointing to
