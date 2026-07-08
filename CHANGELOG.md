@@ -6,6 +6,73 @@ it derives from).
 
 ---
 
+## 2026-07-08 — Working semantic object map via companion laser-SLAM odometry (2.4 done)
+
+**Milestone:** the companion now builds a semantic object map during a manual drive, localizing **itself**
+from the LiDAR — no Valetudo pose, no wheel odom, no autonomous nav. A clearance-gated slow drive produced a
+**12-object map** (`tv` 268×, `chair` 204×, `person`, …) with correct relative placement.
+
+**LiDAR in manual control (the "unpatch"):** `/scan` is gated OFF during `manual_control` by the fanoff design
+— the `fanoff_flag` gate daemon clears `/tmp/lidar_allow` in manual mode, so the shim rewrites AVA's turret
+`spin=01` → `park=00`. Confirmed AVA *wants* it spinning (strace: `3c 02 14 04 01` on ttyS4). Fix for mapping:
+**stop the gate daemon + hold `/tmp/lidar_allow` present** → the shim passes AVA's own spin → turret spins →
+`/scan` live at 5.2 Hz. (Non-persistent; a reboot restores the daemon. The LDS `ring_forward` must also be
+restarted once the ring first appears — it mmaps lazily on the first tapped read.)
+
+**Hard blocker found — no pose while manually driving:**
+- **work_mode 17 blocks autonomous nav** — `BasicControl start`/`home` + `GoToLocation` all HTTP 400. Manual
+  control is the only drive mode.
+- **Valetudo reports no pose in manual mode** — `robot_position` frozen (unchanged after a >1 m move);
+  `/odom/wheel` silent (D10s MCU sends no telemetry unless active, and even when moving it stayed silent).
+  So the object map had been pinning everything to one frozen pose.
+
+**Fix — companion laser odometry (`q6a-laser-odom` / new `q6a_laser_odom.py` + service):** numpy point-to-point
+**ICP scan-matcher** on `/scan` → live `odom→base_link` TF + `/odom_laser` + static `base_link→laser`. Killed a
+catastrophic **180° yaw-flip** (a constant-velocity ICP prior ran away): now seeds each match from zero and
+rejects implausible per-frame steps (>0.15 m / >8.6°). objmap re-pointed at this pose via a systemd drop-in
+remap (`-r /odom:=/odom_laser`), no code change.
+
+**Driving safety:** added **per-pulse LiDAR clearance gating** to the manual-drive loop (stop if FRONT < 0.6 m)
+after the robot repeatedly rammed a wall when driven blind (no pose feedback). Confirmed driving works by
+watching sector clearances change (`0.25 m` wall → `1.6 m` clear on reverse).
+
+**Rough edges (next):** odom **drift** fragments one object into a few merged entries; low-conf YOLO false
+positives (`bird`, `umbrella`). Supersedes the pose/drive plan in decisions **D2/D3** → see **D7** in
+`docs/companion-autonomy.md`.
+
+**slam_toolbox WORKING (root cause found after two wrong diagnoses):** Jazzy's slam_toolbox 2.8+ is a
+**LIFECYCLE node** — launched bare via `ros2 run` it sits in `unconfigured` forever: the Ceres solver loads in
+`on_configure()` and the `/scan` subscription only exists after `on_activate()`, so it logs nothing, subscribes
+nothing, and errors nothing. (Earlier notes called it a "construction deadlock" then a "message-filter
+swallowing scans" — both wrong; gdb showed the main thread healthily idle in `rclcpp::spin()`, and the
+"2 subscribers on /scan" were our own laser-odom + objmap, slam had zero.) Fix:
+`ros2 service call /slam_toolbox/change_state {configure, activate}` — instantly `Registering sensor`, live
+`/map` occupancy grid, `map→odom` TF, `/pose`. Made persistent via `slam_lifecycle_up.sh` (state-driven,
+idempotent) as `ExecStartPost` in the unit; **service enabled**, restart-tested end-to-end.
+
+**TF-tree fix (REP-105):** valetudo-bridge published `map→base_link` while laser-odom publishes
+`odom→base_link` — **two parents for `base_link`**, an invalid TF tree that only "worked" because the bridge's
+pose was frozen. Fixed: bridge drop-in remaps `/tf:=/tf_valetudo /map:=/map_valetudo /odom:=/odom_valetudo`
+(keeps `/robot/status` `/battery`), `valetudo_bridge.py` now `parse_known_args()` + forwards `--ros-args` to
+`rclpy.init` (its argparse used to reject remaps). Canonical chain now:
+`map ─slam_toolbox→ odom ─laser_odom→ base_link ─static→ laser`, verified single-parent + resolving.
+
+**objmap on the SLAM pose:** `q6a_objmap` now subscribes slam's map-frame `/pose` (PoseWithCovarianceStamped,
+`Q6A_OBJMAP_POSE_TOPIC`) and prefers it over `/odom` once it flows (graceful fallback to laser odom when SLAM
+is down; never mixes frames). Verified: "switched pose source to /pose (slam map frame)", `/map` grew
+123×147→158×164 over a clearance-gated drive, SLAM error-free. Full objects-in-map-frame populate run needs a
+proper drive around the room (camera faced walls in the test corner) — next session.
+
+Files: `scripts/companion/slam_lifecycle_up.sh` (new), `scripts/companion/systemd/q6a-slam-toolbox.service`
+(ExecStartPost + enabled), `scripts/companion/q6a_objmap.py` (/pose source), `scripts/robot/valetudo_bridge.py`
+(ros-args passthrough), bridge tf-remap drop-in on the Q6A. (gdb was `apt install`ed on the Q6A during diagnosis.)
+
+Files: `scripts/companion/q6a_laser_odom.py` (new), `scripts/companion/systemd/q6a-laser-odom.service` (new),
+`scripts/companion/slam_toolbox.yaml` (new), `scripts/companion/systemd/q6a-slam-toolbox.service` (new,
+disabled), objmap remap drop-in on the Q6A, `docs/companion-autonomy.md` (D7 + D2/D3 superseded notes).
+
+---
+
 ## 2026-07-08 — Object-map node (2.4) + side-by-side YOLO|MiDaS view
 
 **Object map (`q6a_objmap` / `q6a-objmap.service`):** new node subscribing `/vision/detections` + `/odom` +

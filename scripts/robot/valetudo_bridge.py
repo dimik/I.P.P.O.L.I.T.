@@ -20,7 +20,7 @@ Coords: Valetudo is mm, +y DOWN; ROS (REP-103) is m, +y UP -> x=x_mm/1000, y=-y_
 
 Run:  source /opt/ros/jazzy/setup.bash && python3 valetudo_bridge.py [--host http://127.0.0.1]
 """
-import argparse, json, math, threading, time, urllib.request
+import argparse, json, math, sys, threading, time, urllib.request
 
 import rclpy
 from rclpy.node import Node
@@ -212,8 +212,8 @@ class ValetudoBridge(Node):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--host', default='http://127.0.0.1')
-    a = ap.parse_args()
-    rclpy.init()
+    a, ros_argv = ap.parse_known_args()        # tolerate + forward --ros-args (e.g. -r /tf:=/tf_valetudo)
+    rclpy.init(args=[sys.argv[0]] + ros_argv)
     node = ValetudoBridge(a.host)
     try:
         rclpy.spin(node)               # no timers/subs; just keeps the node alive (threads publish)

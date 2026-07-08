@@ -1,0 +1,15 @@
+[Unit]
+Description=Companion laser scan-matching odometry: /scan -> ICP -> /odom_laser + odom->base_link TF
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=radxa
+EnvironmentFile=-/etc/default/ippolit-robot
+ExecStart=/bin/bash -c "source /opt/ros/jazzy/setup.bash && exec python3 /home/radxa/ros/q6a_laser_odom.py"
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

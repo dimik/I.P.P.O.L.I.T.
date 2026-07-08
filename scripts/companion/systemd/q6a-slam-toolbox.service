@@ -1,0 +1,19 @@
+[Unit]
+Description=Companion slam_toolbox (async): /scan + odom->base_link -> map->odom TF + /map occupancy grid
+After=network-online.target q6a-laser-odom.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=radxa
+EnvironmentFile=-/etc/default/ippolit-robot
+ExecStart=/bin/bash -c "source /opt/ros/jazzy/setup.bash && exec ros2 run slam_toolbox async_slam_toolbox_node --ros-args --params-file /home/radxa/ros/slam_toolbox.yaml"
+# Jazzy slam_toolbox is a LIFECYCLE node: without configure+activate it idles in 'unconfigured'
+# (no solver, no /scan subscription, no errors). ExecStartPost walks it to 'active'.
+ExecStartPost=/home/radxa/ros/slam_lifecycle_up.sh
+TimeoutStartSec=180
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

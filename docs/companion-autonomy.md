@@ -26,6 +26,39 @@ The taps must run on the robot (they interpose AVA's serial); everything downstr
 
 ## Decisions
 
+### D7 (2026-07-08) — Companion runs its OWN laser SLAM for pose (supersedes D2/D3 pose plan)
+**The companion localizes itself from `/scan`, not from Valetudo.** Two hard facts forced this:
+1. **work_mode 17 blocks all Valetudo autonomous nav** — `BasicControl start`/`home` and `GoToLocation`
+   all return **HTTP 400** on this unit (documented, unresolved). So D3's "drive via Valetudo GoTo" is
+   **not available**; `HighResolutionManualControl` is the *only* way to drive.
+2. **Valetudo reports NO pose during manual control** — `robot_position` stays frozen (verified: unchanged
+   after a >1 m move), and the D10s MCU emits no wheel odometry (`/odom/wheel` silent). So D2's "reuse
+   Valetudo's pose" gives a frozen pose while manually driving → the object map can't place anything.
+
+Fix: **`q6a-laser-odom`** (`scripts/companion/q6a_laser_odom.py`) — a numpy point-to-point **ICP scan-matcher
+on `/scan`** publishing a live `odom → base_link` TF + `/odom_laser`. This is the pose source the object map
+uses during a manual mapping drive, fully independent of Valetudo/work_mode 17. Guard against the classic
+ICP **180° yaw-flip**: seed each match from zero (a constant-velocity prior runs away) and reject implausible
+per-frame steps (>0.15 m / >8.6°). LiDAR must be spinning → manual_control active + the fanoff gate "unpatched"
+(daemon stopped, `/tmp/lidar_allow` held — AVA's own `spin=01` then passes the shim; see CHANGELOG 2026-07-08).
+**Proven 2026-07-08:** a clearance-gated manual drive built a 12-object semantic map (tv 268×, chair 204×,
+person) with correct relative placement. *Rough edges:* odom drift fragments a single object into a few
+merged entries; low-conf YOLO false positives.
+
+**✅ slam_toolbox WORKING (2026-07-08, root cause: LIFECYCLE node):** Jazzy slam_toolbox 2.8+ is a lifecycle
+node — bare `ros2 run` leaves it in `unconfigured` forever (solver loads in `on_configure()`, `/scan`
+subscription in `on_activate()`), producing the maximally-confusing symptom set: spins fine, subscribes
+nothing, logs nothing, errors nothing. `q6a-slam-toolbox.service` now runs `slam_lifecycle_up.sh` as
+`ExecStartPost` (state-driven configure→activate, idempotent) — enabled + restart-tested. Result: live `/map`
+occupancy grid, `map→odom` TF, `/pose` (map-frame pose).
+
+**TF tree (REP-105, one parent per frame):** `map ─slam_toolbox→ odom ─q6a-laser-odom→ base_link ─static→ laser`.
+valetudo-bridge previously claimed `map→base_link` directly (two parents for `base_link` = invalid tree) — its
+TF/`/map`/`/odom` are now remapped aside (`/tf_valetudo` `/map_valetudo` `/odom_valetudo` via drop-in; bridge
+keeps `/robot/status` `/battery`). `q6a_objmap` consumes slam's `/pose` when flowing (falls back to `/odom_laser`
+without SLAM; never mixes frames). Remaining: a full room drive to populate objects in the map frame; then
+fragment dedup + confidence gating; then room-tagging.
+
 ### D6 (2026-07-08) — Robot OV8856 camera, not the Q6A IMX296, for robot-perception
 The companion's vision (YOLO + depth + object map) consumes the **robot's forward OV8856** via its MJPEG
 (`:8090` over USB), not the Q6A's IMX296. **Why:** side-by-side frame grab — the OV8856 gives a clean
@@ -47,7 +80,9 @@ services. The robot keeps only ROS-free helpers (`ring_forward.py`, `speak.py`) 
 one place for the autonomy brain, robot stays lean, and the companion has the RAM/compute (esp. with the LLM
 retired). Rings/serial stay on the robot (taps interpose AVA); a thin TCP forwarder bridges them.
 
-### D3 — Drive via Valetudo GoTo/segments, not companion-side manual-control (for now)
+### D3 — Drive via Valetudo GoTo/segments, not companion-side manual-control (for now) — ⚠️ SUPERSEDED by D7
+**Superseded 2026-07-08:** Valetudo GoTo/segment-clean return HTTP 400 in work_mode 17 — autonomous nav is
+unavailable, so driving is manual-control only and the companion self-localizes (D7). Original rationale kept:
 High-level nav ("go to kitchen") resolves a room name → Valetudo **map segment** → `GoToLocation` /
 segment-clean; **AVA path-plans and drives**. **Why:** the robot's `fanoff` gate **parks the LiDAR turret
 during `HighResolutionManualControl`** — so companion Nav2 driving via manual-control move commands would

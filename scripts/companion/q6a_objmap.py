@@ -21,6 +21,7 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 from nav_msgs.msg import Odometry
+from geometry_msgs.msg import PoseWithCovarianceStamped
 from sensor_msgs.msg import LaserScan
 try:
     from visualization_msgs.msg import Marker, MarkerArray
@@ -33,6 +34,7 @@ CAM_YAW = math.radians(float(os.environ.get('Q6A_CAM_YAW_DEG', '0')))    # camer
 BEAR_SIGN = float(os.environ.get('Q6A_CAM_BEAR_SIGN', '-1'))             # image +x(right) -> which bearing sign
 MERGE_DIST = float(os.environ.get('Q6A_OBJMAP_MERGE_M', '0.5'))          # merge same-class within this (m)
 MIN_CONF = float(os.environ.get('Q6A_OBJMAP_MIN_CONF', '0.4'))           # map only confident detections
+POSE_TOPIC = os.environ.get('Q6A_OBJMAP_POSE_TOPIC', '/pose')            # slam_toolbox map-frame pose ('' = off)
 
 
 class ObjMap(Node):
@@ -41,7 +43,10 @@ class ObjMap(Node):
         self.pose = None            # (x, y, yaw) in map
         self.scan = None
         self.objects = []           # [{cls, x, y, n, conf}]
+        self.slam_pose = False      # once slam's map-frame /pose flows, it wins over /odom (odom drifts)
         self.create_subscription(Odometry, '/odom', self.on_odom, 10)
+        if POSE_TOPIC:
+            self.create_subscription(PoseWithCovarianceStamped, POSE_TOPIC, self.on_posecov, 10)
         self.create_subscription(LaserScan, '/scan', self.on_scan, 10)
         self.create_subscription(String, '/vision/detections', self.on_dets, 10)
         self.pub_map = self.create_publisher(String, '/object_map', 10)
@@ -50,10 +55,22 @@ class ObjMap(Node):
         self.get_logger().info(f'q6a_objmap up (HFOV={math.degrees(H_FOV):.0f}deg, merge={MERGE_DIST}m, '
                                f'min_conf={MIN_CONF}); needs /vision/detections + /odom (+ /scan for range)')
 
-    def on_odom(self, m):
-        p = m.pose.pose.position; q = m.pose.pose.orientation
+    @staticmethod
+    def _to_pose(pose):
+        p = pose.position; q = pose.orientation
         yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
-        self.pose = (p.x, p.y, yaw)
+        return (p.x, p.y, yaw)
+
+    def on_odom(self, m):
+        if self.slam_pose:
+            return                  # slam's map-frame /pose is authoritative; don't mix frames
+        self.pose = self._to_pose(m.pose.pose)
+
+    def on_posecov(self, m):
+        if not self.slam_pose:
+            self.slam_pose = True
+            self.get_logger().info(f'switched pose source to {POSE_TOPIC} (slam map frame)')
+        self.pose = self._to_pose(m.pose.pose)
 
     def on_scan(self, m):
         self.scan = m
