@@ -9,7 +9,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=radxa
-EnvironmentFile=-/etc/default/ippolit-robot        # ROBOT_ADDR (USB 192.168.10.1 / WiFi 192.168.1.213)
+EnvironmentFile=-/etc/default/ippolit-robot
 # source ROS then exec the bridge (systemd env can't capture ROS's full setup).
 # NB: use the ABSOLUTE path — %h in a *system* unit resolves to /root, not the User='s home.
 ExecStart=/bin/bash -c "source /opt/ros/jazzy/setup.bash && exec python3 /home/radxa/valetudo_bridge.py --host http://$${ROBOT_ADDR:-192.168.10.1}"

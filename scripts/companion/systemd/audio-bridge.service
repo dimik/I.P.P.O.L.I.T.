@@ -9,7 +9,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=radxa
-EnvironmentFile=-/etc/default/ippolit-robot        # ROBOT_SSH (robot-usb / robot-wifi)
+EnvironmentFile=-/etc/default/ippolit-robot
 ExecStart=/bin/bash -c "source /opt/ros/jazzy/setup.bash && exec python3 /home/radxa/ros/audio_bridge.py --ros-args -p robot_ssh:=$${ROBOT_SSH:-robot-usb}"
 Restart=on-failure
 RestartSec=3

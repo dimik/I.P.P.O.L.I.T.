@@ -6,6 +6,25 @@ it derives from).
 
 ---
 
+## 2026-07-08 — Companion runs over WiFi (robot free to drive) + two config-bug fixes
+
+**What:** Flipped the companion to reach the robot over **home WiFi** (`192.168.1.213`) instead of the USB
+cable, so the robot can drive free. Set `/etc/default/ippolit-robot` to `ROBOT_ADDR=192.168.1.213`
+`ROBOT_SSH=robot-wifi` + added a `robot-wifi` ssh alias on the Q6A. Two bugs surfaced + fixed:
+- **systemd inline-comment bug**: a trailing `# comment` on `EnvironmentFile=-/etc/default/ippolit-robot`
+  was parsed as part of the file PATH -> env file never loaded -> services fell back to the USB default IP.
+  Comments moved off the directive lines.
+- **DDS discovery**: with `usb0` down, Jazzy's default `ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET` failed multicast
+  discovery across wlan0/enp1s0 -> topics invisible. Set **LOCALHOST** (all ROS nodes are on the Q6A) ->
+  robust loopback discovery. Also disabled robot `wlan0` power-save (variable latency was tripping the nodes'
+  2 s connect; runtime-only — add to the robot boot hook if WiFi becomes the default).
+
+**Verify:** over WiFi — `/odom/wheel` @67 Hz, `/battery` 66% (charging), `/vision/detections` publishing;
+robot cam confirmed (black while docked = facing the wall). Robot free to drive.
+Files: the 6 companion unit files + `ippolit-robot.env`.
+
+---
+
 ## 2026-07-08 — Companion robot-link switchable USB<->WiFi (enables free-roam driving)
 
 **What:** All 6 companion services (valetudo-bridge, mcu-node, lds-scan-node, audio-bridge, q6a-vision,
