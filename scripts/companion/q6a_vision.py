@@ -77,14 +77,31 @@ def puller():
             time.sleep(1.0)
 
 
-def annotate(rgb, dets):
+def _depth_rgb(dmap, w, h):
+    """Colorize the MiDaS disparity map (jet-ish: near=red -> far=blue), resized to (w,h)."""
+    if dmap is None:
+        return np.zeros((h, w, 3), np.uint8)
+    t = dmap.astype(np.float32) / 255.0
+    rgb = np.stack([np.clip(1.5 - np.abs(4 * t - 3), 0, 1),
+                    np.clip(1.5 - np.abs(4 * t - 2), 0, 1),
+                    np.clip(1.5 - np.abs(4 * t - 1), 0, 1)], axis=-1)
+    return np.asarray(Image.fromarray((rgb * 255).astype(np.uint8)).resize((w, h), Image.NEAREST))
+
+
+def annotate(rgb, dets, dmap):
+    """Composite view: [YOLO-boxed RGB | MiDaS depth colormap] side by side, for the :8093 stream."""
     im = Image.fromarray(rgb); d = ImageDraw.Draw(im)
     for x1, y1, x2, y2, lab, cf, tid, dep in dets:
         col = _PALETTE[(tid if tid else hash(lab)) % len(_PALETTE)]
         d.rectangle([x1, y1, x2, y2], outline=col, width=3)
         tag = f'#{tid} {lab} {cf:.2f}' + (f' d{dep}' if dep >= 0 else '')   # d = relative disparity (higher=nearer)
         d.text((x1 + 2, y1 + 1), tag, fill=col)
-    b = io.BytesIO(); im.save(b, 'JPEG', quality=80)
+    d.text((4, 4), 'YOLO+ByteTrack', fill=(255, 255, 0))
+    h, w = rgb.shape[0], rgb.shape[1]
+    right = _depth_rgb(dmap, w, h)
+    rim = Image.fromarray(right); ImageDraw.Draw(rim).text((4, 4), 'MiDaS depth (red=near)', fill=(255, 255, 255))
+    composite = np.hstack([np.asarray(im), np.asarray(rim)])
+    b = io.BytesIO(); Image.fromarray(composite).save(b, 'JPEG', quality=80)
     return b.getvalue()
 
 
@@ -166,7 +183,7 @@ class VisionNode(Node):
                 disp = self._det_disp(dmap, x1, y1, x2, y2, w, h)
                 dets.append((int(x1), int(y1), int(x2), int(y2), lab, float(cf), int(tid), disp))
             Shared.dets = dets
-            Shared.annot = annotate(rgb, dets)
+            Shared.annot = annotate(rgb, dets, dmap)
             Shared.seq += 1
             self.publish(dets, rgb.shape)
             dt = time.time() - t0

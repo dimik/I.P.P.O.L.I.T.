@@ -6,6 +6,25 @@ it derives from).
 
 ---
 
+## 2026-07-08 — Object-map node (2.4) + side-by-side YOLO|MiDaS view
+
+**Object map (`q6a_objmap` / `q6a-objmap.service`):** new node subscribing `/vision/detections` + `/odom` +
+`/scan`. Per confident detection: bearing = bbox x-center + camera H-FOV (~110deg est); range = `/scan` at
+that bearing (metric; needs the turret spinning); project to the map frame via the robot pose; accumulate
+persistent objects (same class within 0.5 m merged, position running-averaged); publish `/object_map` (JSON) +
+`/object_markers` (RViz MarkerArray). Verified plumbing: `active`, publishes `{"objects":[]}` while docked (no
+`/scan`, camera at the wall). **Calibration** (H-FOV, bearing sign, camera-yaw) + **room-tagging** (Valetudo
+segment per object) pending the first drive.
+
+**Vision view:** `q6a_vision` `:8093` now serves a side-by-side composite **[YOLO-boxed RGB | MiDaS depth
+colormap (red=near)]** so both nets are visible in one stream; reachable from the Odyssey at
+`http://192.168.20.2:8093/` (opened in mpv).
+
+Files: `scripts/companion/q6a_objmap.py` (new), `scripts/companion/systemd/q6a-objmap.service` (new),
+`scripts/companion/q6a_vision.py`.
+
+---
+
 ## 2026-07-08 — Companion runs over WiFi (robot free to drive) + two config-bug fixes
 
 **What:** Flipped the companion to reach the robot over **home WiFi** (`192.168.1.213`) instead of the USB
