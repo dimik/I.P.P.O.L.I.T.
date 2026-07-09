@@ -44,6 +44,40 @@ the Q6A's `robot-usb`/`robot-wifi` aliases, whose key works).
 
 ---
 
+## 2026-07-10 — CORRECTION: verified slam root cause — it was NOT FastDDS (controlled evidence)
+
+Rigorously re-tested the "CycloneDDS fixed slam" claim from 2026-07-09. **It does not hold up.** Controlled
+experiments on the Q6A (isolated ROS_DOMAIN_ID=43, identical pub/sub, both RMWs):
+
+- **FastDDS re-match (item 1): REFUTED.** An established subscriber re-matched a *restarted* publisher in
+  ~2-3 s on FastDDS — IDENTICAL to CycloneDDS (both drop to 0 during the kill gap, recover to full rate).
+  `NODE_NAME_UNKNOWN` reproduced as a **stale ros2-daemon artifact**: after `ros2 daemon stop`, FastDDS
+  resolves node names fine (== CycloneDDS). Not a FastDDS discovery defect.
+- **`ros2 topic hz` (item 2): stated mechanism REFUTED.** Source: it computes rate from receipt-time
+  intervals of RECEIVED msgs and prints nothing until >=1 s accumulates / nothing if none arrive. A constant
+  10 Hz topic reads a correct ~10.0 immediately AND settled on BOTH RMWs. The real confound behind the many
+  "SILENT" readings: the topics were **intermittent/sparse** (turret-gated `/scan`, movement-gated slam
+  `/pose`) measured in **short 4-6 s windows** -> genuinely little/no data -> misread as "topic dead."
+- **QoS mismatch (item 3): REFUTED.** All pairs compatible (/scan RELIABLE pub -> RELIABLE+BEST_EFFORT subs;
+  /pose, /odom_laser RELIABLE<->RELIABLE; all VOLATILE). Not the cause.
+- **CPU/latency (item 4): CONFIRMED comparable.** 50 KB @ 20 Hz on the Q6A: FastDDS and CycloneDDS both ~5%
+  CPU (pub+sub each); latency mean 2.50 vs 2.44 ms, p95 5.55 vs 4.26 ms. CycloneDDS not heavier (slightly
+  better tail). So the switch was middleware-behavior/cosmetic, not resource.
+
+**Actual root causes of the slam saga (what really fixed it):** (1) the `/scan` chain was genuinely broken
+after reboot — `ring_forward` stale-mmap + `lds-scan-node` connect-while-idle (REAL bugs, fixed); (2)
+slam_toolbox only publishes `/pose` while the robot MOVES (minimum_travel gate) and needs continuous `/scan`
+at sensor registration; (3) `ros2 topic hz` misled diagnosis on intermittent topics. **CycloneDDS coincided
+with these fixes and gave a cleaner CLI (node names resolve without daemon fuss), which aided debugging, but
+it was not the fix.** Keeping CycloneDDS is fine (comparable overhead, marginally better tail latency, clean
+discovery) — just not for the reason originally stated.
+
+Unverifiable post-hoc: the exact original re-match "failures" (no old logs kept) — but since FastDDS
+re-matches fine in controlled tests, those were almost certainly the intermittent-topic + measurement
+artifacts above, not a DDS defect.
+
+---
+
 ## 2026-07-10 — TTS volume root cause (ALSA mixer), vision-seek drive, edge gate hardening
 
 **Volume — real root cause found after several wrong knobs.** TTS was too loud and NOTHING software reduced
