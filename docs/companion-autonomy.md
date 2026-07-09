@@ -34,8 +34,10 @@ hard-stops manual control + speaks) and confirmed AVA's native "wheels not in co
 edge test showed **byte[1] is wheel-drop, not forward cliff-IR**: it only fires once wheels have left the
 ground (a LATE backstop). So there is **no proven before-the-edge stop.** Policy: **treat the stairs as a hard
 no-go zone**, map the interior with a wide berth, drive slow + supervised; `/cliff` + AVA error are last-resort
-only. Real forward-drop protection is a **TODO: a MiDaS floor-drop detector** (the floor plane jumps far at an
-edge) — the LiDAR+MiDaS approach the user asked for. See CHANGELOG 2026-07-09.
+only. **RESOLVED 2026-07-09:** built the forward-drop detector the user asked for — MiDaS floor-drop (primary)
++ LiDAR-open corroboration + wheel-drop backstop, in `cliff_guard`. Calibrated at the real ladder edge
+(room max_step <=0.205 vs edge 0.35-0.65 -> stop >=0.30) and **verified live**: robot facing the drop ->
+`DROP-OFF AHEAD` -> manual control disabled + spoken. Publishes `/cliff/ahead`. See CHANGELOG 2026-07-09.
 
 ### D7 (2026-07-08) — Companion runs its OWN laser SLAM for pose (supersedes D2/D3 pose plan)
 **The companion localizes itself from `/scan`, not from Valetudo.** Two hard facts forced this:

@@ -67,10 +67,19 @@ guard chain, tested two ways (lift, and holding the robot at an actual edge):
   (`/cliff/raw` @ 8 Hz steady 0). So `/cliff` only fires once wheels have LEFT the ground — a LATE backstop,
   NOT before-the-edge protection. (Open: whether AVA polls forward cliff-IR only while actively driving —
   untestable without driving at the edge.)
-- **Policy (SAFETY): the stairs are a hard NO-GO zone.** Map the room interior only, wide berth from the
-  edge, slow + supervised; `/cliff` wheel-drop + AVA error are last-resort backstops. Real forward-drop
-  detection is a TODO — most promising is a **MiDaS floor-drop detector** (camera sees the floor plane jump
-  farther at an edge), per the user's LiDAR+MiDaS steer.
+- **✅ FORWARD-DROP DETECTOR (MiDaS + LiDAR fusion) — built + verified live at the real ladder.**
+  `q6a_vision` now publishes `/vision/floor` = row-median depth profile of the bottom 45% of the MiDaS map
+  (floor ahead) + `max_step` (largest relative fall between adjacent bins; MiDaS is affine-invariant so we
+  use RELATIVE steps). `cliff_guard` fuses three layers: (1) MiDaS `max_step >= 0.30` -> STOP (primary);
+  (2) weaker step `>= 0.24` + forward LiDAR sector anomalously open (median > 3.5 m / mostly no-return =
+  stairwell signature) -> STOP; (3) `/cliff` wheel-drop backstop. On trip: DISABLE manual control (REST x3)
+  + speak "Drop off ahead" + publish `/cliff/ahead`; latches, re-arms with hysteresis.
+  **Calibrated at the actual edge:** facing room `max_step` <=0.205; facing the drop 0.345-0.65 (square-on
+  0.58-0.65). **Verified live:** facing the room = silent; the instant the robot faced the drop ->
+  `DROP-OFF AHEAD (midas, step=0.43) — stopping` + manual control cut (and wheel-drop `/cliff` also fired).
+  So there is now a **before-the-edge stop**, not just the late backstop. Stairs still treated conservatively
+  (slow, supervised); a pure in-place rotation while pointed at the drop also trips the guard (acceptable —
+  a refinement to gate only forward velocity is possible later).
 
 Files: `scripts/companion/q6a_announce.py`, `scripts/companion/cliff_guard.py`,
 `scripts/companion/systemd/{q6a-announce,q6a-cliff-guard}.service` (new), `scripts/robot/mcu_node.py`

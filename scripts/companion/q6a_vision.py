@@ -77,6 +77,29 @@ def puller():
             time.sleep(1.0)
 
 
+def floor_profile(dmap):
+    """Floor-band depth profile for drop-off (stair) detection — see cliff_guard.
+
+    Takes the row-medians of the bottom 45% of the MiDaS disparity map (the floor ahead of the
+    robot), bottom row first, downsampled to 16 bins. On continuous floor the profile decays
+    smoothly with distance; a drop-off ahead produces a sharp step (the floor plane beyond the
+    edge is suddenly much farther). MiDaS is affine-invariant, so consumers must use RELATIVE
+    steps (max_step = largest relative fall between adjacent bins), never absolute disparity.
+    """
+    h = dmap.shape[0]
+    band = dmap[int(h * 0.55):, :].astype(np.float32)      # bottom 45% of rows = floor ahead
+    rows = np.median(band, axis=1)[::-1]                   # [0] = bottom-most (nearest floor)
+    idx = np.linspace(0, len(rows) - 1, 16).astype(int)
+    prof = rows[idx]
+    steps = (prof[:-1] - prof[1:]) / (prof[:-1] + 1e-6)    # relative fall per bin, near -> far
+    return {
+        'profile': [round(float(v), 1) for v in prof],
+        'max_step': round(float(steps.max()), 3),
+        'step_at': int(steps.argmax()),                    # bin index of the largest fall (0=nearest)
+        'frame_med': round(float(np.median(dmap)), 1),
+    }
+
+
 def _depth_rgb(dmap, w, h):
     """Colorize the MiDaS disparity map (jet-ish: near=red -> far=blue), resized to (w,h)."""
     if dmap is None:
@@ -128,6 +151,7 @@ class VisionNode(Node):
     def __init__(self):
         super().__init__('q6a_vision')
         self.pub = self.create_publisher(String, '/vision/detections', 10)
+        self.pub_floor = self.create_publisher(String, '/vision/floor', 10)   # MiDaS floor profile (cliff cue)
         self.det = YoloDetector(conf=CONF)          # Configs the HTP backend + loads the YOLO context
         self.labels = self.det.labels
         self.tracker = ByteTracker(high_thresh=0.4, low_thresh=CONF)
@@ -177,6 +201,10 @@ class VisionNode(Node):
             h, w = int(rgb.shape[0]), int(rgb.shape[1])
             dmap = self.depth_map(rgb)                            # 256x256 relative disparity (or None)
             Shared.depth = dmap
+            if dmap is not None:                                  # floor-drop cue for cliff_guard
+                fm = floor_profile(dmap)
+                fm['stamp'] = self.get_clock().now().nanoseconds
+                self.pub_floor.publish(String(data=json.dumps(fm)))
             dets = []
             for (x1, y1, x2, y2, cf, ci, tid) in tracked:
                 lab = self.labels[int(ci)] if 0 <= int(ci) < len(self.labels) else str(int(ci))
