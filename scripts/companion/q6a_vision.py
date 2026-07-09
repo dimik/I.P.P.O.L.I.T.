@@ -77,25 +77,35 @@ def puller():
             time.sleep(1.0)
 
 
-def floor_profile(dmap):
-    """Floor-band depth profile for drop-off (stair) detection — see cliff_guard.
-
-    Takes the row-medians of the bottom 45% of the MiDaS disparity map (the floor ahead of the
-    robot), bottom row first, downsampled to 16 bins. On continuous floor the profile decays
-    smoothly with distance; a drop-off ahead produces a sharp step (the floor plane beyond the
-    edge is suddenly much farther). MiDaS is affine-invariant, so consumers must use RELATIVE
-    steps (max_step = largest relative fall between adjacent bins), never absolute disparity.
-    """
-    h = dmap.shape[0]
-    band = dmap[int(h * 0.55):, :].astype(np.float32)      # bottom 45% of rows = floor ahead
+def _band_step(band):
+    """(max_step, step_at, profile) for a floor band: row-medians bottom->far in 16 bins, largest
+    RELATIVE fall between adjacent bins (MiDaS is affine-invariant -> relative, not absolute)."""
     rows = np.median(band, axis=1)[::-1]                   # [0] = bottom-most (nearest floor)
     idx = np.linspace(0, len(rows) - 1, 16).astype(int)
     prof = rows[idx]
     steps = (prof[:-1] - prof[1:]) / (prof[:-1] + 1e-6)    # relative fall per bin, near -> far
+    return round(float(steps.max()), 3), int(steps.argmax()), [round(float(v), 1) for v in prof]
+
+
+def floor_profile(dmap):
+    """Floor-band drop-off (stair) detection for cliff_guard — full-width AND per-sector.
+
+    Bottom 45% of the MiDaS map = the floor ahead. A drop-off makes the floor plane jump far, a sharp
+    step in the profile. Per-sector (left/center/right column thirds) so a consumer can tell a drop
+    dead-ahead (center -> don't drive forward) from a drop to the side (edge alongside -> can travel
+    parallel). max_step = largest relative fall; step_at = which bin (0=nearest -> ~closer edge).
+    """
+    h, w = dmap.shape
+    band = dmap[int(h * 0.55):, :].astype(np.float32)
+    ms, sa, prof = _band_step(band)
+    t = w // 3
+    ls, la, _ = _band_step(band[:, :t])
+    cs, ca, _ = _band_step(band[:, t:2 * t])
+    rs, ra, _ = _band_step(band[:, 2 * t:])
     return {
-        'profile': [round(float(v), 1) for v in prof],
-        'max_step': round(float(steps.max()), 3),
-        'step_at': int(steps.argmax()),                    # bin index of the largest fall (0=nearest)
+        'profile': prof,
+        'max_step': ms, 'step_at': sa,
+        'sectors': {'left': [ls, la], 'center': [cs, ca], 'right': [rs, ra]},   # [max_step, step_at]
         'frame_med': round(float(np.median(dmap)), 1),
     }
 

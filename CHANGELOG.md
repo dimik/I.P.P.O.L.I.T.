@@ -77,9 +77,14 @@ guard chain, tested two ways (lift, and holding the robot at an actual edge):
   **Calibrated at the actual edge:** facing room `max_step` <=0.205; facing the drop 0.345-0.65 (square-on
   0.58-0.65). **Verified live:** facing the room = silent; the instant the robot faced the drop ->
   `DROP-OFF AHEAD (midas, step=0.43) — stopping` + manual control cut (and wheel-drop `/cliff` also fired).
-  So there is now a **before-the-edge stop**, not just the late backstop. Stairs still treated conservatively
-  (slow, supervised); a pure in-place rotation while pointed at the drop also trips the guard (acceptable —
-  a refinement to gate only forward velocity is possible later).
+   So there is now a **before-the-edge stop**, not just the late backstop.
+- **Refined to non-blocking + directional (per user: "travel by the edge, don't freeze at it"):** the MiDaS
+  layer is now **advisory** — it publishes `/cliff/ahead` (drop in the CENTER forward path) + speaks "Edge
+  ahead", but **never disables manual control** (only the wheel-drop `/cliff` does the hard e-stop). And
+  `/vision/floor` now carries **per-sector L/C/R** drop (`sectors:{left,center,right}:[max_step,step_at]`) so
+  the drive controller can tell drop-dead-ahead (center -> no forward) from drop-to-the-side (edge alongside
+  -> travel parallel) and glide by an edge instead of stopping at it. Wheel-drop stays the hard backstop.
+  TODO: an edge-following drive behavior that holds a set lateral distance (~5-10 cm) using the L/R sectors.
 
 Files: `scripts/companion/q6a_announce.py`, `scripts/companion/cliff_guard.py`,
 `scripts/companion/systemd/{q6a-announce,q6a-cliff-guard}.service` (new), `scripts/robot/mcu_node.py`

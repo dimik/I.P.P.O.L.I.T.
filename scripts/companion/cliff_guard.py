@@ -1,23 +1,20 @@
 #!/usr/bin/env python3
-"""cliff_guard.py — SAFETY: stop the robot before (MiDaS+LiDAR) and at (wheel-drop) a stair edge.
+"""cliff_guard.py — SAFETY: drop-off awareness near the 2nd-floor stairwell.
 
-The robot lives on the 2nd floor next to a ladder/stairwell. A horizontal 2D LiDAR cannot see a
-down-staircase (the drop reads as "open"), and the MCU's Triggers byte only fires once the wheels have
-LEFT the ground (wheel-drop — proven by the 2026-07-09 edge test). So before-the-edge protection comes
-from fused perception, with the wheel-drop as last-resort backstop:
+Two very different responses, on purpose:
 
-  1. MiDaS floor-drop (PRIMARY, calibrated 2026-07-09 at the real ladder edge):
-     /vision/floor 'max_step' = largest relative fall between adjacent floor-band depth bins.
-     Room max 0.205; edge square-on 0.581-0.649; edge re-approached (other angle/distance)
-     0.345-0.48 -> STOP at 0.30 (angle-robust, still 1.5x above the room ceiling).
-  2. MiDaS + LiDAR fusion: a weaker visual step (>=0.28) counts when the forward LiDAR sector is
-     simultaneously anomalously open (median > 3.5 m or mostly no-return) — indoors a wall should
-     terminate the beam; "open" toward a suspicious floor edge = stairwell signature.
-  3. Wheel-drop backstop: /cliff (mcu_node, MCU Triggers byte[1]) — fires when wheels leave ground.
+  * WHEEL-DROP (`/cliff`, MCU Triggers byte[1]) = HARD e-stop. If a wheel has already left the ground the
+    robot is going over NOW -> disable HighResolutionManualControl immediately (x3, WiFi can drop a PUT) +
+    speak. This is the last-resort backstop.
 
-On any trip: DISABLE HighResolutionManualControl over REST (x3, WiFi can drop a PUT) + speak. Latches per
-cause; re-arms with hysteresis when the signal clears. LiDAR stale (turret parked) -> fusion path inert,
-MiDaS-primary + wheel-drop still protect.
+  * MiDaS floor-drop ahead = ADVISORY, NOT a freeze. The robot must be able to travel *along* an edge at a
+    safe distance, not get blocked in front of it, so this layer only PUBLISHES the hazard — it never cuts
+    manual control. It republishes `/vision/floor`'s per-sector drop as `/cliff/ahead` (Bool = drop in the
+    CENTER path ahead) so the drive controller can refuse to drive *forward* into a drop while still turning,
+    reversing, or gliding parallel. Direction lives in `/vision/floor` (sectors left/center/right).
+
+Calibrated at the real ladder edge 2026-07-09: floor `max_step` room <=0.205 vs edge 0.35-0.65 -> center
+threshold 0.30 (fuse 0.24 when the forward LiDAR sector is anomalously open = stairwell signature).
 
 Run: source /opt/ros/jazzy/setup.bash && ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST python3 cliff_guard.py
 """
@@ -38,14 +35,15 @@ from std_msgs.msg import Bool, String
 ROBOT_ADDR = os.environ.get('ROBOT_ADDR', '192.168.10.1')
 CAP = f'http://{ROBOT_ADDR}/api/v2/robot/capabilities/HighResolutionManualControlCapability'
 
-MIDAS_STOP = float(os.environ.get('Q6A_CLIFF_MIDAS_STOP', '0.30'))   # calibrated: room<=0.205, edge>=0.345
-MIDAS_FUSE = float(os.environ.get('Q6A_CLIFF_MIDAS_FUSE', '0.24'))   # weaker step, needs LiDAR agreement
+MIDAS_STOP = float(os.environ.get('Q6A_CLIFF_MIDAS_STOP', '0.30'))   # center-sector drop = no-go-forward
+MIDAS_FUSE = float(os.environ.get('Q6A_CLIFF_MIDAS_FUSE', '0.24'))   # weaker, needs LiDAR agreement
 MIDAS_CLEAR = float(os.environ.get('Q6A_CLIFF_MIDAS_CLEAR', '0.22')) # re-arm hysteresis
-CONSEC = int(os.environ.get('Q6A_CLIFF_CONSEC', '2'))                # consecutive samples to trip
-CLEAR_N = int(os.environ.get('Q6A_CLIFF_CLEAR_N', '10'))             # consecutive clear samples to re-arm
-LIDAR_FAR_M = float(os.environ.get('Q6A_CLIFF_LIDAR_FAR_M', '3.5'))  # fwd median beyond this = "open"
+CONSEC = int(os.environ.get('Q6A_CLIFF_CONSEC', '2'))
+CLEAR_N = int(os.environ.get('Q6A_CLIFF_CLEAR_N', '6'))
+LIDAR_FAR_M = float(os.environ.get('Q6A_CLIFF_LIDAR_FAR_M', '3.5'))
 LIDAR_HALF_DEG = float(os.environ.get('Q6A_CLIFF_LIDAR_HALF_DEG', '20'))
 LIDAR_STALE_S = 2.0
+SPEAK_GAP = float(os.environ.get('Q6A_CLIFF_SPEAK_GAP', '8.0'))      # min seconds between spoken edge warnings
 
 
 class CliffGuard(Node):
@@ -54,81 +52,75 @@ class CliffGuard(Node):
         self.pub_speak = self.create_publisher(String, '/robot/speak', 10)
         latched = QoSProfile(depth=1, reliability=QoSReliabilityPolicy.RELIABLE,
                              durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
+        self.pub_ahead = self.create_publisher(Bool, '/cliff/ahead', latched)   # drop in the forward path
         self.create_subscription(Bool, '/cliff', self.on_cliff, latched)
         self.create_subscription(String, '/vision/floor', self.on_floor, 10)
         self.create_subscription(LaserScan, '/scan', self.on_scan, qos_profile_sensor_data)
-        self.pub_danger = self.create_publisher(Bool, '/cliff/ahead', latched)  # for drive loops
         self.wheel_tripped = False
-        self.floor_tripped = False
-        self.n_stop = self.n_fuse = self.n_clear = 0
+        self.ahead = False
+        self.n_hit = self.n_clear = 0
         self.lidar_far = False
         self.lidar_at = 0.0
+        self.last_warn = 0.0
+        self.pub_ahead.publish(Bool(data=False))
         self.get_logger().info(
-            f'cliff_guard up: MiDaS floor-drop (stop>={MIDAS_STOP}, fuse>={MIDAS_FUSE}+LiDAR>{LIDAR_FAR_M}m) '
-            f'+ wheel-drop backstop -> DISABLE manual control @ {ROBOT_ADDR}')
+            f'cliff_guard up: wheel-drop -> HARD e-stop; MiDaS center-drop (>={MIDAS_STOP}, or >={MIDAS_FUSE}'
+            f'+LiDAR-open) -> ADVISORY /cliff/ahead (never freezes; drive loop avoids forward). @ {ROBOT_ADDR}')
 
-    # --- layer 3: wheel-drop backstop (fires when wheels already left the ground) ---
+    # --- HARD e-stop: a wheel is already off the ground ---
     def on_cliff(self, m):
         if m.data and not self.wheel_tripped:
             self.wheel_tripped = True
-            self.get_logger().error('WHEEL-DROP — hard-stopping')
-            self.trip('Cliff detected. Stopping.')
+            self.get_logger().error('WHEEL-DROP — hard e-stop (disable manual control)')
+            threading.Thread(target=self.estop, daemon=True).start()
+            self.pub_speak.publish(String(data='Cliff. Stopping.'))
         elif not m.data and self.wheel_tripped:
             self.wheel_tripped = False
-            self.get_logger().warn('wheel-drop cleared — re-armed')
+            self.get_logger().warn('wheel-drop cleared')
 
-    # --- layer 2 input: LiDAR forward-sector openness (corroboration only) ---
     def on_scan(self, m):
         half = math.radians(LIDAR_HALF_DEG)
-        fin = []
-        n_fwd = 0
+        fin, n_fwd = [], 0
         for i, r in enumerate(m.ranges):
-            a = m.angle_min + i * m.angle_increment
-            a = math.atan2(math.sin(a), math.cos(a))    # wrap to [-pi, pi]; 0 = forward
+            a = math.atan2(math.sin(m.angle_min + i * m.angle_increment),
+                           math.cos(m.angle_min + i * m.angle_increment))
             if abs(a) <= half:
                 n_fwd += 1
                 if math.isfinite(r) and m.range_min <= r <= m.range_max:
                     fin.append(r)
-        if n_fwd == 0:
-            return
-        fin.sort()
-        med = fin[len(fin) // 2] if fin else float('inf')
-        finite_frac = len(fin) / n_fwd
-        self.lidar_far = med > LIDAR_FAR_M or finite_frac < 0.3
-        self.lidar_at = time.monotonic()
+        if n_fwd:
+            fin.sort()
+            med = fin[len(fin) // 2] if fin else float('inf')
+            self.lidar_far = med > LIDAR_FAR_M or (len(fin) / n_fwd) < 0.3
+            self.lidar_at = time.monotonic()
 
-    # --- layers 1+2: MiDaS floor-drop, LiDAR-fused ---
+    # --- ADVISORY: drop ahead in the center path (never disables manual control) ---
     def on_floor(self, m):
         try:
-            step = float(json.loads(m.data).get('max_step', 0.0))
+            d = json.loads(m.data)
+            center = float(d.get('sectors', {}).get('center', [d.get('max_step', 0.0)])[0])
         except Exception:
             return
-        self.n_stop = self.n_stop + 1 if step >= MIDAS_STOP else 0
-        self.n_fuse = self.n_fuse + 1 if step >= MIDAS_FUSE else 0
-        self.n_clear = self.n_clear + 1 if step < MIDAS_CLEAR else 0
         lidar_fresh = (time.monotonic() - self.lidar_at) < LIDAR_STALE_S
-        danger = (self.n_stop >= CONSEC or
-                  (self.n_fuse >= CONSEC and lidar_fresh and self.lidar_far))
-        if danger and not self.floor_tripped:
-            self.floor_tripped = True
-            self.n_clear = 0
-            why = 'midas' if self.n_stop >= CONSEC else 'midas+lidar'
-            self.get_logger().error(f'DROP-OFF AHEAD ({why}, step={step:.2f}) — stopping')
-            self.trip('Drop off ahead. Stopping.')
-            self.pub_danger.publish(Bool(data=True))
-        elif self.floor_tripped and self.n_clear >= CLEAR_N:
-            self.floor_tripped = False
-            self.get_logger().warn('floor-drop cleared — re-armed')
-            self.pub_danger.publish(Bool(data=False))
-
-    # --- common action ---
-    def trip(self, phrase):
-        threading.Thread(target=self.estop, daemon=True).start()
-        self.pub_speak.publish(String(data=phrase))
+        hit = center >= MIDAS_STOP or (center >= MIDAS_FUSE and lidar_fresh and self.lidar_far)
+        self.n_hit = self.n_hit + 1 if hit else 0
+        self.n_clear = self.n_clear + 1 if center < MIDAS_CLEAR else 0
+        if self.n_hit >= CONSEC and not self.ahead:
+            self.ahead = True
+            self.pub_ahead.publish(Bool(data=True))
+            self.get_logger().warn(f'drop-off in the forward path (center step={center:.2f}) — /cliff/ahead=1')
+            now = time.monotonic()
+            if now - self.last_warn > SPEAK_GAP:
+                self.last_warn = now
+                self.pub_speak.publish(String(data='Edge ahead.'))
+        elif self.ahead and self.n_clear >= CLEAR_N:
+            self.ahead = False
+            self.pub_ahead.publish(Bool(data=False))
+            self.get_logger().info('forward path clear — /cliff/ahead=0')
 
     def estop(self):
         body = json.dumps({'action': 'disable'}).encode()
-        for _ in range(3):                 # repeat — a single PUT can drop over WiFi
+        for _ in range(3):
             try:
                 req = urllib.request.Request(CAP, data=body, method='PUT',
                                              headers={'Content-Type': 'application/json'})
