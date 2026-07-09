@@ -19,7 +19,7 @@ import json, math, os
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import String
+from std_msgs.msg import String, Bool
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from sensor_msgs.msg import LaserScan
@@ -53,6 +53,14 @@ class ObjMap(Node):
             self.create_subscription(PoseWithCovarianceStamped, POSE_TOPIC, self.on_posecov, 10)
         self.create_subscription(LaserScan, '/scan', self.on_scan, 10)
         self.create_subscription(String, '/vision/detections', self.on_dets, 10)
+        # A bump = a real obstacle the LiDAR can't see (thin table leg, etc.) right in front of us.
+        # Record it on the map at the robot's front so we remember + route around it later.
+        self.bumped = False
+        self.bump_front_m = float(os.environ.get('Q6A_OBJMAP_BUMP_FRONT_M', '0.20'))
+        from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy
+        _latched = QoSProfile(depth=1, reliability=QoSReliabilityPolicy.RELIABLE,
+                              durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
+        self.create_subscription(Bool, '/bumper', self.on_bumper, _latched)
         self.pub_map = self.create_publisher(String, '/object_map', 10)
         self.pub_mk = self.create_publisher(MarkerArray, '/object_markers', 10) if HAVE_MARKERS else None
         self.create_timer(2.0, self.publish)
@@ -113,6 +121,18 @@ class ObjMap(Node):
             xm = xr + rng * math.cos(yaw + bearing)
             ym = yr + rng * math.sin(yaw + bearing)
             self.merge(det['label'], xm, ym, det.get('conf', 0.0))
+
+    def on_bumper(self, m):
+        if m.data and not self.bumped:      # rising edge = one obstacle mark per distinct hit
+            self.bumped = True
+            if self.pose is not None:
+                xr, yr, yaw = self.pose
+                bx = xr + self.bump_front_m * math.cos(yaw)     # just ahead of the robot = where it hit
+                by = yr + self.bump_front_m * math.sin(yaw)
+                self.merge('obstacle', bx, by, 1.0)
+                self.get_logger().info(f'bump -> obstacle mapped at ({bx:.2f}, {by:.2f})')
+        elif not m.data:
+            self.bumped = False
 
     def merge(self, cls, x, y, conf):
         for o in self.objects:
