@@ -44,6 +44,23 @@ the Q6A's `robot-usb`/`robot-wifi` aliases, whose key works).
 
 ---
 
+## 2026-07-09 — Stop hallucinated object recognition (confidence + persistence gating)
+
+The robot announced/mapped phantom objects ("cat"/"laptop on the floor"). Evidence (live capture): the model
+is fine — real furniture detects high (chair 0.72-0.81, tv/fridge 0.62+) — but COCO false positives on textured
+floor sit at ~0.44-0.55, and the pipeline was far too permissive: detector at **conf 0.1**, announcer spoke
+anything **>=0.5** for 3 frames. Clean gap between real (>=0.62) and phantom (~0.5), so raised the bars:
+- `q6a_vision` detector CONF 0.1 -> **0.30** (0.1 leaked junk into ByteTrack).
+- `q6a_announce` MIN_CONF 0.5 -> **0.6**, MIN_HITS 3 -> **5** (must be confident AND persist 5 frames).
+- `q6a_objmap` MIN_CONF 0.4 -> **0.55** + **persistence gate**: only publish objects seen **>=3x** (drops
+  one-off false positives; bump 'obstacle' marks exempt). (task 11)
+Verified: "cat" still detected at 0.5 (model level) but now **below every consumer bar -> not announced, not
+mapped**; announce log clean. Real furniture unaffected. Further insurance if needed: a class allow/deny list.
+
+Files: `scripts/companion/q6a_vision.py`, `q6a_announce.py`, `q6a_objmap.py`.
+
+---
+
 ## 2026-07-09 — slam_toolbox FIXED via CycloneDDS (root cause: FastDDS + a lying `ros2 topic hz`)
 
 The "slam is broken" saga resolved. **slam_toolbox works** — the failure was two compounding things, neither a

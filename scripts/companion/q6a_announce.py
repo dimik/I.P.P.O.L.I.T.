@@ -21,8 +21,9 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 
-MIN_CONF = float(os.environ.get('Q6A_ANNOUNCE_MIN_CONF', '0.5'))
-MIN_HITS = int(os.environ.get('Q6A_ANNOUNCE_MIN_HITS', '3'))       # frames a label must persist before speaking
+MIN_CONF = float(os.environ.get('Q6A_ANNOUNCE_MIN_CONF', '0.6'))   # real objects >=0.62; floor hallucinations
+#                                                                    (cat/laptop) sit ~0.44-0.55 -> cut here
+MIN_HITS = int(os.environ.get('Q6A_ANNOUNCE_MIN_HITS', '5'))       # frames a label must persist before speaking
 COOLDOWN = float(os.environ.get('Q6A_ANNOUNCE_COOLDOWN', '25'))    # per-label repeat suppression (s)
 MIN_GAP = float(os.environ.get('Q6A_ANNOUNCE_MIN_GAP', '3.0'))     # global spacing between utterances (s)
 PHRASE = os.environ.get('Q6A_ANNOUNCE_PHRASE', 'I see a {label}')  # {label} substituted

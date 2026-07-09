@@ -29,7 +29,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MJPEG_URL = os.environ.get('Q6A_CAM_URL', 'http://192.168.10.1:8090/')
 VALID_ROWS = int(os.environ.get('Q6A_CAM_VALID_ROWS', '504'))   # camstream pads 672x504 -> 672x672
-CONF = float(os.environ.get('Q6A_YOLO_CONF', '0.1'))            # low: ByteTrack recovers, spawns only >=0.4
+CONF = float(os.environ.get('Q6A_YOLO_CONF', '0.30'))          # detector floor (0.1 leaked junk; real
+#                        furniture is >=0.62, floor false-positives like cat/laptop sit ~0.44-0.55)
 VIEW_PORT = int(os.environ.get('Q6A_VISION_PORT', '8093'))
 DET_FPS = float(os.environ.get('Q6A_VISION_FPS', '8'))
 MIDAS_BIN = os.path.expanduser('~/midas_depth_w8a8.bin')

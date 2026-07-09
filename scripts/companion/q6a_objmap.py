@@ -33,7 +33,9 @@ H_FOV = math.radians(float(os.environ.get('Q6A_CAM_HFOV_DEG', '110')))   # OV885
 CAM_YAW = math.radians(float(os.environ.get('Q6A_CAM_YAW_DEG', '0')))    # camera yaw vs base_link forward
 BEAR_SIGN = float(os.environ.get('Q6A_CAM_BEAR_SIGN', '-1'))             # image +x(right) -> which bearing sign
 MERGE_DIST = float(os.environ.get('Q6A_OBJMAP_MERGE_M', '0.5'))          # merge same-class within this (m)
-MIN_CONF = float(os.environ.get('Q6A_OBJMAP_MIN_CONF', '0.4'))           # map only confident detections
+MIN_CONF = float(os.environ.get('Q6A_OBJMAP_MIN_CONF', '0.55'))          # map only confident detections
+MIN_N = int(os.environ.get('Q6A_OBJMAP_MIN_N', '3'))                     # publish only objects seen >=N times
+#                                                                          (drops one-off YOLO false positives)
 # dynamic/movable classes are NOT persistent scene furniture — never add them to the map (they'd smear
 # across the odom track as they/the robot move: e.g. a supervising human reads as hundreds of "person" hits).
 DYNAMIC = set(s.strip() for s in os.environ.get(
@@ -145,12 +147,15 @@ class ObjMap(Node):
         self.objects.append({'cls': cls, 'x': x, 'y': y, 'n': 1, 'conf': conf})
 
     def publish(self):
+        # persistence gate: only surface objects seen >= MIN_N times (a transient YOLO false positive stays
+        # at n=1-2). Bump 'obstacle' marks are deliberate ground truth -> always kept.
+        pub = [o for o in self.objects if o['n'] >= MIN_N or o['cls'] == 'obstacle']
         self.pub_map.publish(String(data=json.dumps(
             {'objects': [{'cls': o['cls'], 'x': round(o['x'], 3), 'y': round(o['y'], 3),
-                          'n': o['n'], 'conf': round(o['conf'], 3)} for o in self.objects]})))
+                          'n': o['n'], 'conf': round(o['conf'], 3)} for o in pub]})))
         if self.pub_mk is not None:
             ma = MarkerArray()
-            for i, o in enumerate(self.objects):
+            for i, o in enumerate(pub):
                 mk = Marker()
                 mk.header.frame_id = 'map'; mk.header.stamp = self.get_clock().now().to_msg()
                 mk.ns = 'objects'; mk.id = i; mk.type = Marker.SPHERE; mk.action = Marker.ADD
@@ -167,10 +172,10 @@ class ObjMap(Node):
                 t.text = f"{o['cls']} ({o['n']})"
                 ma.markers.append(t)
             self.pub_mk.publish(ma)
-        if self.objects:
-            self.get_logger().info(f"{len(self.objects)} objects: " +
+        if pub:
+            self.get_logger().info(f"{len(pub)} mapped (of {len(self.objects)} raw): " +
                                    ', '.join(f"{o['cls']}@({o['x']:.1f},{o['y']:.1f})x{o['n']}"
-                                             for o in sorted(self.objects, key=lambda o: -o['n'])[:8]))
+                                             for o in sorted(pub, key=lambda o: -o['n'])[:8]))
 
 
 def main():
