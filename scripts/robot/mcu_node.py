@@ -32,8 +32,10 @@ import time
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy
 from sensor_msgs.msg import Imu
 from nav_msgs.msg import Odometry
+from std_msgs.msg import Bool, UInt8
 
 RING_PATH = '/tmp/mcu_ring.buf'
 HDR = 64
@@ -84,6 +86,19 @@ class McuNode(Node):
 
         self.pub_imu = self.create_publisher(Imu, '/imu/data', 50)
         self.pub_odom = self.create_publisher(Odometry, '/odom/wheel', 50)
+        # --- cliff / fall protection (SAFETY) ---
+        # MCU Triggers frame (type 0x00) payload byte[1] = downward IR cliff/ground bits: 0x00 = safely
+        # on the floor, non-zero = one or more sensors see "no floor" (a drop-off, or the robot lifted).
+        # Calibrated 2026-07-09 by diffing on-floor (00) vs lifted (0x02..0x0f). We publish /cliff (Bool,
+        # latched so late subscribers get the current state) — the cliff_guard node hard-stops driving on it.
+        # Conservative by design: byte != 0 -> cliff (a false stop is safe; a missed drop is catastrophic).
+        self.declare_parameter('cliff_byte', 1)          # payload index of the cliff/ground bits
+        self.cliff_idx = int(self.get_parameter('cliff_byte').value)
+        latched = QoSProfile(depth=1, reliability=QoSReliabilityPolicy.RELIABLE,
+                             durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
+        self.pub_cliff = self.create_publisher(Bool, '/cliff', latched)
+        self.pub_cliff_raw = self.create_publisher(UInt8, '/cliff/raw', latched)
+        self.cliff_state = None
 
         # source: '' = local tmpfs ring (on-robot); 'host:port' = raw bytes over TCP from ring_forward.py on
         # the robot (lets this node run on the COMPANION with ROS off the robot). Decode/publish is identical.
@@ -214,6 +229,15 @@ class McuNode(Node):
 
     def dispatch(self, mtype, payload):
         now = self.get_clock().now().to_msg()
+        if mtype == 0x00 and len(payload) > self.cliff_idx:   # Triggers — cliff/bump/dock (SAFETY)
+            raw = payload[self.cliff_idx]
+            cliff = raw != 0
+            self.pub_cliff_raw.publish(UInt8(data=raw))
+            self.pub_cliff.publish(Bool(data=cliff))
+            if cliff != self.cliff_state:                     # log only on edge
+                self.cliff_state = cliff
+                self.get_logger().warn(f'CLIFF {"DETECTED" if cliff else "clear"} (Triggers byte=0x{raw:02x})')
+            return
         if mtype == 0x02 and len(payload) == 18:          # Status10ms — IMU
             ts, gx, gy, gz, ax, ay, az, _ld, _rd = struct.unpack('<Ihhhhhhbb', payload)
             gyro = [gx * self.gscale, gy * self.gscale, gz * self.gscale]   # °/s

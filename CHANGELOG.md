@@ -44,6 +44,40 @@ the Q6A's `robot-usb`/`robot-wifi` aliases, whose key works).
 
 ---
 
+## 2026-07-09 — Object announcer + cliff/stair fall protection (3-layer, validated)
+
+**Object announcer (`q6a_announce` / `q6a-announce.service`):** new node — watches `/vision/detections` and
+speaks new objects ("I see a chair") via `/robot/speak` -> audio-bridge -> Piper. Debounced (min_conf 0.5,
+min_hits 3, per-label cooldown 25 s, global 3 s spacing) so it narrates, not spams. Verified audible.
+(Speaker was at vol 60, not the vol-0 mute from the manual-nav work; bumped to 70.)
+
+**Cliff / stair fall protection (SAFETY — robot is on the 2nd floor near a ladder).** Key fact:
+**a horizontal 2D LiDAR cannot see a down-staircase** — a drop reads as "wide open", so "drive toward the
+open direction" is exactly the trap. Real protection = the robot's own downward IR cliff sensors. Built a
+guard chain, tested two ways (lift, and holding the robot at an actual edge):
+- **`mcu_node` cliff decode:** the MCU Triggers frame (type 0x00) payload **byte[1]** — publishes latched
+  `/cliff` (Bool) + `/cliff/raw` (UInt8); conservative rule byte!=0 -> stop (a false stop is safe).
+- **`cliff_guard` / `q6a-cliff-guard.service`:** on `/cliff` rising edge -> immediately DISABLE
+  HighResolutionManualControl over REST (x3 for WiFi) + speak "Cliff detected. Stopping." Latches, re-arms.
+- **AVA native (discovered):** lifting throws AVA's own "wheels not in contact with ground" error — an
+  independent reflex under ours.
+- **⚠️ CRITICAL FINDING — byte[1] is WHEEL-DROP, not forward cliff-IR.** Lift test passed (byte 0x08 ->
+  `/cliff` true -> guard hard-stop + speak -> re-arm on set-down; robot recovered to idle). BUT holding the
+  robot at a **real edge** (front over the drop, wheels still on the floor) read **byte=0 — no detection**
+  (`/cliff/raw` @ 8 Hz steady 0). So `/cliff` only fires once wheels have LEFT the ground — a LATE backstop,
+  NOT before-the-edge protection. (Open: whether AVA polls forward cliff-IR only while actively driving —
+  untestable without driving at the edge.)
+- **Policy (SAFETY): the stairs are a hard NO-GO zone.** Map the room interior only, wide berth from the
+  edge, slow + supervised; `/cliff` wheel-drop + AVA error are last-resort backstops. Real forward-drop
+  detection is a TODO — most promising is a **MiDaS floor-drop detector** (camera sees the floor plane jump
+  farther at an edge), per the user's LiDAR+MiDaS steer.
+
+Files: `scripts/companion/q6a_announce.py`, `scripts/companion/cliff_guard.py`,
+`scripts/companion/systemd/{q6a-announce,q6a-cliff-guard}.service` (new), `scripts/robot/mcu_node.py`
+(Triggers/cliff decode, additive).
+
+---
+
 ## 2026-07-08 — Working semantic object map via companion laser-SLAM odometry (2.4 done)
 
 **Milestone:** the companion now builds a semantic object map during a manual drive, localizing **itself**

@@ -26,6 +26,17 @@ The taps must run on the robot (they interpose AVA's serial); everything downstr
 
 ## Decisions
 
+### D8 (2026-07-09) — Stairs are a NO-GO zone; cliff sensing is a wheel-drop backstop only
+The robot is on the 2nd floor next to a ladder/stairs. **A horizontal 2D LiDAR cannot see a down-staircase**
+(the beam clears the edge → reads "open"), so `/scan`-based "drive toward open" is actively dangerous near a
+drop. We added the robot's own cliff sensing (`mcu_node` decodes MCU Triggers byte[1] → `/cliff`; `cliff_guard`
+hard-stops manual control + speaks) and confirmed AVA's native "wheels not in contact" reflex — BUT a live
+edge test showed **byte[1] is wheel-drop, not forward cliff-IR**: it only fires once wheels have left the
+ground (a LATE backstop). So there is **no proven before-the-edge stop.** Policy: **treat the stairs as a hard
+no-go zone**, map the interior with a wide berth, drive slow + supervised; `/cliff` + AVA error are last-resort
+only. Real forward-drop protection is a **TODO: a MiDaS floor-drop detector** (the floor plane jumps far at an
+edge) — the LiDAR+MiDaS approach the user asked for. See CHANGELOG 2026-07-09.
+
 ### D7 (2026-07-08) — Companion runs its OWN laser SLAM for pose (supersedes D2/D3 pose plan)
 **The companion localizes itself from `/scan`, not from Valetudo.** Two hard facts forced this:
 1. **work_mode 17 blocks all Valetudo autonomous nav** — `BasicControl start`/`home` and `GoToLocation`
