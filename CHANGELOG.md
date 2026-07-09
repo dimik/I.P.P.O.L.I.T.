@@ -44,6 +44,42 @@ the Q6A's `robot-usb`/`robot-wifi` aliases, whose key works).
 
 ---
 
+## 2026-07-09 — Pipeline robustness: self-healing ring_forward + clean-restart DDS
+
+Attacked the three fragilities from the mapping session. Two fixed, one narrowed.
+
+**FIXED — `ring_forward` self-heal (the "/scan dead after reboot" dance).** Root cause: the serialtap
+creates/inits `/tmp/lds_ring.buf` LAZILY (first ttyS3 read = turret spin), *after* ring_forward starts at
+boot, so the old code mmap'd once (missing file / not-yet-valid magic / stale inode) and never recovered.
+Rewrote `handle()` to (re)open the ring whenever it appears, wait for full size + valid magic, and re-mmap on
+inode change. Proven: forwarder streams live bytes (8 KB pulled off :9901) the moment the turret spins, no
+manual restart. Deployed to the robot chroot.
+
+**FIXED — clean node restarts (DDS re-match).** Nodes died on systemd's default SIGTERM without destroying
+their DDS participant -> stale endpoints -> peers never re-matched a restarted publisher. Added
+`KillSignal=SIGINT` (+ `TimeoutStopSec=8`) to every unit (rclpy/rclcpp handle SIGINT -> clean shutdown).
+Plus the operational rule: **restart publishers before consumers** — a fresh subscriber reliably discovers an
+existing publisher, whereas an existing subscriber does NOT promptly re-match a *restarted* publisher (FastDDS
+limitation). With that order, `lds-scan-node -> laser_odom -> /odom_laser` came up clean and objmap placed
+furniture.
+
+**NARROWED — two residual timing quirks (documented, not yet auto-healed):**
+- `lds-scan-node` must (re)connect to the forwarder *while the turret is spinning*; if it connects idle it
+  stays stuck until reconnected during a stream. (Its TCP reader should recover on first data — TODO.)
+- **slam_toolbox `/pose` still flaky.** It activates (lifecycle OK) and the full TF chain is present
+  (`odom->base_link` + static `base_link->laser`), but its tf2 message-filter drops every scan
+  ("queue is full") -> no `/pose`. Worked yesterday; flaky today after the restart churn — a scan/TF timing
+  or message-filter-queue issue needing dedicated work. **objmap runs fine on laser-odom meanwhile** (places
+  chairs/tv), so mapping is unblocked; the cost is odom drift (fragmentation) without slam's correction.
+
+Net: `/scan` no longer needs the manual forwarder-restart dance after a robot reboot, and node restarts are
+clean if done publisher-first. slam `/pose` reliability is the remaining open item.
+
+Files: `scripts/robot/ring_forward.py` (self-heal), `scripts/companion/systemd/*.service`
+(`KillSignal=SIGINT`), Q6A drop-ins `/etc/systemd/system/*.service.d/killsignal.conf`.
+
+---
+
 ## 2026-07-09 — Mapping drive works: safety-gated drive controller + person-filtered object map
 
 **Milestone:** first clean furniture-mapping drive. `q6a_drive` drove the robot forward under full cliff

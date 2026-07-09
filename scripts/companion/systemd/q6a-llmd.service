@@ -9,6 +9,8 @@ StartLimitIntervalSec=300
 StartLimitBurst=4
 
 [Service]
+KillSignal=SIGINT
+TimeoutStopSec=8
 Type=simple
 User=radxa
 SupplementaryGroups=render

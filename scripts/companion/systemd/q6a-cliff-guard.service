@@ -4,6 +4,8 @@ After=network-online.target mcu-node.service
 Wants=network-online.target
 
 [Service]
+KillSignal=SIGINT
+TimeoutStopSec=8
 Type=simple
 User=radxa
 EnvironmentFile=-/etc/default/ippolit-robot

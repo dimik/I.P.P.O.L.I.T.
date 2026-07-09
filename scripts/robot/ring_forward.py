@@ -8,6 +8,12 @@ raw bytes over TCP so the (unchanged) ROS decode node can run on the Q6A instead
 Generic + stateless-per-client: each client gets bytes from the moment it connects (skips backlog). Handles
 the ring's circular wrap + reader-fell-behind exactly like the old on-robot node's drain().
 
+SELF-HEALING (fixed 2026-07-09): the serialtap creates/initializes the ring LAZILY — the file may not exist
+when a client connects (turret parked at boot -> AVA hasn't read ttyS3 yet), the magic may be written after
+the file appears, and the tap may recreate the file (new inode). So we don't mmap once and trust it forever:
+we (re)open when the file appears, retry until the magic is valid, and re-mmap whenever the inode changes.
+This removes the "restart ring_forward after every reboot to get /scan" dance.
+
 Usage:  python3 ring_forward.py --path /tmp/lds_ring.buf --port 9901 [--magic 0x0031534444530001]
 No ROS, no deps beyond stdlib — safe to keep after ROS is removed from the robot.
 """
@@ -17,20 +23,46 @@ HDR = 64
 RING = 256 * 1024
 
 
+def try_open(path, magic):
+    """(re)open+mmap the ring if it exists, is full-size, and has a valid magic. Returns (mm, ino) or (None,None)."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None, None
+    if st.st_size < HDR + RING:            # tap still initializing (ftruncate not done) -> wait
+        return None, None
+    try:
+        fd = os.open(path, os.O_RDONLY)
+        mm = mmap.mmap(fd, HDR + RING, mmap.MAP_SHARED, mmap.PROT_READ)
+        os.close(fd)
+    except OSError:
+        return None, None
+    if magic and struct.unpack_from('<Q', mm, 8)[0] != magic:
+        mm.close(); return None, None      # magic not written yet -> tap not fully up
+    return mm, st.st_ino
+
+
 def handle(conn, path, magic):
     conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     mm = None
+    ino = None
     read_pos = 0
     try:
         while True:
-            if mm is None:
-                if not os.path.exists(path):
-                    time.sleep(0.2); continue
-                fd = os.open(path, os.O_RDONLY)
-                mm = mmap.mmap(fd, HDR + RING, mmap.MAP_SHARED, mmap.PROT_READ); os.close(fd)
-                if magic and struct.unpack_from('<Q', mm, 8)[0] != magic:
-                    mm.close(); mm = None; time.sleep(0.5); continue   # tap not up yet
-                read_pos = struct.unpack_from('<Q', mm, 0)[0]          # start fresh (skip backlog)
+            # re-open on: first use, file gone/replaced (inode change), or a still-invalid mapping
+            try:
+                cur_ino = os.stat(path).st_ino
+            except OSError:
+                cur_ino = None
+            if mm is None or cur_ino != ino:
+                if mm is not None:
+                    try: mm.close()
+                    except Exception: pass
+                    mm = None
+                mm, ino = try_open(path, magic)
+                if mm is None:
+                    time.sleep(0.3); continue                 # not ready yet — keep trying (don't give up)
+                read_pos = struct.unpack_from('<Q', mm, 0)[0]  # start fresh (skip backlog)
             wp = struct.unpack_from('<Q', mm, 0)[0]
             avail = wp - read_pos
             if avail <= 0:

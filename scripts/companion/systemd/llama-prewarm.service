@@ -3,6 +3,8 @@ Description=Prewarm Llama 3.2 1B NPU model into page cache
 After=local-fs.target
 
 [Service]
+KillSignal=SIGINT
+TimeoutStopSec=8
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/bin/sh -c "cat /home/radxa/llama-1b/models/*.bin /home/radxa/llama-1b/*.so >/dev/null 2>&1"

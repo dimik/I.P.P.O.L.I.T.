@@ -7,6 +7,8 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+KillSignal=SIGINT
+TimeoutStopSec=8
 Type=simple
 User=radxa
 Environment=LD_LIBRARY_PATH=/home/radxa/qairt_2.42.0.251225/lib/aarch64-oe-linux-gcc11.2
