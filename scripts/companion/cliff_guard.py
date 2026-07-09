@@ -38,8 +38,8 @@ CAP = f'http://{ROBOT_ADDR}/api/v2/robot/capabilities/HighResolutionManualContro
 MIDAS_STOP = float(os.environ.get('Q6A_CLIFF_MIDAS_STOP', '0.35'))   # center drop magnitude for a cliff
 MIDAS_FUSE = float(os.environ.get('Q6A_CLIFF_MIDAS_FUSE', '0.28'))   # weaker, needs LiDAR agreement
 MIDAS_CLEAR = float(os.environ.get('Q6A_CLIFF_MIDAS_CLEAR', '0.25')) # re-arm hysteresis
-MIN_SHARP = float(os.environ.get('Q6A_CLIFF_MIN_SHARP', '3.0'))      # drop must be SHARP (real edge ~5-7,
-#                                                                     smooth floor gradient ~1.1-1.8)
+MIN_SHARP = float(os.environ.get('Q6A_CLIFF_MIN_SHARP', '4.0'))      # drop must be SHARP (real edge ~5-7,
+#                                                                     smooth floor gradient ~1.1-2.2)
 CONSEC = int(os.environ.get('Q6A_CLIFF_CONSEC', '2'))
 CLEAR_N = int(os.environ.get('Q6A_CLIFF_CLEAR_N', '6'))
 LIDAR_FAR_M = float(os.environ.get('Q6A_CLIFF_LIDAR_FAR_M', '3.5'))
@@ -123,8 +123,10 @@ class CliffGuard(Node):
             return
         lidar_fresh = (time.monotonic() - self.lidar_at) < LIDAR_STALE_S
         # a real drop-off is a SHARP discontinuity, not a smooth floor gradient's steepest step
-        sharp_enough = sharp >= MIN_SHARP
-        hit = sharp_enough and (center >= MIDAS_STOP or (center >= MIDAS_FUSE and lidar_fresh and self.lidar_far))
+        # require LiDAR corroboration: a real down-edge reads as an OPEN forward sector (beam clears the
+        # drop); a false floor-discontinuity (rug/threshold/shadow/furniture base) still returns LiDAR ->
+        # not open -> no warning. Also self-suppresses when idle (turret parked -> stale LiDAR -> no false edge).
+        hit = sharp >= MIN_SHARP and center >= MIDAS_FUSE and lidar_fresh and self.lidar_far
         self.n_hit = self.n_hit + 1 if hit else 0
         self.n_clear = self.n_clear + 1 if center < MIDAS_CLEAR else 0
         if self.n_hit >= CONSEC and not self.ahead:

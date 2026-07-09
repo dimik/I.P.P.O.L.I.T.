@@ -44,6 +44,33 @@ the Q6A's `robot-usb`/`robot-wifi` aliases, whose key works).
 
 ---
 
+## 2026-07-10 — TTS volume root cause (ALSA mixer), vision-seek drive, edge gate hardening
+
+**Volume — real root cause found after several wrong knobs.** TTS was too loud and NOTHING software reduced
+it: not Valetudo's `SpeakerVolumeControlCapability`, not mediad's per-play volume field (`single,file,VOL`),
+not an ffmpeg `volume=` filter on the OGG. mediad plays at whatever the **robot ALSA hardware mixer** is set
+to. Fix: `amixer -c 0 sset 'digital volume' 22` (~35% of 0-63) — verified quieter and that it **persists**
+(mediad doesn't reset it per-play). Made persistent in `_root_postboot.sh` (resets on reboot otherwise).
+`speak.py` also gained a real ffmpeg `volume` filter + `SPEAK_VOL`, but the ALSA mixer is the effective control.
+
+**Vision-seek drive.** `q6a_drive` now steers toward the highest-confidence furniture in view
+(`/vision/detections`, proportional to bbox x-offset; `Q6A_DRIVE_SEEK`/`STEER_SIGN`) so a mapping drive
+actually points the camera at furniture instead of wandering blind. Keeps all safety gates.
+
+**objmap conf lowered 0.55 -> 0.45.** With the class allowlist now blocking hallucinations, confidence no
+longer needs to be high; lowered it to catch borderline REAL furniture (fridge ~0.5).
+
+**Edge gate hardened (false "Edge ahead" again).** Raised sharpness bar 3.0 -> 4.0 AND now require LiDAR
+corroboration for the edge advisory: a real down-edge = an OPEN forward LiDAR sector (beam clears the drop);
+a false floor-discontinuity (rug/threshold/shadow/furniture base) still returns LiDAR -> not open -> no
+warning. Also self-suppresses when idle (turret parked -> stale LiDAR). `Ouch!` gained a 3 s cooldown
+(bumper flickers during back-off+turn recovery, over-announced).
+
+Files: `scripts/robot/speak.py`, `scripts/robot/_root_postboot.sh`, `scripts/companion/cliff_guard.py`,
+`scripts/companion/q6a_objmap.py`, `scripts/companion/q6a_drive.py`.
+
+---
+
 ## 2026-07-09 — Stop hallucinated object recognition (confidence + persistence gating)
 
 The robot announced/mapped phantom objects ("cat"/"laptop on the floor"). Evidence (live capture): the model

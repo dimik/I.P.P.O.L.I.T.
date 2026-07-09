@@ -33,7 +33,8 @@ H_FOV = math.radians(float(os.environ.get('Q6A_CAM_HFOV_DEG', '110')))   # OV885
 CAM_YAW = math.radians(float(os.environ.get('Q6A_CAM_YAW_DEG', '0')))    # camera yaw vs base_link forward
 BEAR_SIGN = float(os.environ.get('Q6A_CAM_BEAR_SIGN', '-1'))             # image +x(right) -> which bearing sign
 MERGE_DIST = float(os.environ.get('Q6A_OBJMAP_MERGE_M', '0.5'))          # merge same-class within this (m)
-MIN_CONF = float(os.environ.get('Q6A_OBJMAP_MIN_CONF', '0.55'))          # map only confident detections
+MIN_CONF = float(os.environ.get('Q6A_OBJMAP_MIN_CONF', '0.45'))          # the ALLOW class filter (below) is
+#   what blocks hallucinations now, so conf can be lower to catch borderline REAL furniture (e.g. fridge ~0.5)
 MIN_N = int(os.environ.get('Q6A_OBJMAP_MIN_N', '3'))                     # publish only objects seen >=N times
 #                                                                          (drops one-off YOLO false positives)
 # dynamic/movable classes are NOT persistent scene furniture — never add them to the map (they'd smear

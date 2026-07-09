@@ -36,6 +36,12 @@ MIN_SHARP = float(os.environ.get('Q6A_DRIVE_MIN_SHARP', '3.0'))        # drop mu
 MIN_FRONT = float(os.environ.get('Q6A_DRIVE_MIN_FRONT', '0.40'))       # m, LiDAR forward obstacle
 FWD_HALF_DEG = 25.0
 HZ = 6.6
+# vision-seek: steer toward the highest-confidence furniture in view so the map actually gets populated
+SEEK = set(s.strip().lower() for s in os.environ.get('Q6A_DRIVE_SEEK',
+    'chair,couch,bed,dining table,tv,refrigerator,oven,microwave,sink,toilet,potted plant,bench').split(',') if s.strip())
+SEEK_CONF = float(os.environ.get('Q6A_DRIVE_SEEK_CONF', '0.45'))
+STEER_SIGN = float(os.environ.get('Q6A_DRIVE_STEER_SIGN', '1'))   # flip if it steers AWAY from the target
+MAX_STEER = float(os.environ.get('Q6A_DRIVE_MAX_STEER', '45'))
 # bump recovery (front bumper hit the LiDAR-invisible obstacle, e.g. a thin table leg): back off + turn away
 REVERSE_S = float(os.environ.get('Q6A_DRIVE_REVERSE_S', '0.8'))
 TURN_S = float(os.environ.get('Q6A_DRIVE_TURN_S', '1.3'))
@@ -68,6 +74,8 @@ class Driver(Node):
                              durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(Bool, '/cliff', self.on_cliff, latched)
         self.create_subscription(Bool, '/bumper', self.on_bump, latched)
+        self.target = None; self.target_t = 0.0    # (label, x_offset[-0.5..0.5], conf) best furniture in view
+        self.create_subscription(String, '/vision/detections', self.on_dets, 10)
         self.create_timer(1.0 / HZ, self.tick)
         self.get_logger().info(f'q6a_drive: forward {vel} m-ish for {secs}s '
                                f'(stop: center>={STOP_CENTER}, front<{MIN_FRONT}m, /cliff, stale)')
@@ -85,6 +93,20 @@ class Driver(Node):
     def on_cliff(self, m): self.cliff = bool(m.data)
 
     def on_bump(self, m): self.bump = bool(m.data)
+
+    def on_dets(self, m):
+        try:
+            d = json.loads(m.data)
+        except Exception:
+            return
+        w = d.get('w', 672); best = None
+        for det in d.get('dets', []):
+            if det.get('conf', 0) >= SEEK_CONF and det.get('label', '').lower() in SEEK:
+                x1, _, x2, _ = det['bbox']
+                if best is None or det['conf'] > best[2]:
+                    best = (det['label'], (x1 + x2) / 2.0 / w - 0.5, det['conf'])
+        if best is not None:
+            self.target = best; self.target_t = time.monotonic()
 
     def front_clear(self):
         m = self.scan
@@ -158,7 +180,12 @@ class Driver(Node):
         if fc is not None and fc < MIN_FRONT:            # LiDAR obstacle (wall) -> turn away, keep exploring
             self.get_logger().info(f'obstacle {fc:.2f} m — turning away')
             self.mode = 'turn'; self.mode_until = now + TURN_S; return
-        self._move(self.vel, self.angle)
+        # seek: steer toward the furniture in view (proportional to its horizontal offset); else go straight
+        if self.target is not None and (now - self.target_t) < 1.0:
+            steer = max(-MAX_STEER, min(MAX_STEER, STEER_SIGN * self.target[1] * 2 * MAX_STEER))
+            self._move(self.vel, steer)
+        else:
+            self._move(self.vel, self.angle)
 
     def _move(self, vel, angle):
         try:

@@ -146,6 +146,9 @@ fi
 # --- audio bridge: RELOCATED to the companion (Q6A audio-bridge.service), 2026-07-08 (phase 1.3c) ---
 # The ROS /robot/speak subscription now runs on the Q6A; it pipes each utterance to the robot's ROS-free
 # /opt/speak.py over ssh (piper/espeak + ffmpeg -> localhost mediad). No ROS on the robot for audio.
+# TTS loudness is the ALSA hardware mixer 'digital volume' (0-63) — mediad ignores Valetudo's SpeakerVolume,
+# its own volume field, AND the OGG amplitude (2026-07-10). Pin it to a sane level (22/63 ~= 35%).
+amixer -c 0 sset 'digital volume' 22 >/dev/null 2>&1
 
 # --- charge_state poller: Valetudo's battery charging FLAG is stuck 'none' for the D10S Pro (mapping
 # gap); AVA reports the truth via charge_state. Poll it (host avacmd) into /tmp/charge_state so the

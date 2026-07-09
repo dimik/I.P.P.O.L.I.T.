@@ -16,7 +16,8 @@ FFMPEG = '/opt/ffmpeg'
 PIPER = '/opt/piper/piper'
 PIPER_DIR = '/opt/piper'
 TTS_OGG = '/tmp/_spoke.ogg'
-VOL = int(os.environ.get('SPEAK_VOL', '90'))
+VOL = int(os.environ.get('SPEAK_VOL', '30'))   # 0..100 -> ffmpeg gain in synth() (see below). This, NOT
+#                             Valetudo SpeakerVolume nor mediad's volume field, is what sets TTS loudness.
 SPEED = int(os.environ.get('SPEAK_ESPEAK_SPEED', '155'))
 AMP = int(os.environ.get('SPEAK_ESPEAK_AMP', '200'))
 DEFAULT_VOICE = os.environ.get('SPEAK_DEFAULT_VOICE', 'amy')
@@ -43,7 +44,10 @@ def synth(engine, model, text):
     else:
         cmd, cwd = ['espeak-ng', '-v', model, '-s', str(SPEED), '-a', str(AMP), '--stdout'], None
     p1 = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    # attenuate the actual audio here — mediad's play-volume field does NOT reduce loudness, and piper
+    # synthesizes at full scale. VOL is 0..100 -> a linear ffmpeg gain (VOL/100).
     p2 = subprocess.Popen([FFMPEG, '-hide_banner', '-loglevel', 'error', '-y', '-i', 'pipe:0',
+                           '-af', f'volume={max(0.0, min(1.0, VOL / 100.0)):.2f}',
                            '-c:a', 'libvorbis', TTS_OGG], stdin=p1.stdout,
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     p1.stdout.close()
