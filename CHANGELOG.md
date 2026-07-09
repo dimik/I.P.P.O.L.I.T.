@@ -44,6 +44,33 @@ the Q6A's `robot-usb`/`robot-wifi` aliases, whose key works).
 
 ---
 
+## 2026-07-09 — slam_toolbox FIXED via CycloneDDS (root cause: FastDDS + a lying `ros2 topic hz`)
+
+The "slam is broken" saga resolved. **slam_toolbox works** — the failure was two compounding things, neither a
+slam bug:
+1. **`ros2 topic hz` / `echo --once` were unreliable** — a fresh-subscriber discovery race reported topics
+   SILENT even while they were flowing to *established* subscribers (objmap, the tf2 buffer). This drove a
+   long series of wrong "slam produces no /pose" conclusions. Reliable indicators (node logs, `tf2_echo`,
+   objmap's "switched pose source to /pose") told the true story.
+2. **FastDDS discovery fragility** — `_NODE_NAME_UNKNOWN_` in the CLI, existing-subscriber-vs-restarted-
+   publisher re-match gaps, and message-filter flakiness.
+
+Fix: **switched RMW to CycloneDDS** (`ros-jazzy-rmw-cyclonedds-cpp`, `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`
+in the shared EnvironmentFile; all nodes restarted). Result: clean discovery (node names resolve), the
+node-restart re-match fragility is gone, and — verified — **`map→base_link` resolves** (so slam's `map→odom`
+is live) and **objmap consumes slam's `/pose`** to build a coherent map: `chair@(-1.6,-1.5)` with 1121 merged
+observations + refrigerator + chairs across a consistent map frame (drift-corrected, far less fragmented than
+raw laser-odom).
+
+Also fixed this session (all committed): object announcer, MiDaS+LiDAR cliff (non-blocking, directional,
+sharpness discriminator vs smooth floor), safety-gated drive controller, bumper "Ouch!" + back-off/turn
+recovery + obstacle-on-map, ring_forward self-heal, KillSignal clean restarts.
+
+Files: `scripts/companion/systemd/ippolit-robot.env` (RMW_IMPLEMENTATION); deployed to
+`/etc/default/ippolit-robot` on the Q6A + `ros-jazzy-rmw-cyclonedds-cpp` installed.
+
+---
+
 ## 2026-07-09 — Fix false "Edge ahead": sharpness discriminator (cliff vs smooth floor)
 
 The MiDaS floor-drop detector false-alarmed "Edge ahead" on open floor / doorways. Root cause found from a
