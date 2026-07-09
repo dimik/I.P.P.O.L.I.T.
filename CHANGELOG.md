@@ -44,6 +44,38 @@ the Q6A's `robot-usb`/`robot-wifi` aliases, whose key works).
 
 ---
 
+## 2026-07-10 — Edge-following rewritten for LiDAR (line-fit PD), camera version scrapped
+
+User correction: a 360deg LiDAR is the right sensor for edge/wall following (as on their other camera-less
+robot); the camera/MiDaS version solved the wrong problem (forward depth can't measure a lateral distance).
+Researched the field (F1TENTH two-ray geometry vs sector line-fit; line-extraction/SLAM front-ends) and
+rebuilt `scripts/companion/q6a_edge_follow.py` accordingly.
+
+**Calibration pulled from source + a LIVE scan (not assumed):**
+- `/scan` convention is deterministic in `lds_scan_node.py`: LDS is CW, the node negates it -> ROS CCW,
+  bin 0 = forward, 360 bins @ 1deg, range_min 0.10 m. So the "mirrored world" risk is handled in code; only
+  a ~0-5deg forward-zero offset remains (needs a known-wall / SLAM cross-check).
+- Body radius = 0.175 m (D10s Pro = 350 mm dia, spec) -> setpoint = 0.175 + gap. Round chassis => fore/aft
+  turret offset shifts lateral half-width <5 mm; base_link->laser TF is identity, so lateral math holds.
+- Live scan: ~117/360 bins finite, stable across 14 frames (not spin-up), dense contiguous arc where a
+  surface is (37-43/45) and empty arcs = open space >8 m. Resolves to 0.142 m. This SPARSITY is exactly why
+  line-fit over two-ray: any two fixed rays are often dropouts; fitting 30-70 side points is robust.
+
+**Controller:** PCA least-squares line fit over the follow-side sector (+/-40deg) -> perpendicular distance
+`d` + wall heading `psi`; PD `turn = KP*(d-setpoint) + KD*psi` mapped to the Valetudo {velocity, angle}
+heading command (diff-drive, not Ackermann). No I-term (continuous re-estimation). Corner handling: front
+sector < FRONT_STOP -> rotate away (concave); too few inliers / fit_std too high -> curve toward side to
+re-acquire (convex/lost). Fit-quality gate (MAX_FIT_STD 0.06 m) rejects clutter. Safety: wheel-drop /cliff
+hard-stop (the only sensor for a BARE drop-off — horizontal LiDAR is blind to a railless void), stale-scan
+stop, bounded by --seconds. `--dry-run` estimates + logs d/psi/inliers/fit_std with zero motion.
+
+**Verified live (dry-run):** estimator collects side points, fits, and correctly reports WALL-LOST on the
+current cluttered spot (n=73 but fit_std=0.355 m >> 0.06 -> not a wall). Pending: position the robot at a
+real straight wall to confirm d~=setpoint & psi~=0, then a supervised low-speed run to fix STEER_SIGN + tune
+KP/KD. Data path runs over WiFi (192.168.1.213) — the USB gadget link is down but unused.
+
+---
+
 ## 2026-07-10 — CORRECTION: verified slam root cause — it was NOT FastDDS (controlled evidence)
 
 Rigorously re-tested the "CycloneDDS fixed slam" claim from 2026-07-09. **It does not hold up.** Controlled
