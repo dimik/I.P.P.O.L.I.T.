@@ -32,6 +32,7 @@ from std_msgs.msg import String, Bool
 ROBOT_ADDR = os.environ.get('ROBOT_ADDR', '192.168.10.1')
 CAP = f'http://{ROBOT_ADDR}/api/v2/robot/capabilities/HighResolutionManualControlCapability'
 STOP_CENTER = float(os.environ.get('Q6A_DRIVE_STOP_CENTER', '0.42'))   # MiDaS center drop = confirmed edge
+MIN_SHARP = float(os.environ.get('Q6A_DRIVE_MIN_SHARP', '3.0'))        # drop must be SHARP (not smooth floor)
 MIN_FRONT = float(os.environ.get('Q6A_DRIVE_MIN_FRONT', '0.40'))       # m, LiDAR forward obstacle
 FWD_HALF_DEG = 25.0
 HZ = 6.6
@@ -54,7 +55,7 @@ class Driver(Node):
         super().__init__('q6a_drive')
         self.vel, self.secs, self.angle = vel, secs, angle
         self.scan = None; self.scan_t = 0.0
-        self.center = None; self.center_t = 0.0
+        self.center = None; self.center_t = 0.0; self.center_sharp = 0.0
         self.cliff = False
         self.bump = False
         self.mode = 'forward'          # forward | reverse | turn (bump recovery)
@@ -75,7 +76,9 @@ class Driver(Node):
 
     def on_floor(self, m):
         try:
-            self.center = float(json.loads(m.data)['sectors']['center'][0]); self.center_t = time.monotonic()
+            c = json.loads(m.data)['sectors']['center']
+            self.center = float(c[0]); self.center_sharp = float(c[2]) if len(c) > 2 else 0.0
+            self.center_t = time.monotonic()
         except Exception:
             pass
 
@@ -137,8 +140,8 @@ class Driver(Node):
         # --- forward-facing safety (applies to forward + turn, both move forward-ish; NOT reverse) ---
         if not have_floor:
             self.stop('no fresh /vision/floor (refuse to drive blind)')
-        if self.center >= STOP_CENTER:
-            self.stop(f'DROP AHEAD (center={self.center:.2f})')
+        if self.center >= STOP_CENTER and self.center_sharp >= MIN_SHARP:   # sharp drop, not smooth floor
+            self.stop(f'DROP AHEAD (center={self.center:.2f} sharp={self.center_sharp:.1f})')
 
         # --- bump recovery: turn phase (arc away to change heading) ---
         if self.mode == 'turn':

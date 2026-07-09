@@ -44,6 +44,23 @@ the Q6A's `robot-usb`/`robot-wifi` aliases, whose key works).
 
 ---
 
+## 2026-07-09 — Fix false "Edge ahead": sharpness discriminator (cliff vs smooth floor)
+
+The MiDaS floor-drop detector false-alarmed "Edge ahead" on open floor / doorways. Root cause found from a
+live capture: a **smooth floor's perspective decay** (`154->142->...->58->44->34->27`) has a steepest single
+step of ~0.24-0.36 — overlapping the shallow end of real edges — so `max_step` alone can't separate them.
+A **real** edge is a sharp discontinuity (`...111.5->42...` = 0.62 at one bin, neighbours smooth).
+
+Fix: `/vision/floor` now reports **sharpness = max_step / median|step|** per sector. A real drop-off is sharp
+(~5-7); a smooth gradient is ~1.1-2.2. Cliff detection (cliff_guard + q6a_drive) now requires BOTH a drop
+magnitude AND sharpness >= 3.0. Verified: the false-positive floor (max_step 0.24, sharp 2.22) is now
+classified "smooth floor, no edge" and cliff_guard stays quiet; real edges (sharp discontinuity) still fire.
+
+Files: `scripts/companion/q6a_vision.py` (sharpness in floor profile), `scripts/companion/cliff_guard.py`
+(require sharp), `scripts/companion/q6a_drive.py` (require sharp for DROP-AHEAD stop).
+
+---
+
 ## 2026-07-09 — Bumper handling: "Ouch!" + back-off/turn recovery
 
 The robot kept pushing helplessly into a thin table leg (LiDAR-invisible: below/around the scan plane).

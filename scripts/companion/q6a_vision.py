@@ -78,13 +78,20 @@ def puller():
 
 
 def _band_step(band):
-    """(max_step, step_at, profile) for a floor band: row-medians bottom->far in 16 bins, largest
-    RELATIVE fall between adjacent bins (MiDaS is affine-invariant -> relative, not absolute)."""
+    """(max_step, step_at, sharpness, profile) for a floor band: row-medians bottom->far in 16 bins.
+
+    max_step = largest RELATIVE fall between adjacent bins (MiDaS is affine-invariant -> relative). But a
+    smooth floor's perspective decay ALSO has a steepest step (~0.24), so max_step alone false-alarms.
+    sharpness = max_step / median|step| distinguishes a true drop-off (one bin falls far, neighbours smooth
+    -> ratio ~5-7) from a smooth gradient (all steps similar -> ~1.1-1.8). A real cliff needs BOTH high.
+    """
     rows = np.median(band, axis=1)[::-1]                   # [0] = bottom-most (nearest floor)
     idx = np.linspace(0, len(rows) - 1, 16).astype(int)
     prof = rows[idx]
     steps = (prof[:-1] - prof[1:]) / (prof[:-1] + 1e-6)    # relative fall per bin, near -> far
-    return round(float(steps.max()), 3), int(steps.argmax()), [round(float(v), 1) for v in prof]
+    mx = float(steps.max()); at = int(steps.argmax())
+    sharp = mx / (float(np.median(np.abs(steps))) + 1e-3)
+    return round(mx, 3), at, round(sharp, 2), [round(float(v), 1) for v in prof]
 
 
 def floor_profile(dmap):
@@ -97,15 +104,16 @@ def floor_profile(dmap):
     """
     h, w = dmap.shape
     band = dmap[int(h * 0.55):, :].astype(np.float32)
-    ms, sa, prof = _band_step(band)
+    ms, sa, sh, prof = _band_step(band)
     t = w // 3
-    ls, la, _ = _band_step(band[:, :t])
-    cs, ca, _ = _band_step(band[:, t:2 * t])
-    rs, ra, _ = _band_step(band[:, 2 * t:])
+    ls, la, lsh, _ = _band_step(band[:, :t])
+    cs, ca, csh, _ = _band_step(band[:, t:2 * t])
+    rs, ra, rsh, _ = _band_step(band[:, 2 * t:])
     return {
         'profile': prof,
-        'max_step': ms, 'step_at': sa,
-        'sectors': {'left': [ls, la], 'center': [cs, ca], 'right': [rs, ra]},   # [max_step, step_at]
+        'max_step': ms, 'step_at': sa, 'sharp': sh,
+        # per sector: [max_step, step_at, sharpness]
+        'sectors': {'left': [ls, la, lsh], 'center': [cs, ca, csh], 'right': [rs, ra, rsh]},
         'frame_med': round(float(np.median(dmap)), 1),
     }
 

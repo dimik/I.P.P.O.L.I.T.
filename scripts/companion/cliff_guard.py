@@ -35,9 +35,11 @@ from std_msgs.msg import Bool, String
 ROBOT_ADDR = os.environ.get('ROBOT_ADDR', '192.168.10.1')
 CAP = f'http://{ROBOT_ADDR}/api/v2/robot/capabilities/HighResolutionManualControlCapability'
 
-MIDAS_STOP = float(os.environ.get('Q6A_CLIFF_MIDAS_STOP', '0.30'))   # center-sector drop = no-go-forward
-MIDAS_FUSE = float(os.environ.get('Q6A_CLIFF_MIDAS_FUSE', '0.24'))   # weaker, needs LiDAR agreement
-MIDAS_CLEAR = float(os.environ.get('Q6A_CLIFF_MIDAS_CLEAR', '0.22')) # re-arm hysteresis
+MIDAS_STOP = float(os.environ.get('Q6A_CLIFF_MIDAS_STOP', '0.35'))   # center drop magnitude for a cliff
+MIDAS_FUSE = float(os.environ.get('Q6A_CLIFF_MIDAS_FUSE', '0.28'))   # weaker, needs LiDAR agreement
+MIDAS_CLEAR = float(os.environ.get('Q6A_CLIFF_MIDAS_CLEAR', '0.25')) # re-arm hysteresis
+MIN_SHARP = float(os.environ.get('Q6A_CLIFF_MIN_SHARP', '3.0'))      # drop must be SHARP (real edge ~5-7,
+#                                                                     smooth floor gradient ~1.1-1.8)
 CONSEC = int(os.environ.get('Q6A_CLIFF_CONSEC', '2'))
 CLEAR_N = int(os.environ.get('Q6A_CLIFF_CLEAR_N', '6'))
 LIDAR_FAR_M = float(os.environ.get('Q6A_CLIFF_LIDAR_FAR_M', '3.5'))
@@ -109,12 +111,14 @@ class CliffGuard(Node):
     # --- ADVISORY: drop ahead in the center path (never disables manual control) ---
     def on_floor(self, m):
         try:
-            d = json.loads(m.data)
-            center = float(d.get('sectors', {}).get('center', [d.get('max_step', 0.0)])[0])
+            c = json.loads(m.data).get('sectors', {}).get('center', [0.0, 0, 0.0])
+            center = float(c[0]); sharp = float(c[2]) if len(c) > 2 else 0.0
         except Exception:
             return
         lidar_fresh = (time.monotonic() - self.lidar_at) < LIDAR_STALE_S
-        hit = center >= MIDAS_STOP or (center >= MIDAS_FUSE and lidar_fresh and self.lidar_far)
+        # a real drop-off is a SHARP discontinuity, not a smooth floor gradient's steepest step
+        sharp_enough = sharp >= MIN_SHARP
+        hit = sharp_enough and (center >= MIDAS_STOP or (center >= MIDAS_FUSE and lidar_fresh and self.lidar_far))
         self.n_hit = self.n_hit + 1 if hit else 0
         self.n_clear = self.n_clear + 1 if center < MIDAS_CLEAR else 0
         if self.n_hit >= CONSEC and not self.ahead:
