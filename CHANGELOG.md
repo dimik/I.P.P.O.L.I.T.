@@ -44,6 +44,37 @@ the Q6A's `robot-usb`/`robot-wifi` aliases, whose key works).
 
 ---
 
+## 2026-07-09 — Mapping drive works: safety-gated drive controller + person-filtered object map
+
+**Milestone:** first clean furniture-mapping drive. `q6a_drive` drove the robot forward under full cliff
+safety and objmap populated **chairs, zero persons** — the whole SLAM+vision+objmap+announcer+cliff stack
+running together during motion.
+
+**`q6a_drive.py` (new) — bounded, safety-gated forward drive burst.** Q6A-side control node (subscribes the
+sensors ONCE, ~7 Hz loop — no per-pulse ssh, so it's smooth/fast). Drives forward at a given velocity for N
+seconds, stopping immediately on: wheel-drop (`/cliff`), MiDaS floor-drop ahead (`/vision/floor` center >=
+0.42), near obstacle (LiDAR fwd < 0.4 m), or **stale/absent sensors (refuses to drive blind)**. Forward-only
+by design (2nd-floor edge is behind-right). Two gotchas solved: (1) **arm-first** — `/scan` only flows while
+manual control is armed (turret spins only then), so enable BEFORE waiting for sensors, else deadlock;
+(2) a startup warmup so a fresh node's DDS discovery has time (never false-abort at launch). Verified 0.28 and
+0.35 bursts, clean stops.
+
+**`q6a_objmap` dynamic-class filter.** `person`/`cat`/`dog`/`bird` are never added to the persistent map —
+a supervising human otherwise smears into hundreds of "person" hits across the odom track (saw 584×). Now
+furniture-only.
+
+**Known issues surfaced:** (1) **odom drift fragments** one chair into ~3 nearby entries — the slam_toolbox
+drift-correction job (its `/pose` was down this session; objmap fell back to laser-odom, which drifts).
+(2) **DDS re-match fragility** — restarting a node (objmap, lds-scan-node) drops its topic matches; had to
+restart objmap *mid-drive* (while `/scan`+`/odom_laser` were live) for it to re-discover. Worth hardening
+(fixed discovery / restart order / a persistent drive service). (3) `/scan` chain still needs the
+`ring_forward` re-mmap dance after a Q6A reboot.
+
+Files: `scripts/companion/q6a_drive.py` (new), `scripts/companion/drive_sense.sh` (new helper),
+`scripts/companion/q6a_objmap.py` (dynamic filter).
+
+---
+
 ## 2026-07-09 — Object announcer + cliff/stair fall protection (3-layer, validated)
 
 **Object announcer (`q6a_announce` / `q6a-announce.service`):** new node — watches `/vision/detections` and

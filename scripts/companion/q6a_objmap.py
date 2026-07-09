@@ -34,6 +34,10 @@ CAM_YAW = math.radians(float(os.environ.get('Q6A_CAM_YAW_DEG', '0')))    # camer
 BEAR_SIGN = float(os.environ.get('Q6A_CAM_BEAR_SIGN', '-1'))             # image +x(right) -> which bearing sign
 MERGE_DIST = float(os.environ.get('Q6A_OBJMAP_MERGE_M', '0.5'))          # merge same-class within this (m)
 MIN_CONF = float(os.environ.get('Q6A_OBJMAP_MIN_CONF', '0.4'))           # map only confident detections
+# dynamic/movable classes are NOT persistent scene furniture — never add them to the map (they'd smear
+# across the odom track as they/the robot move: e.g. a supervising human reads as hundreds of "person" hits).
+DYNAMIC = set(s.strip() for s in os.environ.get(
+    'Q6A_OBJMAP_DYNAMIC', 'person,cat,dog,bird').split(',') if s.strip())
 POSE_TOPIC = os.environ.get('Q6A_OBJMAP_POSE_TOPIC', '/pose')            # slam_toolbox map-frame pose ('' = off)
 
 
@@ -98,8 +102,8 @@ class ObjMap(Node):
         w = data.get('w', 672)
         xr, yr, yaw = self.pose
         for det in data.get('dets', []):
-            if det.get('conf', 0) < MIN_CONF:
-                continue
+            if det.get('conf', 0) < MIN_CONF or det.get('label') in DYNAMIC:
+                continue                                   # skip low-conf + dynamic (person/pets) detections
             x1, y1, x2, y2 = det['bbox']
             xc = (x1 + x2) / 2.0
             bearing = BEAR_SIGN * ((xc / w) - 0.5) * H_FOV + CAM_YAW    # base_link bearing to the object
