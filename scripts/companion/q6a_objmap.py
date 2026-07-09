@@ -40,6 +40,11 @@ MIN_N = int(os.environ.get('Q6A_OBJMAP_MIN_N', '3'))                     # publi
 # across the odom track as they/the robot move: e.g. a supervising human reads as hundreds of "person" hits).
 DYNAMIC = set(s.strip() for s in os.environ.get(
     'Q6A_OBJMAP_DYNAMIC', 'person,cat,dog,bird').split(',') if s.strip())
+# Class allowlist: only map plausible static room furniture/appliances. The model hallucinates classes
+# (cat, laptop, pizza...) that a confidence gate can't fully suppress; an allowlist is robust. Tune via env.
+ALLOW = set(s.strip().lower() for s in os.environ.get('Q6A_OBJMAP_ALLOW',
+    'chair,couch,bed,dining table,tv,refrigerator,oven,microwave,sink,toilet,'
+    'potted plant,bench,book,clock,vase,suitcase').split(',') if s.strip())
 POSE_TOPIC = os.environ.get('Q6A_OBJMAP_POSE_TOPIC', '/pose')            # slam_toolbox map-frame pose ('' = off)
 
 
@@ -112,8 +117,8 @@ class ObjMap(Node):
         w = data.get('w', 672)
         xr, yr, yaw = self.pose
         for det in data.get('dets', []):
-            if det.get('conf', 0) < MIN_CONF or det.get('label') in DYNAMIC:
-                continue                                   # skip low-conf + dynamic (person/pets) detections
+            if det.get('conf', 0) < MIN_CONF or det.get('label', '').lower() not in ALLOW:
+                continue                                   # skip low-conf + non-furniture (hallucination-prone)
             x1, y1, x2, y2 = det['bbox']
             xc = (x1 + x2) / 2.0
             bearing = BEAR_SIGN * ((xc / w) - 0.5) * H_FOV + CAM_YAW    # base_link bearing to the object

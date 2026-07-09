@@ -54,8 +54,14 @@ anything **>=0.5** for 3 frames. Clean gap between real (>=0.62) and phantom (~0
 - `q6a_announce` MIN_CONF 0.5 -> **0.6**, MIN_HITS 3 -> **5** (must be confident AND persist 5 frames).
 - `q6a_objmap` MIN_CONF 0.4 -> **0.55** + **persistence gate**: only publish objects seen **>=3x** (drops
   one-off false positives; bump 'obstacle' marks exempt). (task 11)
-Verified: "cat" still detected at 0.5 (model level) but now **below every consumer bar -> not announced, not
-mapped**; announce log clean. Real furniture unaffected. Further insurance if needed: a class allow/deny list.
+
+**Follow-up — confidence wasn't enough, added a CLASS ALLOWLIST.** The "cat" hallucination kept peaking >0.6
+for 5+ frames (announced again), and raising the bar further would cut real furniture (tv 0.62). So both
+`q6a_announce` and `q6a_objmap` now accept only plausible indoor classes (chair, couch, bed, dining table, tv,
+refrigerator, oven, microwave, sink, toilet, potted plant, bench, book, clock, vase, ...; announcer also
+person) via `Q6A_ANNOUNCE_ALLOW` / `Q6A_OBJMAP_ALLOW`. Hallucination-prone classes (cat, laptop, pizza, ...)
+are dropped regardless of confidence. Verified: YOLO still detects "cat" (~0.5-0.65) but it is no longer
+announced or mapped; real furniture unaffected.
 
 Files: `scripts/companion/q6a_vision.py`, `q6a_announce.py`, `q6a_objmap.py`.
 

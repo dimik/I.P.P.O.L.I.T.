@@ -21,9 +21,14 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 
-MIN_CONF = float(os.environ.get('Q6A_ANNOUNCE_MIN_CONF', '0.6'))   # real objects >=0.62; floor hallucinations
-#                                                                    (cat/laptop) sit ~0.44-0.55 -> cut here
+MIN_CONF = float(os.environ.get('Q6A_ANNOUNCE_MIN_CONF', '0.6'))   # real objects >=0.62
 MIN_HITS = int(os.environ.get('Q6A_ANNOUNCE_MIN_HITS', '5'))       # frames a label must persist before speaking
+# Class allowlist: the model hallucinates implausible classes on textured floor ("cat", "laptop") that peak
+# even >0.6, so a confidence gate can't fully kill them. This robot maps a room, so only speak/keep plausible
+# indoor furniture/appliances/people; everything else is ignored regardless of confidence. Tune via env.
+ALLOW = set(s.strip().lower() for s in os.environ.get('Q6A_ANNOUNCE_ALLOW',
+    'person,chair,couch,bed,dining table,tv,refrigerator,oven,microwave,sink,toilet,'
+    'potted plant,book,clock,vase,bench,suitcase').split(',') if s.strip())
 COOLDOWN = float(os.environ.get('Q6A_ANNOUNCE_COOLDOWN', '25'))    # per-label repeat suppression (s)
 MIN_GAP = float(os.environ.get('Q6A_ANNOUNCE_MIN_GAP', '3.0'))     # global spacing between utterances (s)
 PHRASE = os.environ.get('Q6A_ANNOUNCE_PHRASE', 'I see a {label}')  # {label} substituted
@@ -48,7 +53,8 @@ class Announcer(Node):
             dets = json.loads(msg.data).get('dets', [])
         except Exception:
             return
-        seen = {d['label'] for d in dets if d.get('conf', 0) >= MIN_CONF and d.get('label')}
+        seen = {d['label'] for d in dets
+                if d.get('conf', 0) >= MIN_CONF and d.get('label') and d['label'].lower() in ALLOW}
         # persistence: bump seen labels, decay the rest
         for lab in list(self.hits) + list(seen):
             if lab in seen:
