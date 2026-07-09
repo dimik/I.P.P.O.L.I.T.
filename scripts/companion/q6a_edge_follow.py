@@ -63,10 +63,10 @@ NEAR_BAND = float(os.environ.get('Q6A_EF_NEAR_BAND', '0.15'))    # keep side poi
 #                                                                  background seen through its gaps)
 MIN_INLIERS = int(os.environ.get('Q6A_EF_MIN_INLIERS', '12'))    # side points needed to trust the line
 MAX_FIT_STD = float(os.environ.get('Q6A_EF_MAX_FIT_STD', '0.10'))  # m; reject a bad (non-linear) fit
-KP_DIST = float(os.environ.get('Q6A_EF_KP_DIST', '120'))         # deg per m of distance error
-KD_HEAD = float(os.environ.get('Q6A_EF_KD_HEAD', '0.45'))        # deg per deg of heading error
-MAX_ANGLE = float(os.environ.get('Q6A_EF_MAX_ANGLE', '35'))      # clamp heading command (deg)
-STEER_SIGN = float(os.environ.get('Q6A_EF_STEER_SIGN', '1'))     # flip if it steers the WRONG way
+KP_DIST = float(os.environ.get('Q6A_EF_KP_DIST', '55'))         # deg per m of distance error
+KD_HEAD = float(os.environ.get('Q6A_EF_KD_HEAD', '0.30'))        # deg per deg of heading error
+MAX_ANGLE = float(os.environ.get('Q6A_EF_MAX_ANGLE', '14'))      # clamp heading command (deg)
+STEER_SIGN = float(os.environ.get('Q6A_EF_STEER_SIGN', '-1'))     # flip if it steers the WRONG way
 REACQUIRE_ANGLE = float(os.environ.get('Q6A_EF_REACQUIRE_ANGLE', '25'))  # curve toward side when wall lost
 HZ = 6.6
 
