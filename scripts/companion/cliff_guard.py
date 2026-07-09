@@ -46,6 +46,8 @@ LIDAR_FAR_M = float(os.environ.get('Q6A_CLIFF_LIDAR_FAR_M', '3.5'))
 LIDAR_HALF_DEG = float(os.environ.get('Q6A_CLIFF_LIDAR_HALF_DEG', '20'))
 LIDAR_STALE_S = 2.0
 SPEAK_GAP = float(os.environ.get('Q6A_CLIFF_SPEAK_GAP', '8.0'))      # min seconds between spoken edge warnings
+OUCH_COOLDOWN = float(os.environ.get('Q6A_OUCH_COOLDOWN', '3.0'))    # one "Ouch!" per bump episode — the
+#   bumper flickers / re-contacts during back-off+turn recovery, so a bare rising edge over-announces
 
 
 class CliffGuard(Node):
@@ -62,6 +64,7 @@ class CliffGuard(Node):
         self.bumped = False
         self.wheel_tripped = False
         self.ahead = False
+        self.ouch_t = 0.0
         self.n_hit = self.n_clear = 0
         self.lidar_far = False
         self.lidar_at = 0.0
@@ -87,8 +90,11 @@ class CliffGuard(Node):
         # per distinct hit (clears when the bumper releases). Recovery/back-off is q6a_drive's job.
         if m.data and not self.bumped:
             self.bumped = True
-            self.pub_speak.publish(String(data='Ouch!'))
-            self.get_logger().info('BUMP -> Ouch!')
+            now = time.monotonic()
+            if now - self.ouch_t >= OUCH_COOLDOWN:   # collapse a flickering bump episode into one "Ouch!"
+                self.ouch_t = now
+                self.pub_speak.publish(String(data='Ouch!'))
+                self.get_logger().info('BUMP -> Ouch!')
         elif not m.data:
             self.bumped = False
 
