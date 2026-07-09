@@ -54,8 +54,11 @@ class CliffGuard(Node):
                              durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
         self.pub_ahead = self.create_publisher(Bool, '/cliff/ahead', latched)   # drop in the forward path
         self.create_subscription(Bool, '/cliff', self.on_cliff, latched)
+        self.create_subscription(Bool, '/bumper', self.on_bumper, latched)
         self.create_subscription(String, '/vision/floor', self.on_floor, 10)
         self.create_subscription(LaserScan, '/scan', self.on_scan, qos_profile_sensor_data)
+        self.bumped = False
+        self.last_bump = 0.0
         self.wheel_tripped = False
         self.ahead = False
         self.n_hit = self.n_clear = 0
@@ -77,6 +80,19 @@ class CliffGuard(Node):
         elif not m.data and self.wheel_tripped:
             self.wheel_tripped = False
             self.get_logger().warn('wheel-drop cleared')
+
+    def on_bumper(self, m):
+        # audible confirmation the bumper fired (front collision). Recovery/back-off is the drive
+        # controller's job (q6a_drive); here we just say "Ouch!" on each fresh hit (throttled).
+        if m.data and not self.bumped:
+            self.bumped = True
+            now = time.monotonic()
+            if now - self.last_bump > 1.5:
+                self.last_bump = now
+                self.pub_speak.publish(String(data='Ouch!'))
+                self.get_logger().info('BUMP -> Ouch!')
+        elif not m.data:
+            self.bumped = False
 
     def on_scan(self, m):
         half = math.radians(LIDAR_HALF_DEG)

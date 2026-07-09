@@ -99,6 +99,14 @@ class McuNode(Node):
         self.pub_cliff = self.create_publisher(Bool, '/cliff', latched)
         self.pub_cliff_raw = self.create_publisher(UInt8, '/cliff/raw', latched)
         self.cliff_state = None
+        # MCU Triggers byte[0] = bump/contact bits (front bumper microswitches + wheel-drop). Calibrated
+        # 2026-07-09: 0x00 on clear floor (armed) vs non-zero (0xc0/0xd0/0x30..) on contact. Conservative
+        # rule byte != 0 -> bump, so the drive controller can back off + turn on collision.
+        self.declare_parameter('bump_byte', 0)
+        self.bump_idx = int(self.get_parameter('bump_byte').value)
+        self.pub_bump = self.create_publisher(Bool, '/bumper', latched)
+        self.pub_bump_raw = self.create_publisher(UInt8, '/bumper/raw', latched)
+        self.bump_state = None
 
         # source: '' = local tmpfs ring (on-robot); 'host:port' = raw bytes over TCP from ring_forward.py on
         # the robot (lets this node run on the COMPANION with ROS off the robot). Decode/publish is identical.
@@ -229,14 +237,21 @@ class McuNode(Node):
 
     def dispatch(self, mtype, payload):
         now = self.get_clock().now().to_msg()
-        if mtype == 0x00 and len(payload) > self.cliff_idx:   # Triggers — cliff/bump/dock (SAFETY)
-            raw = payload[self.cliff_idx]
-            cliff = raw != 0
-            self.pub_cliff_raw.publish(UInt8(data=raw))
+        if mtype == 0x00 and len(payload) > max(self.cliff_idx, self.bump_idx):  # Triggers — cliff/bump/dock
+            craw = payload[self.cliff_idx]
+            cliff = craw != 0
+            self.pub_cliff_raw.publish(UInt8(data=craw))
             self.pub_cliff.publish(Bool(data=cliff))
             if cliff != self.cliff_state:                     # log only on edge
                 self.cliff_state = cliff
-                self.get_logger().warn(f'CLIFF {"DETECTED" if cliff else "clear"} (Triggers byte=0x{raw:02x})')
+                self.get_logger().warn(f'CLIFF {"DETECTED" if cliff else "clear"} (Triggers byte=0x{craw:02x})')
+            braw = payload[self.bump_idx]
+            bump = braw != 0
+            self.pub_bump_raw.publish(UInt8(data=braw))
+            self.pub_bump.publish(Bool(data=bump))
+            if bump != self.bump_state:
+                self.bump_state = bump
+                self.get_logger().warn(f'BUMP {"HIT" if bump else "clear"} (Triggers byte=0x{braw:02x})')
             return
         if mtype == 0x02 and len(payload) == 18:          # Status10ms — IMU
             ts, gx, gy, gz, ax, ay, az, _ld, _rd = struct.unpack('<Ihhhhhhbb', payload)

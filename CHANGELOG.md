@@ -44,6 +44,30 @@ the Q6A's `robot-usb`/`robot-wifi` aliases, whose key works).
 
 ---
 
+## 2026-07-09 — Bumper handling: "Ouch!" + back-off/turn recovery
+
+The robot kept pushing helplessly into a thin table leg (LiDAR-invisible: below/around the scan plane).
+Added physical-bumper handling end-to-end, calibrated live against the actual leg.
+
+- **`mcu_node` bumper decode:** MCU Triggers frame byte[0] = bump/contact bits. Calibrated 2026-07-09:
+  0x00 clear vs **0x10 = front bumper** pressed (0xc0/0xd0 under hard push + wheel-drop). Publishes latched
+  `/bumper` (Bool) + `/bumper/raw` (UInt8); logs `BUMP HIT`/`clear` on the edge. Sampled only while active
+  (manual control armed), same as the cliff byte.
+- **`cliff_guard` says "Ouch!":** on `/bumper` rising edge -> `/robot/speak` "Ouch!" (throttled 1.5 s) so a
+  bump is audibly confirmed. Verified: 3 hits -> 3 "Ouch!"s.
+- **`q6a_drive` bump recovery:** forward | reverse | turn state machine. Front bumper -> reverse 0.8 s +
+  turn-arc 1.3 s (55deg) -> resume forward. LiDAR obstacle (< 0.4 m) -> turn away (keep exploring). Drop-ahead
+  (MiDaS) + wheel-drop (/cliff) still HARD-stop. Reverse is kept short (rear has no drop sensing).
+  Verified live: drove into the leg -> Ouch -> back off + turn -> continued, repeatably.
+
+Possible refinement: a single 55deg turn can re-approach the leg in a tight corner (it recovered each time,
+never stuck) — turn-until-front-clear or alternating turn direction would clear faster.
+
+Files: `scripts/robot/mcu_node.py` (bumper decode), `scripts/companion/cliff_guard.py` (Ouch),
+`scripts/companion/q6a_drive.py` (recovery state machine).
+
+---
+
 ## 2026-07-09 — Pipeline robustness: self-healing ring_forward + clean-restart DDS
 
 Attacked the three fragilities from the mapping session. Two fixed, one narrowed.

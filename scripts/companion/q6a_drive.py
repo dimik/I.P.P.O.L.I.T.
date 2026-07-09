@@ -35,6 +35,12 @@ STOP_CENTER = float(os.environ.get('Q6A_DRIVE_STOP_CENTER', '0.42'))   # MiDaS c
 MIN_FRONT = float(os.environ.get('Q6A_DRIVE_MIN_FRONT', '0.40'))       # m, LiDAR forward obstacle
 FWD_HALF_DEG = 25.0
 HZ = 6.6
+# bump recovery (front bumper hit the LiDAR-invisible obstacle, e.g. a thin table leg): back off + turn away
+REVERSE_S = float(os.environ.get('Q6A_DRIVE_REVERSE_S', '0.8'))
+TURN_S = float(os.environ.get('Q6A_DRIVE_TURN_S', '1.3'))
+REV_VEL = float(os.environ.get('Q6A_DRIVE_REV_VEL', '0.15'))
+TURN_VEL = float(os.environ.get('Q6A_DRIVE_TURN_VEL', '0.15'))
+TURN_ANGLE = float(os.environ.get('Q6A_DRIVE_TURN_ANGLE', '55'))   # arc while turning to change heading
 
 
 def put(body):
@@ -50,6 +56,9 @@ class Driver(Node):
         self.scan = None; self.scan_t = 0.0
         self.center = None; self.center_t = 0.0
         self.cliff = False
+        self.bump = False
+        self.mode = 'forward'          # forward | reverse | turn (bump recovery)
+        self.mode_until = 0.0
         self.t0 = None
         self.warm0 = None
         self.create_subscription(LaserScan, '/scan', self.on_scan, qos_profile_sensor_data)
@@ -57,6 +66,7 @@ class Driver(Node):
         latched = QoSProfile(depth=1, reliability=QoSReliabilityPolicy.RELIABLE,
                              durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(Bool, '/cliff', self.on_cliff, latched)
+        self.create_subscription(Bool, '/bumper', self.on_bump, latched)
         self.create_timer(1.0 / HZ, self.tick)
         self.get_logger().info(f'q6a_drive: forward {vel} m-ish for {secs}s '
                                f'(stop: center>={STOP_CENTER}, front<{MIN_FRONT}m, /cliff, stale)')
@@ -70,6 +80,8 @@ class Driver(Node):
             pass
 
     def on_cliff(self, m): self.cliff = bool(m.data)
+
+    def on_bump(self, m): self.bump = bool(m.data)
 
     def front_clear(self):
         m = self.scan
@@ -108,21 +120,46 @@ class Driver(Node):
             elif now - self.warm0 > 8.0:
                 self.stop('no sensor data after arming (turret/scan chain down)')
             return
+        # --- hard safety, every mode ---
         if now - self.t0 > self.secs:
             self.stop(f'burst done ({self.secs}s)')
         if self.cliff:
             self.stop('WHEEL-DROP')
-        if self.scan is None or now - self.scan_t > 1.0:
+        if not have_scan:
             self.stop('no fresh /scan (refuse to drive blind)')
-        if self.center is None or now - self.center_t > 1.5:
+
+        # --- bump recovery: reverse phase (rear has no drop sensing -> kept short; /cliff still guards) ---
+        if self.mode == 'reverse':
+            if now < self.mode_until:
+                self._move(REV_VEL, 180.0); return       # back off the obstacle
+            self.mode = 'turn'; self.mode_until = now + TURN_S
+
+        # --- forward-facing safety (applies to forward + turn, both move forward-ish; NOT reverse) ---
+        if not have_floor:
             self.stop('no fresh /vision/floor (refuse to drive blind)')
         if self.center >= STOP_CENTER:
             self.stop(f'DROP AHEAD (center={self.center:.2f})')
+
+        # --- bump recovery: turn phase (arc away to change heading) ---
+        if self.mode == 'turn':
+            if now < self.mode_until:
+                self._move(TURN_VEL, TURN_ANGLE); return
+            self.mode = 'forward'
+            self.get_logger().info('recovery done — resuming forward')
+
+        # --- forward mode ---
+        if self.bump:                                    # front bumper (LiDAR-invisible obstacle) -> recover
+            self.get_logger().warn('BUMP — backing off + turning')
+            self.mode = 'reverse'; self.mode_until = now + REVERSE_S; return
         fc = self.front_clear()
-        if fc is not None and fc < MIN_FRONT:
-            self.stop(f'obstacle ahead ({fc:.2f} m)')
+        if fc is not None and fc < MIN_FRONT:            # LiDAR obstacle (wall) -> turn away, keep exploring
+            self.get_logger().info(f'obstacle {fc:.2f} m — turning away')
+            self.mode = 'turn'; self.mode_until = now + TURN_S; return
+        self._move(self.vel, self.angle)
+
+    def _move(self, vel, angle):
         try:
-            put({'action': 'move', 'vector': {'velocity': self.vel, 'angle': self.angle}})
+            put({'action': 'move', 'vector': {'velocity': vel, 'angle': angle}})
         except Exception as e:
             self.get_logger().warn(f'move: {e}')
 
