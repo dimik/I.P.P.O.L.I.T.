@@ -58,8 +58,11 @@ BODY_R = float(os.environ.get('Q6A_BODY_R', '0.175'))            # D10s Pro radi
 SIDE_HALF = math.radians(float(os.environ.get('Q6A_EF_SIDE_HALF_DEG', '40')))  # follow sector half-width
 FRONT_HALF = math.radians(float(os.environ.get('Q6A_EF_FRONT_HALF_DEG', '22')))
 FRONT_STOP = float(os.environ.get('Q6A_EF_FRONT_STOP', '0.35'))  # m; front closer than this = concave corner
+NEAR_BAND = float(os.environ.get('Q6A_EF_NEAR_BAND', '0.15'))    # keep side points within this of the near
+#                                                                  edge (isolates a porous railing from the
+#                                                                  background seen through its gaps)
 MIN_INLIERS = int(os.environ.get('Q6A_EF_MIN_INLIERS', '12'))    # side points needed to trust the line
-MAX_FIT_STD = float(os.environ.get('Q6A_EF_MAX_FIT_STD', '0.06'))  # m; reject a bad (non-linear) fit
+MAX_FIT_STD = float(os.environ.get('Q6A_EF_MAX_FIT_STD', '0.10'))  # m; reject a bad (non-linear) fit
 KP_DIST = float(os.environ.get('Q6A_EF_KP_DIST', '120'))         # deg per m of distance error
 KD_HEAD = float(os.environ.get('Q6A_EF_KD_HEAD', '0.45'))        # deg per deg of heading error
 MAX_ANGLE = float(os.environ.get('Q6A_EF_MAX_ANGLE', '35'))      # clamp heading command (deg)
@@ -98,11 +101,11 @@ class EdgeFollow(Node):
     def on_scan(self, m):
         self.scan = m; self.scan_t = time.monotonic()
 
-    # ---- estimator: PCA line fit over the follow-side sector ----
+    # ---- estimator: near-cluster isolation + PCA line fit over the follow-side sector ----
     def estimate(self):
         m = self.scan
         n = len(m.ranges)
-        pts = []
+        xy = []; rs = []
         # collect finite points within +/-SIDE_HALF of the side-center bearing
         span = int(round(math.degrees(SIDE_HALF)))
         c = int(round((self.phi0 - m.angle_min) / m.angle_increment))
@@ -111,11 +114,20 @@ class EdgeFollow(Node):
             r = m.ranges[i]
             if math.isfinite(r) and m.range_min <= r <= m.range_max:
                 b = m.angle_min + i * m.angle_increment
-                pts.append((r * math.cos(b), r * math.sin(b)))
-        self.diag = (len(pts), float('nan'), float('nan'), float('nan'))
-        if len(pts) < MIN_INLIERS:
+                xy.append((r * math.cos(b), r * math.sin(b))); rs.append(r)
+        self.diag = (len(xy), float('nan'), float('nan'), float('nan'))
+        if len(xy) < MIN_INLIERS:
             return None
-        P = np.asarray(pts)
+        P = np.asarray(xy); R = np.asarray(rs)
+        # A railing is POROUS: the sector mixes near railing points with far background seen through the
+        # gaps. Keep only the near cluster (an adaptive band above the closest edge) so the fit sees the
+        # railing, not the background — cheaper than RANSAC and adapts to the current gap.
+        near = float(np.percentile(R, 15))
+        keep = R <= near + NEAR_BAND
+        P = P[keep]
+        if len(P) < MIN_INLIERS:
+            self.diag = (int(len(P)), float('nan'), float('nan'), float('nan'))
+            return None
         ctr = P.mean(axis=0)
         Q = P - ctr
         cov = Q.T @ Q / len(P)
@@ -126,10 +138,10 @@ class EdgeFollow(Node):
         psi = math.degrees(math.atan2(tangent[1], tangent[0]))
         if psi > 90:   psi -= 180                 # line direction is 180-ambiguous -> [-90,90]
         elif psi < -90: psi += 180
-        self.diag = (len(pts), std, dist, psi)    # logged in dry-run even if rejected below
+        self.diag = (len(P), std, dist, psi)      # logged in dry-run even if rejected below
         if std > MAX_FIT_STD:                      # points don't lie on a line (clutter, not a wall)
             return None
-        return dist, psi, len(pts)
+        return dist, psi, len(P)
 
     def front_min(self):
         m = self.scan; n = len(m.ranges)
