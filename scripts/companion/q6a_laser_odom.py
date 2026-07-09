@@ -112,6 +112,11 @@ class LaserOdom(Node):
         stf.sendTransform(st)
         self._stf = stf                  # keep alive
         self.create_subscription(LaserScan, '/scan', self.on_scan, qos_profile_sensor_data)
+        # Broadcast odom->base_link at a HIGH rate with the current clock (not just per-scan at the scan
+        # stamp). slam_toolbox's tf2 message-filter looks up the transform at each scan's timestamp; a
+        # 5 Hz scan-stamped TF races the scans and its filter queue fills ("dropping ... queue is full").
+        # A ~30 Hz always-fresh TF keeps the lookup satisfiable so slam actually processes scans.
+        self.create_timer(1.0 / 30.0, self.broadcast_tf)
         self.get_logger().info(
             f'q6a_laser_odom up: /scan -> ICP -> {ODOM_TOPIC} + {ODOM_FRAME}->{BASE_FRAME} TF '
             f'(needs the turret spinning, i.e. manual_control active)')
@@ -147,15 +152,17 @@ class LaserOdom(Node):
         self.prev = pts
         self.publish(msg.header.stamp)
 
-    def publish(self, stamp):
+    def broadcast_tf(self):
         t = TransformStamped()
-        t.header.stamp = stamp
+        t.header.stamp = self.get_clock().now().to_msg()   # current time -> always fresh for tf2 lookups
         t.header.frame_id = ODOM_FRAME
         t.child_frame_id = BASE_FRAME
         t.transform.translation.x = self.x
         t.transform.translation.y = self.y
         t.transform.rotation = yaw_to_quat(self.th)
         self.tfb.sendTransform(t)
+
+    def publish(self, stamp):
         o = Odometry()
         o.header.stamp = stamp
         o.header.frame_id = ODOM_FRAME
