@@ -44,6 +44,37 @@ the Q6A's `robot-usb`/`robot-wifi` aliases, whose key works).
 
 ---
 
+## 2026-07-11 — Root-cause investigation: why BatteryStatus never appears
+
+User asked to dig into WHY (not just confirm) BatteryStatus (0x2B) never appears. Ruled out "just rare" with
+a 90s raw capture (up from 15s) — zero frames, packet-type histogram scaled perfectly proportionally between
+the two runs (same 9 types throughout both), no new/rare packet ever showed up. That's a much stronger
+negative than the earlier 15s result.
+
+Investigated where AVA's battery numbers actually come from, since `avacmd battery`/`charge_state` clearly
+have live data (watched `battery` climb 35->39->40% live):
+- PMIC is an **AXP806** (`dmesg`: "AXP20x variant AXP806 found") — regulator/LDO-only, no fuel-gauge. This
+  is WHY the generic `axp803-battery-power-supply` kernel driver exists but has zero bound devices (wrong
+  chip variant for that driver).
+- No `/sys/class/power_supply/*` device, no IIO ADC device, no `bq24`/`bq27`/charger anywhere in dmesg —
+  no discoverable dedicated battery-management IC via any standard Linux framework. (One red herring ruled
+  out: a second i2c device sharing the same 0x36 address on a different bus turned out to be the OV8856
+  camera, unrelated.)
+- The SoC's own hardware GPADC (`5070000.gpadc`) IS initialized at boot, registered as an input device
+  (suggests shared use with the physical button panel via a resistor ladder) — plausible but UNCONFIRMED
+  additional use for direct battery-voltage sensing (resistor divider into an SoC ADC pin, no smart battery
+  IC — a common cost-reduction pattern). Would need to open the device or dump the devicetree to confirm;
+  out of scope for now.
+
+**Conclusion:** this is very likely not a decoding gap at all — the battery is probably measured by a
+different subsystem (SoC GPADC) entirely, not the ttyS4 MCU we tap for motors/sensors. `/mcu/battery` stays
+in `mcu_node.py` for forward-compat but shouldn't be expected to ever populate on this unit; `avacmd
+charge_state`/`battery` remain the real source (already what `valetudo_bridge.py` uses for `/battery`).
+
+Files: `docs/sensors.md` (full investigation writeup).
+
+---
+
 ## 2026-07-11 — Live battery investigation while charging: BatteryStatus confirmed ABSENT
 
 User asked to check everything battery-related while the robot was actively charging (35%). Ran a direct

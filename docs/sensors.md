@@ -255,12 +255,30 @@ MCU protocol is silently dropped anymore, including types we can't semantically 
 | `0x24` (undocumented upstream — "something connected with the battery temperature", 1 byte) | ~2 Hz | flag byte; **live-captured 2026-07-11 while charging: constant 0x00 (30 frames/15s)** — only the "OK" value observed, meaning of nonzero unconfirmed | `/mcu/battery_temp_flag` (Bool, best-effort — treat nonzero as a warning) |
 | everything else (~11 type bytes: 0x06, 0x0B, 0x0D, 0x11-0x13, 0x20, 0x21, 0x23, 0x25, 0x26, 0x28, and any length mismatch on a known type) | — | **undecoded even in the reference RE repo** — no known field layout. Live-captured while charging: `0x12` (7B) is a monotonic timestamp/counter (changes every frame), `0x23` (5B) and `0x26` (2B, ~50Hz) were constant the whole capture (`40 00 00 00 00` / `07 01`) — neither looks battery-related | `/mcu/unknown` (raw type + hex payload) — surfaced, not dropped |
 
-**BatteryStatus (0x2B) — CONFIRMED ABSENT on this hardware (2026-07-11).** Captured 15s of raw MCU traffic
-while the robot was actively charging (35%, `avacmd charge_state`="charging") — **zero 0x2B frames**, and no
-other packet type in the capture carries a plausible multi-byte voltage/current/SoC field. This is a
-definitive negative result, not "untested": the D10s Pro's MCU firmware does not emit this packet type (at
-least not during charging), so `/mcu/battery` will likely never publish here. `avacmd charge_state` +
-Valetudo's battery level poll remain the only real battery telemetry source on this hardware.
+**BatteryStatus (0x2B) — CONFIRMED ABSENT on this hardware (2026-07-11), root cause investigated.**
+Captured 90s of raw MCU traffic while the robot actively charged (35%->40%) — **zero 0x2B frames**, packet-
+type histogram scaled perfectly proportionally between a 15s and a 90s run (same 9 types throughout, nothing
+rare/new appearing) — rules out "just a slow periodic broadcast we missed," not just "untested."
+
+**Why, likely (investigated, not fully provable without opening the device / a devicetree dump):**
+- PMIC is an **AXP806** (`dmesg`: "AXP20x variant AXP806 found", i2c 6-0036) — regulator/LDO-only, no fuel-
+  gauge function. Explains why the generic `axp803-battery-power-supply` kernel driver exists but never
+  binds to anything (wrong PMIC variant for that driver).
+- No `/sys/class/power_supply/*` device, no IIO ADC device, nothing matching `bq24`/`bq27`/charger anywhere
+  in `dmesg` — no discoverable dedicated battery/charge-management chip via any standard Linux framework.
+- The SoC's own hardware GPADC (`5070000.gpadc`, `sunxi_gpadc0`) IS initialized at boot, registered as an
+  input device (suggests shared use with the physical button panel via a resistor ladder — a classic
+  Allwinner pattern) — **plausible but unconfirmed** additional use for direct battery-voltage sensing
+  (a resistor divider straight into an SoC ADC pin, no smart battery IC — a common cost-reduction design).
+- `avacmd get_prop battery` returns a genuinely live percentage (watched it climb 35->39->40% live) and
+  `charge_state` returns "charging" — AVA definitely has real telemetry from *somewhere*, just not from
+  the MCU-serial protocol we tap.
+
+**Conclusion: this likely isn't a decoding gap at all — the battery is probably measured by a completely
+different subsystem (SoC GPADC) than the motor/sensor MCU we tap on ttyS4.** `/mcu/battery` is kept in
+`mcu_node.py` in case a firmware update or different unit ever emits it, but don't expect it to populate.
+`avacmd charge_state`/`battery` (already used by `valetudo_bridge.py` for `/battery`) remain the sources
+of truth here.
 
 Same capture also cross-validated two bits: `Triggers`' `dock_sta` read `1` for all 150 frames (robot
 genuinely docked) and `Status100ms`'s `dust_container_missing` read `False` for all 150 frames (dustbin
