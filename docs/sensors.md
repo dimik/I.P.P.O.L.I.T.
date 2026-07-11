@@ -288,6 +288,44 @@ activity, and a "hold still at startup" bias calibration can't work; `mcu_node` 
 **adaptive bias** (updates only while it detects the robot still, publishes always). `mcu_node` params
 `gyro_scale`/`accel_scale`/`still_thresh_dps` allow re-tuning without a rebuild.
 
+### Triggers (0x00) — full bit map (found 2026-07-11, re-cloning `dreame_mcu_protocol`)
+
+The 2026-07-09 cliff work only inspected byte[0] ("bump") and byte[1] ("cliff") as single OR'd bytes, and
+concluded byte[1] was **wheel-drop** because holding the robot at a real edge (wheels grounded) read 0.
+Re-cloning `github.com/dimik/dreame_mcu_protocol` and reading its `Triggers` class (7-byte payload, exact
+match) shows this was **mislabeled** — byte[1] is genuinely the forward/rear **drop-view IR cliff sensors**,
+just never broken out per-position. Validated against our own captures + historical calibration values
+(all consistent, see CHANGELOG 2026-07-11):
+
+| Byte | Bits (LSB=0) | Field |
+|---|---|---|
+| 0 | 0-3 | `key1..4` (physical buttons, unused here) |
+| 0 | 4, 5 | `left_bumper`, `right_bumper` — matches old "0x10 = bumper" |
+| 0 | 6, 7 | `left_wheel_floating`, `right_wheel_floating` — explains old "0xc0/0xd0 under hard push": a hard shove can rock the chassis and briefly unweight the wheels, alongside the bumper hit |
+| 1 | 0-3 | `d_view_lf`, `d_view_lmf`, `d_view_rmf`, `d_view_rf` — **the real front cliff-IR sensors** (matches old "0x0f when fully lifted" = all four; "0x08" = one corner) |
+| 1 | 4, 5 | `d_view_lb`, `d_view_rb` — rear cliff-IR |
+| 1 | 6, 7 | `mag_signal_left/right` — boundary-strip sensor, unused (no magnetic strips on this unit) |
+| 2, 3 | — | `ir_dock_*` (3-bit signal code) + `ir_field_*` (bool) ×4 quadrants — dock-homing IR beacon channels; explains the rapid ambient flicker seen in raw captures, **unrelated to cliff** |
+| 4 | 32-39 | `dock_sta`, `lds_button1/2`, `side/roll/pump_error` |
+| 5, 6 | 40-55 | overcurrent + error bits (side/roll/fan/pump/wheels/lidar/vel/mag/imu/charge) |
+
+`scripts/robot/mcu_node.py`'s `decode_triggers()` implements this (pure bit math, no dependency), publishing
+`/cliff/front` (OR of the 4 front `d_view_*`), `/cliff/rear`, `/wheel_floating`, and the full nonzero-field
+dict as JSON on `/mcu/triggers` — additive; the original `/cliff` (byte[1]!=0) and `/bumper` (byte[0]!=0)
+keep their exact old semantics for the existing safety consumers (`cliff_guard.py`, `q6a_drive.py`).
+
+**Open/unverified:** whether the front `d_view_*` sensors actually trip while the robot is held stationary
+at a real edge (the 2026-07-09 test read 0 throughout — possibly because AVA only samples/transmits them
+while actively driving, or the hold geometry didn't put the sensor windows themselves over the void). Needs
+a live re-test with the robot **driving** toward a real edge, watching `/cliff/front` and the per-position
+bits in `/mcu/triggers`.
+
+**`edgeDis` (Status20ms, int16, mm) — decoded since day one but never published.** A CONTINUOUS reading
+(50 Hz, not event-gated like Triggers), now published as `/cliff/edge_dist` (m). Meaning/threshold is
+**untested** — could be a single dedicated distance-to-floor rangefinder (more useful for graded
+edge-following than the boolean `d_view_*` bits), or something else entirely. Calibrate against a known
+floor distance vs a real edge before trusting it.
+
 ---
 
 ## Battery / charging

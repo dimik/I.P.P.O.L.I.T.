@@ -22,6 +22,7 @@ Axis/sign alignment vs base_link is a v1 passthrough — verify in RViz and adju
 
 Run:  source /opt/ros/jazzy/setup.bash && python3 mcu_node.py
 """
+import json
 import math
 import mmap
 import socket
@@ -35,7 +36,45 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy
 from sensor_msgs.msg import Imu
 from nav_msgs.msg import Odometry
-from std_msgs.msg import Bool, UInt8
+from std_msgs.msg import Bool, UInt8, Float32, String
+
+# Full bit-level Triggers (type 0x00, 7 bytes) decode, ported from github.com/dimik/dreame_mcu_protocol
+# (Z10 Pro RE) and cross-checked against our own captures (2026-07-11) — byte0 bit4/5 = bumpers (matches
+# our calibrated 0x10=bumper), byte2/3 = ir_dock/ir_field (dock-homing IR beacon channels; explains the
+# rapid ambient flicker we saw there, unrelated to cliff). byte1 bits 0-5 = d_view_* "drop-view" sensors —
+# THIS is the real forward/rear cliff-IR, not wheel-drop as concluded on 2026-07-09; our existing
+# cliff_idx=1 check was already reading it, just as one undifferentiated OR'd byte.
+_TRIGGERS_BOOL_BITS = {
+    'key1': 0, 'key2': 1, 'key3': 2, 'key4': 3,
+    'left_bumper': 4, 'right_bumper': 5, 'left_wheel_floating': 6, 'right_wheel_floating': 7,
+    'd_view_lf': 8, 'd_view_lmf': 9, 'd_view_rmf': 10, 'd_view_rf': 11,
+    'd_view_lb': 12, 'd_view_rb': 13, 'mag_signal_left': 14, 'mag_signal_right': 15,
+    'ir_field_lf': 19, 'ir_field_lmf': 23, 'ir_field_rmf': 27, 'ir_field_rf': 31,
+    'dock_sta': 32, 'lds_button1': 33, 'lds_button2': 34,
+    'side_error': 37, 'roll_error': 38, 'pump_error': 39,
+    'side_overcurrent': 40, 'roll_overcurrent': 41, 'fan_overcurrent': 42, 'pump_overcurrent': 43,
+    'left_wheel_overcurrent': 44, 'right_wheel_overcurrent': 45,
+    'lidar_error': 48, 'fan_error': 49, 'left_vel_error': 50, 'right_vel_error': 51,
+    'left_mag_error': 52, 'right_mag_error': 53, 'imu_error': 54, 'charge_error': 55,
+}
+_TRIGGERS_INT3_FIELDS = {   # 3-bit dock-IR-beacon signal strength/channel codes (MSB-first)
+    'ir_dock_lf': 16, 'ir_dock_lmf': 20, 'ir_dock_rmf': 24, 'ir_dock_rf': 28,
+}
+DVIEW_FRONT = ('d_view_lf', 'd_view_lmf', 'd_view_rmf', 'd_view_rf')
+DVIEW_REAR = ('d_view_lb', 'd_view_rb')
+
+
+def decode_triggers(payload):
+    """7-byte Triggers payload -> dict of every named field (bit i = payload[i//8] bit (i%8), LSB-first)."""
+    def bit(i):
+        return (payload[i // 8] >> (i % 8)) & 1
+    d = {name: bit(i) for name, i in _TRIGGERS_BOOL_BITS.items()}
+    for name, lo in _TRIGGERS_INT3_FIELDS.items():
+        v = 0
+        for i in range(lo, lo + 3):
+            v = (v << 1) | bit(i)      # MSB-first within the field
+        d[name] = v
+    return d
 
 RING_PATH = '/tmp/mcu_ring.buf'
 HDR = 64
@@ -107,6 +146,19 @@ class McuNode(Node):
         self.pub_bump = self.create_publisher(Bool, '/bumper', latched)
         self.pub_bump_raw = self.create_publisher(UInt8, '/bumper/raw', latched)
         self.bump_state = None
+        # NEW 2026-07-11 (additive, does not change /cliff or /bumper semantics above): full bit-level
+        # decode of the same Triggers byte[1] we already OR into /cliff, broken out per physical sensor
+        # position (front d_view_lf/lmf/rmf/rf vs rear d_view_lb/rb), plus wheel_floating separated out
+        # from the bumper byte. See docs/sensors.md for the field map.
+        self.pub_cliff_front = self.create_publisher(Bool, '/cliff/front', latched)
+        self.pub_cliff_rear = self.create_publisher(Bool, '/cliff/rear', latched)
+        self.pub_wheel_floating = self.create_publisher(Bool, '/wheel_floating', latched)
+        self.pub_triggers_raw = self.create_publisher(String, '/mcu/triggers', latched)
+        self.front_state = self.rear_state = self.wf_state = None
+        # Status20ms `edgeDis` (mm) — a CONTINUOUS distance-ish reading, decoded since day one but never
+        # published (dead variable). Streamed every 20ms regardless of state change, unlike the
+        # event-driven Triggers bits above — meaning matters TBD (untested at a real edge yet).
+        self.pub_edge_dist = self.create_publisher(Float32, '/cliff/edge_dist', 10)
 
         # source: '' = local tmpfs ring (on-robot); 'host:port' = raw bytes over TCP from ring_forward.py on
         # the robot (lets this node run on the COMPANION with ROS off the robot). Decode/publish is identical.
@@ -252,6 +304,29 @@ class McuNode(Node):
             if bump != self.bump_state:
                 self.bump_state = bump
                 self.get_logger().warn(f'BUMP {"HIT" if bump else "clear"} (Triggers byte=0x{braw:02x})')
+            if len(payload) == 7:                    # full named-bit decode (additive, see module header)
+                d = decode_triggers(payload)
+                front = any(d[k] for k in DVIEW_FRONT)
+                rear = any(d[k] for k in DVIEW_REAR)
+                wf = bool(d['left_wheel_floating'] or d['right_wheel_floating'])
+                self.pub_cliff_front.publish(Bool(data=front))
+                self.pub_cliff_rear.publish(Bool(data=rear))
+                self.pub_wheel_floating.publish(Bool(data=wf))
+                nonzero = {k: v for k, v in d.items() if v}
+                self.pub_triggers_raw.publish(String(data=json.dumps(nonzero)))
+                if front != self.front_state:
+                    self.front_state = front
+                    self.get_logger().warn(f'CLIFF/FRONT {"DETECTED" if front else "clear"} '
+                                           f'(lf={d["d_view_lf"]} lmf={d["d_view_lmf"]} '
+                                           f'rmf={d["d_view_rmf"]} rf={d["d_view_rf"]})')
+                if rear != self.rear_state:
+                    self.rear_state = rear
+                    self.get_logger().warn(f'CLIFF/REAR {"DETECTED" if rear else "clear"} '
+                                           f'(lb={d["d_view_lb"]} rb={d["d_view_rb"]})')
+                if wf != self.wf_state:
+                    self.wf_state = wf
+                    self.get_logger().warn(f'WHEEL-FLOATING {"yes" if wf else "clear"} '
+                                           f'(l={d["left_wheel_floating"]} r={d["right_wheel_floating"]})')
             return
         if mtype == 0x02 and len(payload) == 18:          # Status10ms — IMU
             ts, gx, gy, gz, ax, ay, az, _ld, _rd = struct.unpack('<Ihhhhhhbb', payload)
@@ -293,6 +368,7 @@ class McuNode(Node):
             o.pose.pose.orientation.z = math.sin(th / 2.0)
             o.pose.pose.orientation.w = math.cos(th / 2.0)
             self.pub_odom.publish(o)
+            self.pub_edge_dist.publish(Float32(data=edge / 1000.0))    # edgeDis mm -> m; meaning TBD
 
 
 def main():

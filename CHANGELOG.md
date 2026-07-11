@@ -44,6 +44,40 @@ the Q6A's `robot-usb`/`robot-wifi` aliases, whose key works).
 
 ---
 
+## 2026-07-11 — Full MCU Triggers bit-map found: front-bottom IR cliff sensors ARE decodable
+
+User pointed out real IR sensors at the front bottom of the chassis and asked whether we have access.
+Re-cloned `github.com/dimik/dreame_mcu_protocol` (not kept locally per policy) and found its `Triggers`
+class — a complete 7-byte bit map that matches our own captured payload length exactly. This OVERTURNS the
+2026-07-09 "byte[1] is wheel-drop, not forward cliff-IR" conclusion: byte[1] genuinely IS the forward/rear
+drop-view IR cliff sensors (`d_view_lf/lmf/rmf/rf` front, `d_view_lb/rb` rear) — we just never broke the
+single OR'd byte into its 6 individual bits. Validated the decode against our own real captures AND every
+historical calibration value from that session (0x10->bumper, 0xc0->both wheels floating [explains the old
+"hard push" mystery — a shove can rock the chassis], 0x0f-> all 4 front sensors when fully lifted, 0x08->
+one corner) — all consistent, no surprises.
+
+Also found: `byte[2]/[3]` are `ir_dock_*`/`ir_field_*` — dock-homing IR beacon channels, explaining the
+rapid ambient flicker seen in raw captures (unrelated to cliff, just beacon/ambient IR noise). And
+`Status20ms`'s `edgeDis` (int16, mm) field has been DECODED but never PUBLISHED since day one (a dead local
+variable) — a continuous (50Hz, not event-gated) distance-ish reading, unlike the event-driven Triggers
+bits.
+
+**Implemented (additive, no change to existing safety semantics):** `scripts/robot/mcu_node.py` now has
+`decode_triggers()` (pure bit math, no bitstring dependency) publishing `/cliff/front` (OR of the 4 front
+d_view bits), `/cliff/rear`, `/wheel_floating` (separated from bumper), the full nonzero-field dict as JSON
+on `/mcu/triggers`, and `/cliff/edge_dist` (m) from the previously-unused edgeDis. The original `/cliff`
+(byte[1]!=0) and `/bumper` (byte[0]!=0) are UNCHANGED — `cliff_guard.py`/`q6a_drive.py` keep working exactly
+as before; this is pure additive visibility.
+
+**Open, needs a live re-test:** whether `/cliff/front` actually trips when the robot is stationary at a
+real edge (the 2026-07-09 static hold test read 0 throughout — possibly an AVA active-driving-only sampling
+gate, or the hold geometry not putting the sensor windows over the void) — vs while actively driving. Also
+`edgeDis`'s meaning/threshold is completely uncalibrated. Both pending robot battery charge + Q6A power-on.
+
+Files: `scripts/robot/mcu_node.py`, `docs/sensors.md` (full bit-map table).
+
+---
+
 ## 2026-07-11 — Odyssey has direct WiFi access to the robot (no Q6A hop needed)
 
 Discovered while diagnosing an unreachable Q6A: the Odyssey (this dev box) is ALSO on the home WiFi LAN
