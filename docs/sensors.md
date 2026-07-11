@@ -260,25 +260,30 @@ Captured 90s of raw MCU traffic while the robot actively charged (35%->40%) — 
 type histogram scaled perfectly proportionally between a 15s and a 90s run (same 9 types throughout, nothing
 rare/new appearing) — rules out "just a slow periodic broadcast we missed," not just "untested."
 
-**Why, likely (investigated, not fully provable without opening the device / a devicetree dump):**
+**Root cause, now DECISIVELY narrowed down (2026-07-11, follow-up investigation):**
 - PMIC is an **AXP806** (`dmesg`: "AXP20x variant AXP806 found", i2c 6-0036) — regulator/LDO-only, no fuel-
-  gauge function. Explains why the generic `axp803-battery-power-supply` kernel driver exists but never
-  binds to anything (wrong PMIC variant for that driver).
-- No `/sys/class/power_supply/*` device, no IIO ADC device, nothing matching `bq24`/`bq27`/charger anywhere
-  in `dmesg` — no discoverable dedicated battery/charge-management chip via any standard Linux framework.
-- The SoC's own hardware GPADC (`5070000.gpadc`, `sunxi_gpadc0`) IS initialized at boot, registered as an
-  input device (suggests shared use with the physical button panel via a resistor ladder — a classic
-  Allwinner pattern) — **plausible but unconfirmed** additional use for direct battery-voltage sensing
-  (a resistor divider straight into an SoC ADC pin, no smart battery IC — a common cost-reduction design).
-- `avacmd get_prop battery` returns a genuinely live percentage (watched it climb 35->39->40% live) and
-  `charge_state` returns "charging" — AVA definitely has real telemetry from *somewhere*, just not from
-  the MCU-serial protocol we tap.
+  gauge function. A dead end: explains why `axp803-battery-power-supply` never binds (wrong PMIC variant),
+  but this chip has nothing to do with the actual charge IC (see below).
+- **Found the real charge IC: `BQ24725` appears as a literal string in `/ava/bin/ava`** — matches the MCU
+  protocol's own `HwInfo.charge_type` enum (`NONE/BQ24725/PWM`) exactly, so it's genuinely the hardware.
+  BUT it has **no device-tree node at all** (`find /sys/firmware/devicetree/base -iname "*bq24*"` -> empty)
+  — nothing for a kernel driver to bind to, from either side.
+- **Decisive test: inspected AVA's actual open file descriptors** (`/proc/<ava-pid>/fd/`, not just a
+  syscall-trace snapshot window that could miss a boot-time-only open). Result: `/dev/null`, `/dev/video2`,
+  `/dev/ttyS4` (MCU), `/dev/ttyS3` (LiDAR), `/dev/media0` + v4l-subdevs (camera), `/dev/dri/renderD128`
+  (GPU). **Zero I2C fds. No GPADC/input fd either** — this also rules out the SoC-GPADC-direct-read theory
+  from the initial investigation (superseded).
 
-**Conclusion: this likely isn't a decoding gap at all — the battery is probably measured by a completely
-different subsystem (SoC GPADC) than the motor/sensor MCU we tap on ttyS4.** `/mcu/battery` is kept in
-`mcu_node.py` in case a firmware update or different unit ever emits it, but don't expect it to populate.
+**Conclusion: BQ24725 must be wired to the separate motor-control MCU (ttyS4), not the SoC — AVA has no
+direct hardware path to it at all.** So there is nothing to "install a proper driver" for: not for AXP806
+(wrong chip, no fuel-gauge silicon), not for BQ24725 (no devicetree node, and it's not even on a bus the
+SoC's kernel can reach). Whatever `avacmd battery`/`charge_state` report is necessarily relayed from the MCU
+over the same `3c..3e` serial protocol we already tap — `/mcu/battery`'s emptiness isn't a missing driver,
+it's an unsolved piece of that SAME protocol (either a request/response exchange we haven't caught passively,
+or the percentage is embedded in a field of a packet type we've mislabeled). Richer battery telemetry, if
+ever pursued, is more MCU-protocol RE (same class of work as the Triggers bit-map), not kernel/driver work.
 `avacmd charge_state`/`battery` (already used by `valetudo_bridge.py` for `/battery`) remain the sources
-of truth here.
+of truth.
 
 Same capture also cross-validated two bits: `Triggers`' `dock_sta` read `1` for all 150 frames (robot
 genuinely docked) and `Status100ms`'s `dust_container_missing` read `False` for all 150 frames (dustbin

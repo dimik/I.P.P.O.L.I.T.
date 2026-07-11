@@ -44,6 +44,35 @@ the Q6A's `robot-usb`/`robot-wifi` aliases, whose key works).
 
 ---
 
+## 2026-07-11 — Battery driver question resolved: no kernel driver applies, decisive elimination
+
+User asked whether we should install a "proper" battery-power-supply driver instead of the generic one that
+never binds. Investigated properly rather than assume, and the answer is a clean **no** — there is nothing
+to install a driver FOR:
+
+1. Found `BQ24725` (a real TI charge-controller chip) as a literal string in `/ava/bin/ava` — matches the
+   MCU protocol's `HwInfo.charge_type` enum exactly, so it's genuinely the hardware. But it has **zero
+   device-tree nodes** (`find .../devicetree/base -iname "*bq24*"` -> empty) — nothing for any kernel driver
+   to bind to.
+2. **Decisive test:** inspected AVA's actual open file descriptors directly (`/proc/<pid>/fd/`, not a
+   syscall-trace snapshot that could miss a boot-time-only open) — `/dev/null`, `/dev/video2`, `/dev/ttyS4`
+   (MCU), `/dev/ttyS3` (LiDAR), camera/GPU nodes. **Zero I2C fds, zero GPADC/input fd.** This rules out BOTH
+   remaining hypotheses from the earlier investigation: AVA does not talk to BQ24725 directly over I2C, and
+   it does not read the SoC's GPADC directly either (superseding that earlier guess).
+
+**Conclusion: BQ24725 must be wired to the separate motor-control MCU, not the SoC.** AVA's only relevant
+hardware fd is `/dev/ttyS4` — so whatever `avacmd battery`/`charge_state` report is necessarily relayed over
+the SAME `3c..3e` serial protocol we already tap. There's no missing/wrong Linux driver anywhere in this
+picture (not for AXP806 — wrong chip, no fuel-gauge silicon; not for BQ24725 — no devicetree node, not on
+a bus the SoC can reach). If richer battery telemetry is ever wanted, the real next step is more MCU-
+protocol reverse-engineering (same class of work as the Triggers bit-map: check for a request/response
+exchange we haven't caught passively, or re-examine currently-unknown packet types for a mislabeled
+battery field) — not kernel/driver work.
+
+Files: `docs/sensors.md` (corrected/superseded the GPADC hypothesis with this decisive finding).
+
+---
+
 ## 2026-07-11 — Root-cause investigation: why BatteryStatus never appears
 
 User asked to dig into WHY (not just confirm) BatteryStatus (0x2B) never appears. Ruled out "just rare" with
