@@ -44,6 +44,21 @@ the Q6A's `robot-usb`/`robot-wifi` aliases, whose key works).
 
 ---
 
+## 2026-07-11 — Odyssey has direct WiFi access to the robot (no Q6A hop needed)
+
+Discovered while diagnosing an unreachable Q6A: the Odyssey (this dev box) is ALSO on the home WiFi LAN
+(`wlo2` 192.168.1.150/24) and has direct `dreame-wifi` SSH + Valetudo REST access to the robot
+(192.168.1.213) — no need to route through the Q6A at all. Useful whenever the Q6A is down/rebooting/
+brownout-off but you still need robot state (battery, Valetudo attributes, avacmd).
+
+Also: confirmed the Q6A `q6a-brownout` service is doing its job — the Q6A went unreachable (wired link
+`enp2s0` on the Odyssey went DOWN, matching a dead link-partner) exactly when the robot's battery hit ~12%
+and auto-docked to charge. Not a fault; the brownout service power-off is designed to protect against a
+dirty cut as the 14.8V rail sags under charging handoff. Recovery: let the robot charge, then power the
+Q6A back on manually (no auto-poweron observed).
+
+---
+
 ## 2026-07-10 — Edge-following rewritten for LiDAR (line-fit PD), camera version scrapped
 
 User correction: a 360deg LiDAR is the right sensor for edge/wall following (as on their other camera-less
