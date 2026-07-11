@@ -44,6 +44,38 @@ the Q6A's `robot-usb`/`robot-wifi` aliases, whose key works).
 
 ---
 
+## 2026-07-11 — Full MCU protocol coverage: every known packet type now decoded + published
+
+Following the gap audit, closed every remaining gap so nothing from the MCU is silently dropped. Built and
+ran a full stub test harness (fake rclpy/Node/publishers) to exercise `dispatch()` against every packet
+type + two catch-all cases (a totally unknown type, and a known type at the wrong length) before deploying
+anywhere near hardware — all 15 cases passed cleanly, 25 publishers constructed as expected.
+
+**Added:**
+- `Status20ms` roller/side-brush current (previously decoded then discarded) -> `/mcu/status20` (JSON)
+- `Status10ms` leftDis/rightDis 100Hz wheel-distance deltas (previously discarded) -> `/mcu/status10` (JSON)
+- `/mcu/triggers` now publishes the FULL field dict every time (was nonzero-only before — a field going
+  false used to just vanish from the JSON instead of showing `false`)
+- `/mcu/error` — aggregate of all 17 error/overcurrent bits in Triggers, edge-logged like /cliff and /bumper
+- `HwInfo` (0x29) -> `/mcu/hwinfo` (mcu/imu/charge/app type IDs, latched)
+- `McuFwVersionInfo` (0x07) -> `/mcu/fw_version` (git hash + version, latched)
+- `PingMsg` (0x0F) -> `/mcu/ping`, `Status500ms` (0x05) -> `/mcu/status500` (RTC unix timestamp)
+- `ShutdownMsg` (0x10) -> `/mcu/shutdown_event` (occurrence = the signal; sent amid a poweroff sequence)
+- `McuLog` (0x27) -> `/mcu/log_raw` (raw hex, format itself is undocumented even upstream)
+- `FactoryTest` (0x04) -> `/mcu/factory_test`
+- **Catch-all**: any unrecognized type, or a known type at an unexpected length, now publishes to
+  `/mcu/unknown` (raw type + hex payload) and logs once per distinct (type, length) — previously these were
+  silently dropped with no visibility at all. ~12 type bytes remain genuinely undecoded (no known field
+  layout even in the upstream RE repo) but are no longer invisible.
+
+Purely additive throughout — no existing publisher's semantics changed, so `cliff_guard.py`/`q6a_drive.py`/
+`q6a_objmap.py` are unaffected. Architectural note added to docs: this is a read-only MCU tap; we never
+craft outbound frames ourselves (driving goes through Valetudo -> AVA), so there's no outbound-side gap.
+
+Files: `scripts/robot/mcu_node.py`, `docs/sensors.md` (full packet table with ROS-exposure column).
+
+---
+
 ## 2026-07-11 — MCU protocol gap audit: Status100ms + BatteryStatus were never decoded at all
 
 User asked whether we have gaps in what we decode/expose from the MCU protocol. Audit against

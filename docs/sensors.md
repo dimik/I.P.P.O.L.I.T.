@@ -234,13 +234,29 @@ Everything streams from the MCU → SoC on **`/dev/ttyS4`** (`3c..3e` framed, Mo
 `../CLAUDE.md` "MCU & LDS serial protocol"). Read it read-only with `strace` on AVA, decode with
 `github.com/dimik/dreame_mcu_protocol/mcu_packets.py`, or forward a copy from the `fanoff_shim`. Packet set:
 
+**2026-07-11: every known packet type is now decoded and published** (`mcu_node.py`) — nothing from the
+MCU protocol is silently dropped anymore, including types we can't semantically interpret (they land on
+`/mcu/unknown` as raw hex, logged once per distinct type+length so nothing goes unnoticed).
+
 | Packet (type) | Rate | Data | ROS exposure |
 |---|---|---|---|
-| `Status10ms` (0x02) | 100 Hz | 3-axis **gyro** (°/s), 3-axis **accel**, L/R wheel-distance delta | `/imu/data`; `leftDis`/`rightDis` decoded but discarded (dead) |
-| `Status20ms` (0x01) | 50 Hz | **odometry** x, y, yaw + L/R wheel velocity, `edgeDis`, roller/side-brush current | `/odom/wheel`, `/cliff/edge_dist`; roller/side current decoded but discarded (dead) |
-| `Status100ms` (0x03) | 10 Hz | **pitch / roll**, wheel current, dust/water/HEPA/carpet present bits | `/mcu/status100` (JSON) + `/dustbin_missing` (added 2026-07-11 — was NOT decoded at all before) |
-| `Triggers` (0x00) | event | bumpers, cliff/IR (front+rear, per-position), dock contact, per-motor over-current + error bits | `/cliff`, `/bumper`, `/cliff/front`, `/cliff/rear`, `/wheel_floating`, `/mcu/triggers` (full bit map added 2026-07-11) |
-| `BatteryStatus` (0x2B) | ? (rate/existence on THIS hardware unconfirmed) | native voltage(V)/current(mA, **unsigned** — no direction bit)/temperature(°C)/charge_voltage(V)/SoC(%) | `/mcu/battery` (JSON, added 2026-07-11) — untested whether this robot even emits it |
+| `Status10ms` (0x02) | 100 Hz | 3-axis **gyro** (°/s), 3-axis **accel**, L/R wheel-distance delta | `/imu/data`; `leftDis`/`rightDis` -> `/mcu/status10` (JSON) |
+| `Status20ms` (0x01) | 50 Hz | **odometry** x, y, yaw + L/R wheel velocity, `edgeDis`, roller/side-brush current | `/odom/wheel`, `/cliff/edge_dist`; roller/side current -> `/mcu/status20` (JSON) |
+| `Status100ms` (0x03) | 10 Hz | **pitch / roll**, wheel current, dust/water/HEPA/carpet present bits | `/mcu/status100` (JSON) + `/dustbin_missing` |
+| `Triggers` (0x00) | event | bumpers, cliff/IR (front+rear, per-position), dock contact, per-motor over-current + error bits | `/cliff`, `/bumper`, `/cliff/front`, `/cliff/rear`, `/wheel_floating`, `/mcu/error` (any error/overcurrent bit), `/mcu/triggers` (full field dict, not just nonzero) |
+| `BatteryStatus` (0x2B) | ? (existence on THIS hardware unconfirmed) | native voltage(V)/current(mA, **unsigned** — no direction bit)/temperature(°C)/charge_voltage(V)/SoC(%) | `/mcu/battery` (JSON) — untested whether this robot even emits it |
+| `HwInfo` (0x29) | rare | mcu/imu/imu2/charge/app type IDs (static hardware identification) | `/mcu/hwinfo` (JSON, latched) |
+| `McuFwVersionInfo` (0x07) | rare | MCU firmware git hash + version string | `/mcu/fw_version` (JSON, latched) |
+| `PingMsg` (0x0F) | ? | MCU heartbeat/latency probe (we never reply Pong — read-only tap) | `/mcu/ping` (JSON) |
+| `Status500ms` (0x05) | 2 Hz | sequence counter + RTC unix timestamp | `/mcu/status500` (JSON) |
+| `ShutdownMsg` (0x10) | event | no data — occurrence itself signals a poweroff sequence in progress | `/mcu/shutdown_event` (latched, timestamp only) |
+| `McuLog` (0x27) | event | 12 raw bytes, format undocumented (AVA itself just saves it to `/data/log/mculog.bin`) | `/mcu/log_raw` (hex string) |
+| `FactoryTest` (0x04) | rare | `wifi_ssid_id` (only meaningful during factory testing) | `/mcu/factory_test` |
+| everything else (~12 type bytes: 0x06, 0x0B, 0x0D, 0x11-0x13, 0x20-0x26, 0x28, and any length mismatch on a known type) | — | **undecoded even in the reference RE repo** — no known field layout | `/mcu/unknown` (raw type + hex payload) — surfaced, not dropped |
+
+**Architectural note:** this is a read-only tap (we only decode what AVA already reads from the MCU); we
+never craft outbound MCU frames ourselves — driving commands go through Valetudo's REST API to AVA, which
+talks to the MCU on its own. So there's no equivalent "gap" on the outbound (`ToMcu_*`) side to close.
 
 Live-decoded `Status10ms` frame (robot stationary, sitting flat):
 ```

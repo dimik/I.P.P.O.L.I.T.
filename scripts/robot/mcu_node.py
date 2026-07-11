@@ -1,12 +1,24 @@
 #!/usr/bin/env python3
-"""mcu_node.py — publish the robot's MCU IMU + wheel odometry to ROS.
+"""mcu_node.py — publish EVERYTHING the MCU protocol provides to ROS.
 
 Reads the raw /dev/ttyS4 byte stream that libserialtap.so tees into the tmpfs shm ring
-(/tmp/mcu_ring.buf), decodes the MCU frames, and publishes:
-    /imu/data     sensor_msgs/Imu       (Status10ms type 0x02 — BMI055 gyro + accel)
-    /odom/wheel   nav_msgs/Odometry     (Status20ms type 0x01 — raw wheel dead-reckoning)
+(/tmp/mcu_ring.buf), decodes every known MCU frame type, and publishes:
+    /imu/data          sensor_msgs/Imu   (Status10ms 0x02 — BMI055 gyro+accel)
+    /odom/wheel        nav_msgs/Odometry (Status20ms 0x01 — wheel dead-reckoning)
+    /cliff /bumper /cliff/front /cliff/rear /wheel_floating /mcu/triggers /mcu/error  (Triggers 0x00)
+    /cliff/edge_dist /mcu/status20     (Status20ms extras: edgeDis, roller/side-brush current)
+    /mcu/status10                      (Status10ms extra: leftDis/rightDis wheel-distance deltas)
+    /mcu/status100 /dustbin_missing    (Status100ms 0x03 — pitch/roll, wheel current, dust/water/hepa/carpet)
+    /mcu/battery                       (BatteryStatus 0x2B — existence on THIS hardware unconfirmed)
+    /mcu/hwinfo /mcu/fw_version        (HwInfo 0x29, McuFwVersionInfo 0x07 — static, rare, latched)
+    /mcu/ping /mcu/status500           (PingMsg 0x0F, Status500ms 0x05 — heartbeats)
+    /mcu/shutdown_event /mcu/factory_test /mcu/log_raw   (0x10, 0x04, 0x27 — rare/diagnostic)
+    /mcu/unknown                       (catch-all: any type/length we don't recognize — nothing silently
+                                         dropped, even if we can't interpret it. ~12 type bytes are
+                                         undecoded even in the reference RE repo; they land here as raw hex.)
+See docs/sensors.md for the full packet table + field map (Triggers bit-level in particular).
 
-Pipeline:  AVA read(ttyS4) --[libserialtap.so]--> /tmp/mcu_ring.buf --[this node]--> /imu/data,/odom/wheel
+Pipeline:  AVA read(ttyS4) --[libserialtap.so]--> /tmp/mcu_ring.buf --[this node]--> the topics above
 
 Frame:  3c | len(1) | type(1) | payload(len) | crc16(2, big-endian) | 3e
         CRC = Modbus-16 over [len,type,payload] (the MCU emits occasional corrupt frames — drop on
@@ -62,6 +74,10 @@ _TRIGGERS_INT3_FIELDS = {   # 3-bit dock-IR-beacon signal strength/channel codes
 }
 DVIEW_FRONT = ('d_view_lf', 'd_view_lmf', 'd_view_rmf', 'd_view_rf')
 DVIEW_REAR = ('d_view_lb', 'd_view_rb')
+ERROR_BITS = ('side_error', 'roll_error', 'pump_error', 'side_overcurrent', 'roll_overcurrent',
+             'fan_overcurrent', 'pump_overcurrent', 'left_wheel_overcurrent', 'right_wheel_overcurrent',
+             'lidar_error', 'fan_error', 'left_vel_error', 'right_vel_error',
+             'left_mag_error', 'right_mag_error', 'imu_error', 'charge_error')
 
 
 def decode_triggers(payload):
@@ -169,6 +185,22 @@ class McuNode(Node):
         # much faster/richer source than the current 15s avacmd charge_state poll. Existence/rate on THIS
         # hardware is UNCONFIRMED (need a live capture) — publish if/when one actually arrives.
         self.pub_battery_raw = self.create_publisher(String, '/mcu/battery', 10)
+        # NEW 2026-07-11 (2nd pass, "expose everything"): the rest of the known TYPES_FROM_MCU map, plus
+        # the previously-dead Status20/Status10 extra fields, plus a full (not nonzero-only) Triggers
+        # dict + an error/overcurrent aggregate, plus a catch-all for anything we don't recognize.
+        self.pub_mcu_error = self.create_publisher(Bool, '/mcu/error', latched)
+        self.error_state = None
+        self.pub_status20_extra = self.create_publisher(String, '/mcu/status20', 10)   # roller/side current
+        self.pub_status10_extra = self.create_publisher(String, '/mcu/status10', 10)   # left/rightDis (mm)
+        self.pub_hwinfo = self.create_publisher(String, '/mcu/hwinfo', latched)        # mcu/imu/charge ids
+        self.pub_fw_version = self.create_publisher(String, '/mcu/fw_version', latched)  # git hash + ver
+        self.pub_ping = self.create_publisher(String, '/mcu/ping', 10)                 # MCU heartbeat probe
+        self.pub_shutdown_event = self.create_publisher(String, '/mcu/shutdown_event', latched)
+        self.pub_log_raw = self.create_publisher(String, '/mcu/log_raw', 10)           # format undocumented
+        self.pub_status500 = self.create_publisher(String, '/mcu/status500', 10)       # RTC heartbeat
+        self.pub_factory_test = self.create_publisher(UInt8, '/mcu/factory_test', latched)
+        self.pub_unknown = self.create_publisher(String, '/mcu/unknown', 10)           # nothing dropped silently
+        self._unknown_seen = set()   # log each distinct (type, len) once, not every frame
 
         # source: '' = local tmpfs ring (on-robot); 'host:port' = raw bytes over TCP from ring_forward.py on
         # the robot (lets this node run on the COMPANION with ROS off the robot). Decode/publish is identical.
@@ -319,11 +351,16 @@ class McuNode(Node):
                 front = any(d[k] for k in DVIEW_FRONT)
                 rear = any(d[k] for k in DVIEW_REAR)
                 wf = bool(d['left_wheel_floating'] or d['right_wheel_floating'])
+                err = any(d[k] for k in ERROR_BITS)
                 self.pub_cliff_front.publish(Bool(data=front))
                 self.pub_cliff_rear.publish(Bool(data=rear))
                 self.pub_wheel_floating.publish(Bool(data=wf))
-                nonzero = {k: v for k, v in d.items() if v}
-                self.pub_triggers_raw.publish(String(data=json.dumps(nonzero)))
+                self.pub_mcu_error.publish(Bool(data=err))
+                self.pub_triggers_raw.publish(String(data=json.dumps(d)))   # FULL state, not just nonzero
+                if err != self.error_state:
+                    self.error_state = err
+                    active = [k for k in ERROR_BITS if d[k]]
+                    self.get_logger().warn(f'MCU/ERROR {"SET" if err else "clear"} ({", ".join(active)})')
                 if front != self.front_state:
                     self.front_state = front
                     self.get_logger().warn(f'CLIFF/FRONT {"DETECTED" if front else "clear"} '
@@ -339,7 +376,9 @@ class McuNode(Node):
                                            f'(l={d["left_wheel_floating"]} r={d["right_wheel_floating"]})')
             return
         if mtype == 0x02 and len(payload) == 18:          # Status10ms — IMU
-            ts, gx, gy, gz, ax, ay, az, _ld, _rd = struct.unpack('<Ihhhhhhbb', payload)
+            ts, gx, gy, gz, ax, ay, az, ld, rd = struct.unpack('<Ihhhhhhbb', payload)
+            self.pub_status10_extra.publish(String(data=json.dumps(
+                {'left_dist_mm': ld, 'right_dist_mm': rd})))
             gyro = [gx * self.gscale, gy * self.gscale, gz * self.gscale]   # °/s
             acc = [ax * self.ascale, ay * self.ascale, az * self.ascale]    # g
             # adaptive gyro bias: update only while the robot is detected STILL (all recent samples
@@ -379,6 +418,8 @@ class McuNode(Node):
             o.pose.pose.orientation.w = math.cos(th / 2.0)
             self.pub_odom.publish(o)
             self.pub_edge_dist.publish(Float32(data=edge / 1000.0))    # edgeDis mm -> m; meaning TBD
+            self.pub_status20_extra.publish(String(data=json.dumps(
+                {'roller_current_ma': roll, 'side_current_ma': side})))
         elif mtype == 0x03 and len(payload) == 9:          # Status100ms — tilt + dust/water/hepa/carpet
             pitch, roll, lcur, rcur, flags = struct.unpack('<hhhhB', payload)
             dustbin_missing = bool(flags & 1)
@@ -398,10 +439,45 @@ class McuNode(Node):
         elif mtype == 0x2B and len(payload) == 12:         # BatteryStatus — native voltage/current/temp/SoC
             bv, bc, bt, cv, soc, unk = struct.unpack('<HHhHhH', payload)
             self.pub_battery_raw.publish(String(data=json.dumps({
-                'battery_voltage_v': bv / 1000.0, 'battery_current_ma': bc,
+                'battery_voltage_v': bv / 1000.0, 'battery_current_ma': bc,   # unsigned, no direction bit
                 'battery_temperature_c': bt / 10.0, 'charge_voltage_v': cv / 1000.0,
                 'state_of_charge_pct': soc / 100.0, 'unknown': unk,
             })))
+        elif mtype == 0x29 and len(payload) == 5:          # HwInfo — static hardware IDs, sent rarely
+            mcu_t, imu_t, imu2_t, charge_t, app_t = struct.unpack('<BBBBB', payload)
+            self.pub_hwinfo.publish(String(data=json.dumps({
+                'mcu_type': mcu_t, 'imu_type': imu_t, 'imu2_type': imu2_t,
+                'charge_type': charge_t, 'app_type': app_t})))
+            self.get_logger().info(f'HwInfo: mcu_type={mcu_t} imu_type={imu_t} imu2_type={imu2_t} '
+                                   f'charge_type={charge_t} app_type={app_t}')
+        elif mtype == 0x07 and len(payload) == 16:         # McuFwVersionInfo — git hash + version string
+            git_hash, version = struct.unpack('<10s6s', payload)
+            self.pub_fw_version.publish(String(data=json.dumps({
+                'git_hash': git_hash.decode('ascii', 'replace').rstrip('\x00'),
+                'version': version.decode('ascii', 'replace').rstrip('\x00')})))
+        elif mtype == 0x0F and len(payload) == 8:          # PingMsg — MCU heartbeat/latency probe (we
+            ts, delta = struct.unpack('<II', payload)      # never reply Pong; read-only tap)
+            self.pub_ping.publish(String(data=json.dumps({'timestamp': ts, 'delta': delta})))
+        elif mtype == 0x10 and len(payload) == 1:          # ShutdownMsg — sent amid a poweroff sequence;
+            self.pub_shutdown_event.publish(String(data=json.dumps(   # occurrence itself is the signal
+                {'stamp_ns': self.get_clock().now().nanoseconds})))
+            self.get_logger().warn('MCU ShutdownMsg seen (robot may be powering off)')
+        elif mtype == 0x27 and len(payload) == 12:         # McuLog — raw log/error bytes, format undocumented
+            self.pub_log_raw.publish(String(data=payload.hex()))
+        elif mtype == 0x05 and len(payload) == 6:          # Status500ms — RTC heartbeat
+            unk1, seq, rtc_ts = struct.unpack('<BBI', payload)
+            self.pub_status500.publish(String(data=json.dumps(
+                {'unk1': unk1, 'sequence': seq, 'rtc_timestamp': rtc_ts})))
+        elif mtype == 0x04 and len(payload) == 1:          # FactoryTest — only meaningful in factory mode
+            self.pub_factory_test.publish(UInt8(data=payload[0]))
+        else:   # unrecognized type, or a known type at an unexpected length — surface it, don't drop it.
+            key = (mtype, len(payload))                     # ~12 type bytes are undecoded even in the
+            if key not in self._unknown_seen:                # reference RE repo; this is where they land.
+                self._unknown_seen.add(key)
+                self.get_logger().info(f'MCU: unhandled type=0x{mtype:02x} len={len(payload)} '
+                                       f'payload={payload.hex()} (logged once per type/len)')
+            self.pub_unknown.publish(String(data=json.dumps(
+                {'type': mtype, 'len': len(payload), 'payload_hex': payload.hex()})))
 
 
 def main():
