@@ -252,7 +252,20 @@ MCU protocol is silently dropped anymore, including types we can't semantically 
 | `ShutdownMsg` (0x10) | event | no data — occurrence itself signals a poweroff sequence in progress | `/mcu/shutdown_event` (latched, timestamp only) |
 | `McuLog` (0x27) | event | 12 raw bytes, format undocumented (AVA itself just saves it to `/data/log/mculog.bin`) | `/mcu/log_raw` (hex string) |
 | `FactoryTest` (0x04) | rare | `wifi_ssid_id` (only meaningful during factory testing) | `/mcu/factory_test` |
-| everything else (~12 type bytes: 0x06, 0x0B, 0x0D, 0x11-0x13, 0x20-0x26, 0x28, and any length mismatch on a known type) | — | **undecoded even in the reference RE repo** — no known field layout | `/mcu/unknown` (raw type + hex payload) — surfaced, not dropped |
+| `0x24` (undocumented upstream — "something connected with the battery temperature", 1 byte) | ~2 Hz | flag byte; **live-captured 2026-07-11 while charging: constant 0x00 (30 frames/15s)** — only the "OK" value observed, meaning of nonzero unconfirmed | `/mcu/battery_temp_flag` (Bool, best-effort — treat nonzero as a warning) |
+| everything else (~11 type bytes: 0x06, 0x0B, 0x0D, 0x11-0x13, 0x20, 0x21, 0x23, 0x25, 0x26, 0x28, and any length mismatch on a known type) | — | **undecoded even in the reference RE repo** — no known field layout. Live-captured while charging: `0x12` (7B) is a monotonic timestamp/counter (changes every frame), `0x23` (5B) and `0x26` (2B, ~50Hz) were constant the whole capture (`40 00 00 00 00` / `07 01`) — neither looks battery-related | `/mcu/unknown` (raw type + hex payload) — surfaced, not dropped |
+
+**BatteryStatus (0x2B) — CONFIRMED ABSENT on this hardware (2026-07-11).** Captured 15s of raw MCU traffic
+while the robot was actively charging (35%, `avacmd charge_state`="charging") — **zero 0x2B frames**, and no
+other packet type in the capture carries a plausible multi-byte voltage/current/SoC field. This is a
+definitive negative result, not "untested": the D10s Pro's MCU firmware does not emit this packet type (at
+least not during charging), so `/mcu/battery` will likely never publish here. `avacmd charge_state` +
+Valetudo's battery level poll remain the only real battery telemetry source on this hardware.
+
+Same capture also cross-validated two bits: `Triggers`' `dock_sta` read `1` for all 150 frames (robot
+genuinely docked) and `Status100ms`'s `dust_container_missing` read `False` for all 150 frames (dustbin
+genuinely installed) — both check out against physical reality. Also learned `Triggers` flows while just
+docked/charging, not only during active manual control as the 2026-07-09 note assumed.
 
 **Architectural note:** this is a read-only tap (we only decode what AVA already reads from the MCU); we
 never craft outbound MCU frames ourselves — driving commands go through Valetudo's REST API to AVA, which

@@ -199,6 +199,12 @@ class McuNode(Node):
         self.pub_log_raw = self.create_publisher(String, '/mcu/log_raw', 10)           # format undocumented
         self.pub_status500 = self.create_publisher(String, '/mcu/status500', 10)       # RTC heartbeat
         self.pub_factory_test = self.create_publisher(UInt8, '/mcu/factory_test', latched)
+        # 0x24 — undocumented even upstream ("something connected with the battery temperature", 1 byte).
+        # Live-captured 2026-07-11 while charging: constant 0x00 for 30 frames over 15s (no other candidate
+        # battery-analog packet type appeared — BatteryStatus 0x2B is CONFIRMED ABSENT on this hardware).
+        # Best-effort: treat nonzero as a warning flag. Only the "0 = OK" value has actually been observed.
+        self.pub_battery_temp_flag = self.create_publisher(Bool, '/mcu/battery_temp_flag', latched)
+        self.battery_temp_flag_state = None
         self.pub_unknown = self.create_publisher(String, '/mcu/unknown', 10)           # nothing dropped silently
         self._unknown_seen = set()   # log each distinct (type, len) once, not every frame
 
@@ -470,6 +476,13 @@ class McuNode(Node):
                 {'unk1': unk1, 'sequence': seq, 'rtc_timestamp': rtc_ts})))
         elif mtype == 0x04 and len(payload) == 1:          # FactoryTest — only meaningful in factory mode
             self.pub_factory_test.publish(UInt8(data=payload[0]))
+        elif mtype == 0x24 and len(payload) == 1:          # battery-temp-related (best-effort, see above)
+            flag = bool(payload[0])
+            self.pub_battery_temp_flag.publish(Bool(data=flag))
+            if flag != self.battery_temp_flag_state:
+                self.battery_temp_flag_state = flag
+                self.get_logger().warn(f'battery_temp_flag {"SET" if flag else "clear"} '
+                                       f'(raw=0x{payload[0]:02x}, meaning of nonzero UNCONFIRMED)')
         else:   # unrecognized type, or a known type at an unexpected length — surface it, don't drop it.
             key = (mtype, len(payload))                     # ~12 type bytes are undecoded even in the
             if key not in self._unknown_seen:                # reference RE repo; this is where they land.

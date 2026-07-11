@@ -44,6 +44,32 @@ the Q6A's `robot-usb`/`robot-wifi` aliases, whose key works).
 
 ---
 
+## 2026-07-11 — Live battery investigation while charging: BatteryStatus confirmed ABSENT
+
+User asked to check everything battery-related while the robot was actively charging (35%). Ran a direct
+raw-MCU capture on the robot (no Q6A/ROS needed — chroot python3 reading /tmp/mcu_ring.buf over
+dreame-wifi) for 15s during active charging:
+
+- **`BatteryStatus` (0x2B): CONFIRMED ABSENT — zero frames**, and no other packet type in the capture
+  carries a plausible voltage/current/SoC field. This is a definitive result, not "unconfirmed": the D10s
+  Pro's MCU firmware does not emit this packet type. `/mcu/battery` (added earlier today) will likely never
+  publish on this hardware. `avacmd charge_state` + Valetudo's battery-level poll remain the only real
+  source — not a gap we can close by decoding more MCU traffic.
+- Found `0x24` (1 byte, undocumented upstream but commented "something connected with the battery
+  temperature") flowing at ~2Hz, constant `0x00` throughout. Decoded as `/mcu/battery_temp_flag` (best
+  effort — only the "OK/0" value has actually been observed; nonzero meaning unconfirmed).
+- Checked the other currently-undecoded types seen in the capture: `0x12` (7B) is a monotonic
+  timestamp/counter, `0x23` (5B, "base-related") and `0x26` (2B, ~50Hz, "_CtrlMcuCMD/slowSensor") were
+  constant the whole capture — none look battery-related, left undecoded (still visible on /mcu/unknown).
+- **Bonus cross-validation**: `Triggers.dock_sta` read `1` for all 150 frames (genuinely docked),
+  `Status100ms.dust_container_missing` read `False` for all 150 frames (dustbin genuinely installed) — both
+  match physical reality, first live confirmation of these bits. Also: Triggers flows while just
+  docked/charging, not only during active manual control as the 2026-07-09 note assumed.
+
+Files: `scripts/robot/mcu_node.py` (`/mcu/battery_temp_flag`), `docs/sensors.md`.
+
+---
+
 ## 2026-07-11 — Full MCU protocol coverage: every known packet type now decoded + published
 
 Following the gap audit, closed every remaining gap so nothing from the MCU is silently dropped. Built and
