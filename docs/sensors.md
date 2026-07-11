@@ -285,6 +285,19 @@ ever pursued, is more MCU-protocol RE (same class of work as the Triggers bit-ma
 `avacmd charge_state`/`battery` (already used by `valetudo_bridge.py` for `/battery`) remain the sources
 of truth.
 
+**Should we siphon battery from AVA itself the way `camsiphon`/`serialtap` do for camera/LiDAR? DECIDED:
+no (2026-07-11).** Camera/LiDAR needed a siphon because Valetudo/`avacmd` expose NO interface for raw frames
+or raw scans at all — a genuine gap. Battery is different: `avacmd get_prop battery`/`charge_state` already
+works cleanly (watched it climb 35->39->47% live and accurately) and is already relayed to `/battery` via
+`_root_postboot.sh`'s poller. Also checked whether `/tmp/log/log_0`'s `WritePropInt`/`WritePropString`
+internal-property-write log carries it — **it doesn't** (only 13 distinct property types logged, all
+static boot-time settings like `CleanMode`/`CarpetPressState`; nothing tracked near the live 47% value, no
+line mentions battery/charge/power at all). A camera-style LD_PRELOAD hook on whichever AVA function answers
+`get_prop` would only surface the SAME percentage we already have (event-driven instead of ~15s-polled) —
+not richer telemetry, since the evidence says AVA itself never receives voltage/current/temperature from
+the MCU in the first place. Decided the latency gain isn't worth reverse-engineering AVA's internal symbols
+for it.
+
 Same capture also cross-validated two bits: `Triggers`' `dock_sta` read `1` for all 150 frames (robot
 genuinely docked) and `Status100ms`'s `dust_container_missing` read `False` for all 150 frames (dustbin
 genuinely installed) — both check out against physical reality. Also learned `Triggers` flows while just

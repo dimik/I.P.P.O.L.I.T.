@@ -44,6 +44,26 @@ the Q6A's `robot-usb`/`robot-wifi` aliases, whose key works).
 
 ---
 
+## 2026-07-11 — Decided against an AVA-internal battery siphon
+
+Follow-up to the battery-driver question: user asked whether we should siphon battery status out of AVA
+the same way `camsiphon`/`serialtap` do for camera/LiDAR. Checked `/tmp/log/log_0`'s `WritePropInt`/
+`WritePropString` internal-property-write log (the mechanism CLAUDE.md already documents AVA using for its
+own state) for a battery entry — **not there either**: only 13 distinct property types logged, all static
+boot-time settings, nothing tracking the live 47% battery value, no line mentioning battery/charge/power.
+
+Key distinction from camera/LiDAR: those needed a siphon because Valetudo/`avacmd` expose NO interface for
+raw frames/scans at all — a genuine gap. Battery has no such gap: `avacmd get_prop battery`/`charge_state`
+already works cleanly and is already relayed to `/battery`. A camera-style hook into AVA's internals would
+only get the SAME percentage, event-driven instead of ~15s-polled — not richer telemetry, since prior
+investigation already showed AVA itself never receives voltage/current/temperature from the MCU at all.
+**Decided: not worth building** — the latency gain doesn't justify reverse-engineering AVA's internal
+symbols for redundant data. Closes out the battery investigation thread.
+
+Files: `docs/sensors.md`.
+
+---
+
 ## 2026-07-11 — Battery driver question resolved: no kernel driver applies, decisive elimination
 
 User asked whether we should install a "proper" battery-power-supply driver instead of the generic one that
