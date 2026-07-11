@@ -44,6 +44,37 @@ the Q6A's `robot-usb`/`robot-wifi` aliases, whose key works).
 
 ---
 
+## 2026-07-11 — MCU protocol gap audit: Status100ms + BatteryStatus were never decoded at all
+
+User asked whether we have gaps in what we decode/expose from the MCU protocol. Audit against
+`dreame_mcu_protocol`'s full `TYPES_FROM_MCU` map (13 known types) found `mcu_node.py` only ever handled 3:
+Triggers (0x00), Status20ms (0x01), Status10ms (0x02). Two real gaps fixed (pure decode work, no robot
+access needed):
+
+- **`Status100ms` (0x03, 10Hz) — was not decoded AT ALL**, despite being confirmed live on the wire (our
+  own `mcu_full_dump.py` capture earlier this session). Carries pitch/roll tilt, wheel currents, and a
+  **`dust_container_missing` bit** — directly relevant to this project's earlier dustbin-interlock saga
+  (vendorErrorCode 8). Sanity-decoded a real captured frame (`06 00 f9 ff 02 00 02 00 00`) -> pitch=0.6deg
+  roll=-0.7deg, currents=2mA, flags=0 — sane idle values, struct transfers directly. Now publishes
+  `/mcu/status100` (JSON) + `/dustbin_missing` (Bool, latched, edge-logged).
+- **`BatteryStatus` (0x2B) — was not decoded at all.** Native voltage/current/temperature/charge_voltage/SoC,
+  vs our current 15s `avacmd charge_state` poll workaround. Now publishes `/mcu/battery` (JSON) IF the robot
+  actually emits this type — **existence/rate on THIS hardware is unconfirmed**, needs a live capture to
+  verify. Note: `battery_current` is UNSIGNED in the reference struct (no direction bit) — calibrate
+  charging-vs-discharging against the known avacmd `charge_state` value, don't assume sign.
+
+**Remaining known gaps (not fixed, mostly low-value or genuinely unknown at the protocol level):**
+`Status20ms`'s roller/side-brush current and `Status10ms`'s `leftDis`/`rightDis` are decoded into locals
+then discarded (brush-jam/wheel-slip diagnostics, no current consumer). `HwInfo`/`McuFwVersionInfo`/
+`PingMsg`/`ShutdownMsg`/`McuLog`/`Status500ms` are diagnostic-only, not exposed (low value). A dozen more
+type bytes (0x04, 0x06, 0x0B, 0x0D, 0x11-0x13, 0x20-0x26, 0x28) are **undecoded in the reference repo
+itself** — genuinely unknown, not just unexposed by us. Outbound (ToMcu_*) traffic is architecturally out
+of scope — we're a read-only tap; driving goes through Valetudo -> AVA, we never craft MCU frames ourselves.
+
+Files: `scripts/robot/mcu_node.py`, `docs/sensors.md` (full packet table with ROS-exposure column).
+
+---
+
 ## 2026-07-11 — Full MCU Triggers bit-map found: front-bottom IR cliff sensors ARE decodable
 
 User pointed out real IR sensors at the front bottom of the chassis and asked whether we have access.

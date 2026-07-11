@@ -234,13 +234,13 @@ Everything streams from the MCU → SoC on **`/dev/ttyS4`** (`3c..3e` framed, Mo
 `../CLAUDE.md` "MCU & LDS serial protocol"). Read it read-only with `strace` on AVA, decode with
 `github.com/dimik/dreame_mcu_protocol/mcu_packets.py`, or forward a copy from the `fanoff_shim`. Packet set:
 
-| Packet (type) | Rate | Data |
-|---|---|---|
-| `Status10ms` (0x02) | 100 Hz | 3-axis **gyro** (°/s), 3-axis **accel**, L/R wheel-distance delta |
-| `Status20ms` (0x01) | 50 Hz | **odometry** x, y, yaw + L/R wheel velocity + roller/side-brush current |
-| `Status100ms` (0x03) | 10 Hz | **pitch / roll**, wheel current, dust/water/HEPA/carpet present bits |
-| `Triggers` (0x00) | event | bumpers, cliff/IR, dock contact, per-motor over-current + error bits |
-| `BatteryStatus` (0x2b) | — | voltage, current, temperature, charge, SoC % |
+| Packet (type) | Rate | Data | ROS exposure |
+|---|---|---|---|
+| `Status10ms` (0x02) | 100 Hz | 3-axis **gyro** (°/s), 3-axis **accel**, L/R wheel-distance delta | `/imu/data`; `leftDis`/`rightDis` decoded but discarded (dead) |
+| `Status20ms` (0x01) | 50 Hz | **odometry** x, y, yaw + L/R wheel velocity, `edgeDis`, roller/side-brush current | `/odom/wheel`, `/cliff/edge_dist`; roller/side current decoded but discarded (dead) |
+| `Status100ms` (0x03) | 10 Hz | **pitch / roll**, wheel current, dust/water/HEPA/carpet present bits | `/mcu/status100` (JSON) + `/dustbin_missing` (added 2026-07-11 — was NOT decoded at all before) |
+| `Triggers` (0x00) | event | bumpers, cliff/IR (front+rear, per-position), dock contact, per-motor over-current + error bits | `/cliff`, `/bumper`, `/cliff/front`, `/cliff/rear`, `/wheel_floating`, `/mcu/triggers` (full bit map added 2026-07-11) |
+| `BatteryStatus` (0x2B) | ? (rate/existence on THIS hardware unconfirmed) | native voltage(V)/current(mA, **unsigned** — no direction bit)/temperature(°C)/charge_voltage(V)/SoC(%) | `/mcu/battery` (JSON, added 2026-07-11) — untested whether this robot even emits it |
 
 Live-decoded `Status10ms` frame (robot stationary, sitting flat):
 ```

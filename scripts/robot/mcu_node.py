@@ -159,6 +159,16 @@ class McuNode(Node):
         # published (dead variable). Streamed every 20ms regardless of state change, unlike the
         # event-driven Triggers bits above — meaning matters TBD (untested at a real edge yet).
         self.pub_edge_dist = self.create_publisher(Float32, '/cliff/edge_dist', 10)
+        # NEW 2026-07-11: Status100ms (0x03, 10Hz) was never decoded at all despite being on the wire
+        # (confirmed live). dust_container_missing is directly relevant to the dustbin-interlock work
+        # earlier this project — read it straight from the MCU instead of inferring via Valetudo.
+        self.pub_status100 = self.create_publisher(String, '/mcu/status100', 10)
+        self.pub_dustbin_missing = self.create_publisher(Bool, '/dustbin_missing', latched)
+        self.dustbin_state = None
+        # BatteryStatus (0x2B) was never decoded either — native voltage/current/temp/SoC, potentially a
+        # much faster/richer source than the current 15s avacmd charge_state poll. Existence/rate on THIS
+        # hardware is UNCONFIRMED (need a live capture) — publish if/when one actually arrives.
+        self.pub_battery_raw = self.create_publisher(String, '/mcu/battery', 10)
 
         # source: '' = local tmpfs ring (on-robot); 'host:port' = raw bytes over TCP from ring_forward.py on
         # the robot (lets this node run on the COMPANION with ROS off the robot). Decode/publish is identical.
@@ -369,6 +379,29 @@ class McuNode(Node):
             o.pose.pose.orientation.w = math.cos(th / 2.0)
             self.pub_odom.publish(o)
             self.pub_edge_dist.publish(Float32(data=edge / 1000.0))    # edgeDis mm -> m; meaning TBD
+        elif mtype == 0x03 and len(payload) == 9:          # Status100ms — tilt + dust/water/hepa/carpet
+            pitch, roll, lcur, rcur, flags = struct.unpack('<hhhhB', payload)
+            dustbin_missing = bool(flags & 1)
+            self.pub_status100.publish(String(data=json.dumps({
+                'pitch_deg': pitch / 10.0, 'roll_deg': roll / 10.0,
+                'left_current_ma': lcur, 'right_current_ma': rcur,
+                'dust_container_missing': dustbin_missing,
+                'water_tank_installed': bool((flags >> 1) & 1),
+                'hepa_state': bool((flags >> 2) & 1),
+                'carpet_state': bool((flags >> 3) & 1),
+            })))
+            self.pub_dustbin_missing.publish(Bool(data=dustbin_missing))
+            if dustbin_missing != self.dustbin_state:
+                self.dustbin_state = dustbin_missing
+                self.get_logger().warn(f'DUSTBIN {"MISSING" if dustbin_missing else "present"} '
+                                       f'(Status100 flags={flags:#04x})')
+        elif mtype == 0x2B and len(payload) == 12:         # BatteryStatus — native voltage/current/temp/SoC
+            bv, bc, bt, cv, soc, unk = struct.unpack('<HHhHhH', payload)
+            self.pub_battery_raw.publish(String(data=json.dumps({
+                'battery_voltage_v': bv / 1000.0, 'battery_current_ma': bc,
+                'battery_temperature_c': bt / 10.0, 'charge_voltage_v': cv / 1000.0,
+                'state_of_charge_pct': soc / 100.0, 'unknown': unk,
+            })))
 
 
 def main():
