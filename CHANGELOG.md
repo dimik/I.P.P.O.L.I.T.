@@ -44,6 +44,36 @@ the Q6A's `robot-usb`/`robot-wifi` aliases, whose key works).
 
 ---
 
+## 2026-07-11 — MCU firmware RE attempt for battery telemetry: ATTEMPTED, INCONCLUSIVE
+
+User asked to attempt finding richer battery telemetry inside the MCU firmware itself (~/dreame-re/mcu.bin,
+GD32F303-class, 151KB). Real effort, proper tooling, honest inconclusive result:
+
+**Confirmed the firmware is a debug/test build** with a full interactive console compiled in — 540 readable
+strings, including named debug variables `batVolt(mV)`, `batCurrent`, `chgVolt(mV)`, `batTemp`,
+`chargeCurrent`, and (valuable side-finding) `chargePWM`/`PWMcharge` — **this unit uses PWM-based charge
+control, not BQ24725/SMBus** (the BQ24725 string found earlier in AVA's binary is most likely dead/
+alternate-SKU code). Also a working diagnostic command: `-m/-i/-c/-b` = mcu/imu/charge/battery.
+
+**Could not trace whether/how this reaches the SoC**, despite installing proper tooling (Ghidra 12.1.2 +
+binutils-arm-none-eabi, JDK 21 — all via the user's sudo, correct ARM:LE:32:Cortex processor/base address)
+and trying three independent approaches:
+1. Raw byte scan for string addresses anywhere in the image — zero hits.
+2. Ghidra's static reference analyzer (proper auto-analysis, not naive linear objdump) — zero references,
+   INCLUDING for sanity-check strings we know are used (the console's own help text). This rules out a
+   tooling-quality problem — the actual code pattern (very likely a runtime-indexed table access) defeats
+   constant-propagation reference analysis generally.
+3. Call-graph heuristic (find the biggest repeated-callee outlier as a proxy for a table-print loop) —
+   found a real 78x outlier, decompiled it, turned out to be an LED blink-pattern state machine, unrelated.
+
+**Decided to stop** (matches the risk-managed pattern in this project — same class of open-ended effort as
+the abandoned H.264 SPS/PPS RE) rather than continue into manual disassembly reading or firmware emulation.
+`avacmd battery`/`charge_state` remain the practical source of truth.
+
+Files: `docs/sensors.md` (full writeup under "MCU firmware RE attempt").
+
+---
+
 ## 2026-07-11 — Decided against an AVA-internal battery siphon
 
 Follow-up to the battery-driver question: user asked whether we should siphon battery status out of AVA

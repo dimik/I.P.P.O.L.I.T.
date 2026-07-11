@@ -303,6 +303,38 @@ genuinely docked) and `Status100ms`'s `dust_container_missing` read `False` for 
 genuinely installed) — both check out against physical reality. Also learned `Triggers` flows while just
 docked/charging, not only during active manual control as the 2026-07-09 note assumed.
 
+### MCU firmware RE attempt for richer battery telemetry — ATTEMPTED, INCONCLUSIVE (2026-07-11)
+
+Given `avacmd`/MCU-serial both plateau at percentage + charging-flag, attempted genuine firmware-level RE
+of `~/dreame-re/mcu.bin` (GD32F303-class, 151KB, this is a **debug/test build** — a full interactive
+console is compiled in: `strings` on the binary surfaces 540 readable strings including named debug
+variables `batVolt(mV)`, `batCurrent`, `chgVolt(mV)`, `batTemp`, `chargeCurrent`, plus `chargePWM`/
+`PWMcharge` — **this unit uses PWM-based charge control, not BQ24725/SMBus** (the `BQ24725` string found
+earlier in AVA's binary is most likely dead/alternate-SKU code, since it has no devicetree node and the
+firmware's own debug strings clearly reference PWM charging instead). Also found `edgeAdc`, `batIdAdcVal`,
+`mcuTemp`, `imuTemp`, and a working diagnostic command (`-m/-i/-c/-b` = mcu/imu/charge/battery).
+
+**Could not determine whether/how this reaches the SoC.** Installed proper tooling (Ghidra 12.1.2 +
+`binutils-arm-none-eabi`, correct `ARM:LE:32:Cortex` processor, base `0x08000000`) and tried three
+independent approaches, all inconclusive:
+1. Raw byte scan for each string's absolute address anywhere in the 151KB image — zero hits for every
+   battery-related string.
+2. Ghidra's static reference analyzer (proper code/data-aware auto-analysis, not a naive linear disassembly)
+   — **zero references found, including for sanity-check strings we KNOW are used** (the console's own
+   `-hH help` text, the task-list header). This rules out "Ghidra just isn't good enough" — the actual
+   code pattern (very likely: one table-base pointer loaded once, then indexed with a runtime loop
+   variable — `table[i].name`, not a hardcoded address per string) defeats constant-propagation-based
+   reference analysis generally, not just for battery strings specifically.
+3. Call-graph heuristic (find functions that repeatedly call the same helper, as a proxy for a
+   table-iterating print loop) — found a real 78x outlier, but decompiling it revealed an **LED
+   blink-pattern state machine** (6 indexed LEDs × mode × duration per robot state), unrelated to battery.
+
+**Decided to stop here** (2026-07-11) rather than continue into manual disassembly reading or firmware
+emulation (Ghidra's built-in emulator or a QEMU Cortex-M harness) — both are open-ended, uncertain-payoff
+efforts, the same risk class as the H.264 SPS/PPS RE this project already abandoned. `avacmd battery`/
+`charge_state` remain the practical source of truth; richer telemetry (if the project ever needs it) would
+require one of those bigger undertakings, not a quick follow-up.
+
 **Architectural note:** this is a read-only tap (we only decode what AVA already reads from the MCU); we
 never craft outbound MCU frames ourselves — driving commands go through Valetudo's REST API to AVA, which
 talks to the MCU on its own. So there's no equivalent "gap" on the outbound (`ToMcu_*`) side to close.
