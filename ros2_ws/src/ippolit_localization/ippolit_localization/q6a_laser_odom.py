@@ -15,33 +15,23 @@ is already base_link-aligned by lds_scan_node's bearing convention, and the turr
 
 Run: source /opt/ros/jazzy/setup.bash && ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST \
      python3 q6a_laser_odom.py   (stop valetudo-bridge first so it doesn't also own /odom + TF)
+
+Parameters are declared below (see ippolit_bringup/config/q6a_laser_odom.yaml for the deployed
+values); this replaces the earlier Q6A_ICP_*/Q6A_ODOM_*/Q6A_*_FRAME environment-variable reads
+(A2). `icp()`/`scan_to_points()` stay plain functions (no rclpy dependency, testable standalone);
+their tunables are passed in explicitly by the node rather than read from module globals.
 """
 import math
-import os
 
 from geometry_msgs.msg import Quaternion, TransformStamped
 from nav_msgs.msg import Odometry
 import numpy as np
+from rcl_interfaces.msg import FloatingPointRange, IntegerRange, ParameterDescriptor
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan
 from tf2_ros import StaticTransformBroadcaster, TransformBroadcaster
-
-ODOM_FRAME = os.environ.get('Q6A_ODOM_FRAME', 'odom')
-BASE_FRAME = os.environ.get('Q6A_BASE_FRAME', 'base_link')
-LASER_FRAME = os.environ.get('Q6A_LASER_FRAME', 'laser')
-ODOM_TOPIC = os.environ.get('Q6A_LASER_ODOM_TOPIC', '/odom_laser')
-ICP_ITERS = int(os.environ.get('Q6A_ICP_ITERS', '14'))
-ICP_MAX_CORR = float(os.environ.get('Q6A_ICP_MAX_CORR', '0.35'))   # correspondence reject dist
-MIN_PTS = int(os.environ.get('Q6A_ICP_MIN_PTS', '18'))
-# reject bigger per-frame translation (m) / rotation (rad ~8.6deg)
-MAX_STEP_XY = float(os.environ.get('Q6A_ICP_MAX_STEP_XY', '0.15'))
-MAX_STEP_TH = float(os.environ.get('Q6A_ICP_MAX_STEP_TH', '0.15'))
-# sign flips (validated by driving forward and confirming +x): set to -1 if a delta is inverted
-SX = float(os.environ.get('Q6A_ODOM_SX', '1'))
-SY = float(os.environ.get('Q6A_ODOM_SY', '1'))
-STH = float(os.environ.get('Q6A_ODOM_STH', '1'))
 
 
 def scan_to_points(msg):
@@ -53,7 +43,7 @@ def scan_to_points(msg):
     return np.stack([r * np.cos(ang), r * np.sin(ang)], axis=1)   # Nx2 in the laser frame
 
 
-def icp(P, Q, init=(0.0, 0.0, 0.0), iters=ICP_ITERS, max_corr=ICP_MAX_CORR):
+def icp(P, Q, init=(0.0, 0.0, 0.0), iters=14, max_corr=0.35, min_pts=18):
     """
     Transform (dx,dy,dth) that best aligns current points Q onto previous points P.
 
@@ -71,7 +61,7 @@ def icp(P, Q, init=(0.0, 0.0, 0.0), iters=ICP_ITERS, max_corr=ICP_MAX_CORR):
         idx = d2.argmin(1)
         dist = np.sqrt(d2[np.arange(Qt.shape[0]), idx])
         keep = dist < max_corr
-        if keep.sum() < MIN_PTS:
+        if keep.sum() < min_pts:
             break
         A = Q[keep]           # original current points
         B = P[idx][keep]      # matched previous points
@@ -99,18 +89,76 @@ def yaw_to_quat(yaw):
 class LaserOdom(Node):
     def __init__(self):
         super().__init__('q6a_laser_odom')
+        self.declare_parameter(
+            'odom_frame', 'odom', ParameterDescriptor(description='Odometry frame_id.'))
+        self.declare_parameter(
+            'base_frame', 'base_link', ParameterDescriptor(description='Robot base frame_id.'))
+        self.declare_parameter(
+            'laser_frame', 'laser', ParameterDescriptor(description='LiDAR frame_id.'))
+        self.declare_parameter(
+            'odom_topic', '/odom_laser',
+            ParameterDescriptor(description='Topic to publish nav_msgs/Odometry on.'))
+        self.declare_parameter(
+            'icp_iters', 14,
+            ParameterDescriptor(
+                description='Max ICP re-association/solve iterations per scan pair.',
+                integer_range=[IntegerRange(from_value=1, to_value=100)]))
+        self.declare_parameter(
+            'icp_max_corr', 0.35,
+            ParameterDescriptor(
+                description='Correspondence rejection distance (m) for ICP point matching.',
+                floating_point_range=[FloatingPointRange(from_value=0.01, to_value=5.0)]))
+        self.declare_parameter(
+            'min_pts', 18,
+            ParameterDescriptor(
+                description='Minimum inlier correspondences to keep refining an ICP estimate.',
+                integer_range=[IntegerRange(from_value=3, to_value=1000)]))
+        self.declare_parameter(
+            'max_step_xy', 0.15,
+            ParameterDescriptor(
+                description='Reject a per-frame ICP translation (m) larger than this.',
+                floating_point_range=[FloatingPointRange(from_value=0.01, to_value=2.0)]))
+        self.declare_parameter(
+            'max_step_th', 0.15,
+            ParameterDescriptor(
+                description='Reject a per-frame ICP rotation (rad) larger than this.',
+                floating_point_range=[FloatingPointRange(from_value=0.01, to_value=3.2)]))
+        self.declare_parameter(
+            'sign_x', 1.0,
+            ParameterDescriptor(
+                description='Sign/scale flip for the ICP x delta (validated by driving forward).'))
+        self.declare_parameter(
+            'sign_y', 1.0,
+            ParameterDescriptor(description='Sign/scale flip for the ICP y delta.'))
+        self.declare_parameter(
+            'sign_th', 1.0,
+            ParameterDescriptor(description='Sign/scale flip for the ICP rotation delta.'))
+
+        self.odom_frame = self.get_parameter('odom_frame').value
+        self.base_frame = self.get_parameter('base_frame').value
+        self.laser_frame = self.get_parameter('laser_frame').value
+        self.odom_topic = self.get_parameter('odom_topic').value
+        self.icp_iters = self.get_parameter('icp_iters').value
+        self.icp_max_corr = self.get_parameter('icp_max_corr').value
+        self.min_pts = self.get_parameter('min_pts').value
+        self.max_step_xy = self.get_parameter('max_step_xy').value
+        self.max_step_th = self.get_parameter('max_step_th').value
+        self.sx = self.get_parameter('sign_x').value
+        self.sy = self.get_parameter('sign_y').value
+        self.sth = self.get_parameter('sign_th').value
+
         self.prev = None                 # previous scan points (Nx2)
         self.x = self.y = self.th = 0.0  # pose in odom
         self.n = 0
         self.rej = 0
         self.tfb = TransformBroadcaster(self)
-        self.pub = self.create_publisher(Odometry, ODOM_TOPIC, 20)
+        self.pub = self.create_publisher(Odometry, self.odom_topic, 20)
         # static base_link -> laser (identity: scan already base_link-aligned, turret ~center)
         stf = StaticTransformBroadcaster(self)
         st = TransformStamped()
         st.header.stamp = self.get_clock().now().to_msg()
-        st.header.frame_id = BASE_FRAME
-        st.child_frame_id = LASER_FRAME
+        st.header.frame_id = self.base_frame
+        st.child_frame_id = self.laser_frame
         st.transform.rotation.w = 1.0
         stf.sendTransform(st)
         self._stf = stf                  # keep alive
@@ -122,23 +170,27 @@ class LaserOdom(Node):
         # so slam actually processes scans.
         self.create_timer(1.0 / 30.0, self.broadcast_tf)
         self.get_logger().info(
-            f'q6a_laser_odom up: /scan -> ICP -> {ODOM_TOPIC} + {ODOM_FRAME}->{BASE_FRAME} TF '
+            f'q6a_laser_odom up: /scan -> ICP -> {self.odom_topic} + '
+            f'{self.odom_frame}->{self.base_frame} TF '
             f'(needs the turret spinning, i.e. manual_control active)')
 
     def on_scan(self, msg):
         pts = scan_to_points(msg)
-        if pts.shape[0] < MIN_PTS:
+        if pts.shape[0] < self.min_pts:
             return
         if self.prev is not None:
             # seed from ZERO (small-motion assumption): a constant-velocity prior lets one bad
             # rotation estimate poison the next frame and run away to a 180-deg flip.
-            dx, dy, dth, ok = icp(self.prev, pts, init=(0.0, 0.0, 0.0))
+            dx, dy, dth, ok = icp(self.prev, pts, init=(0.0, 0.0, 0.0),
+                                  iters=self.icp_iters, max_corr=self.icp_max_corr,
+                                  min_pts=self.min_pts)
             if ok:
                 # Reject implausible per-frame motion. At ~5 Hz and a slow indoor drive, one frame
                 # is at most a few cm and a few degrees; anything larger is a bad scan match, not
                 # real motion -> skip it (keep the last good pose) rather than integrate garbage.
-                if abs(dx) < MAX_STEP_XY and abs(dy) < MAX_STEP_XY and abs(dth) < MAX_STEP_TH:
-                    dx, dy, dth = SX * dx, SY * dy, STH * dth
+                if abs(dx) < self.max_step_xy and abs(dy) < self.max_step_xy \
+                        and abs(dth) < self.max_step_th:
+                    dx, dy, dth = self.sx * dx, self.sy * dy, self.sth * dth
                     # compose body-frame delta into the odom pose
                     self.x += dx * math.cos(self.th) - dy * math.sin(self.th)
                     self.y += dx * math.sin(self.th) + dy * math.cos(self.th)
@@ -160,8 +212,8 @@ class LaserOdom(Node):
     def broadcast_tf(self):
         t = TransformStamped()
         t.header.stamp = self.get_clock().now().to_msg()   # current time -> always fresh for tf2
-        t.header.frame_id = ODOM_FRAME
-        t.child_frame_id = BASE_FRAME
+        t.header.frame_id = self.odom_frame
+        t.child_frame_id = self.base_frame
         t.transform.translation.x = self.x
         t.transform.translation.y = self.y
         t.transform.rotation = yaw_to_quat(self.th)
@@ -170,8 +222,8 @@ class LaserOdom(Node):
     def publish(self, stamp):
         o = Odometry()
         o.header.stamp = stamp
-        o.header.frame_id = ODOM_FRAME
-        o.child_frame_id = BASE_FRAME
+        o.header.frame_id = self.odom_frame
+        o.child_frame_id = self.base_frame
         o.pose.pose.position.x = self.x
         o.pose.pose.position.y = self.y
         o.pose.pose.orientation = yaw_to_quat(self.th)

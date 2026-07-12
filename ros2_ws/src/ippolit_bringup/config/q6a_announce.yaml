@@ -1,0 +1,25 @@
+q6a_announce:
+  ros__parameters:
+    min_conf: 0.6
+    min_hits: 5
+    allow_labels:
+      - person
+      - chair
+      - couch
+      - bed
+      - dining table
+      - tv
+      - refrigerator
+      - oven
+      - microwave
+      - sink
+      - toilet
+      - potted plant
+      - book
+      - clock
+      - vase
+      - bench
+      - suitcase
+    cooldown: 25.0
+    min_gap: 3.0
+    phrase: "I see a {label}"

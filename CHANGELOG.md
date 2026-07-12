@@ -7,6 +7,56 @@ current active roadmap)**.
 
 ---
 
+## 2026-07-12 — Phase A2 COMPLETE: declared ROS parameters replace env-var configuration
+
+Converted every remaining `os.environ.get(...)` tunable across all six nodes that had them
+(`cliff_guard`, `q6a_laser_odom`, `q6a_map_persist`, `q6a_announce`, `q6a_objmap`, `q6a_vision`)
+into declared ROS parameters with type + description, loaded from a matching
+`ippolit_bringup/config/<node>.yaml` via `<param from="..."/>` in each node's launch entry.
+`audio_bridge`, `mcu_node`, `lds_scan_node`, and `valetudo_bridge` (A1) already used declared
+parameters exclusively, so no changes were needed there.
+
+`ROBOT_ADDR` is the one deliberate exception: per the architecture doc's A2 rule, machine-local
+deployment values stay outside the ROS parameter system as env vars sourced from
+`/etc/default/ippolit-robot`. Grepping the whole workspace afterward confirms it is now the
+*only* `os.environ` read left in any node — Phase A2's stated completion criterion.
+
+Safety-critical constants got range validation via `ParameterDescriptor`
+(`floating_point_range`/`integer_range`), not just a declaration: `cliff_guard`'s MiDaS/LiDAR
+cliff thresholds (deliberately narrow bands around the 2026-07-09 stairwell calibration, not
+wide-open) and `q6a_map_persist`'s `min_resume_bytes` (floor of 1024B keeps the G4 crash-guard
+meaningful — see that node's CRASH FOUND note). Verified live: `ros2 param set /cliff_guard
+midas_stop 5.0` is correctly rejected ("Parameter midas_stop out of range Min: 0.2, Max: 0.6").
+
+`q6a_vision.py` needed the most restructuring: its module-level `puller()` thread and the MJPEG
+view HTTP server previously read module-global constants (`MJPEG_URL`, `VALID_ROWS`,
+`VIEW_PORT`) set once at import time from env vars. Since ROS parameters are per-node-instance,
+both were moved to start from inside `VisionNode.__init__` (after parameters are declared and
+resolved), with `puller()` changed to accept `(mjpeg_url, valid_rows)` as explicit arguments
+instead of reading globals — keeping it a plain, testable function with no rclpy dependency.
+Same treatment for `q6a_laser_odom.py`'s `icp()` function (now takes `iters`/`max_corr`/`min_pts`
+as explicit arguments with plain literal defaults, rather than defaulting to module constants
+computed from env vars at import time).
+
+List-valued env vars (`q6a_announce`'s `ALLOW`, `q6a_objmap`'s `ALLOW`) became `string[]`
+parameters (a YAML list) rather than a single comma-separated string — more idiomatic for ROS
+params and matches how they're naturally expressed in the config YAML. `q6a_objmap`'s `DYNAMIC`
+set (built from an env var but never actually referenced anywhere in the file — dead code
+predating this session) was dropped rather than carried forward as a phantom parameter.
+
+All 38 tests across 10 packages pass. Verified live post-restart: every converted node's
+parameters checked with `ros2 param get` against the deployed YAML, and each systemd group
+(`ippolit-core`, `ippolit-perception`) restarted and confirmed healthy — single clean instance of
+every node, `/cliff/ahead`, `/vision/detections`, `/vision/floor` all publishing correctly,
+`q6a_vision`'s NPU/YOLO+MiDaS inference still live (same benign QNN loader probe/fallback
+messages as before — not a regression, see G21).
+
+Next per `docs/navigation-architecture.md`'s suggested order: F0-F3 (feature track — map/camera
+calibration verification, cmd_vel bridge, Foxglove visualization, full-room mapping drive) or A3
+(typed interfaces retiring JSON-on-String topics).
+
+---
+
 ## 2026-07-12 — Phase A1 COMPLETE: q6a_vision + q6a_objmap migrated into ippolit_perception; G21 found
 
 Migrated the last two A1 nodes: `q6a_vision.py` (robot camera -> YOLO(NPU)+ByteTrack+MiDaS ->

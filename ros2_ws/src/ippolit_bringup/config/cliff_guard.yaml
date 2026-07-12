@@ -1,0 +1,14 @@
+cliff_guard:
+  ros__parameters:
+    # SAFETY: calibrated at the real ladder edge 2026-07-09. Do not change without re-verifying
+    # against a real stairwell drive - see cliff_guard.py's module docstring.
+    midas_stop: 0.35
+    midas_fuse: 0.28
+    midas_clear: 0.25
+    min_sharp: 4.0
+    consec: 2
+    clear_n: 6
+    lidar_far_m: 3.5
+    lidar_half_deg: 20.0
+    speak_gap: 8.0
+    ouch_cooldown: 3.0

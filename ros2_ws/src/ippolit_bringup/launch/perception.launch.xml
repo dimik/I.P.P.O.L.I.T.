@@ -2,20 +2,25 @@
 <!-- perception.launch.xml - vision + object narration + object map (ippolit-perception systemd
      group). -->
 <launch>
-  <node pkg="ippolit_perception" exec="q6a_announce" name="q6a_announce"/>
+  <node pkg="ippolit_perception" exec="q6a_announce" name="q6a_announce">
+    <param from="$(find-pkg-share ippolit_bringup)/config/q6a_announce.yaml"/>
+  </node>
   <node pkg="ippolit_perception" exec="q6a_vision" name="q6a_vision">
     <!-- QNN/QAIRT native lib paths for qai_appbuilder (Hexagon NPU) - node-scoped so the other
          two perception nodes above/below don't inherit them unnecessarily.
          G21: <env> REPLACES the named var, it does not append - setting LD_LIBRARY_PATH to just
          the QNN path wipes out ROS's own libs (librcl_action.so etc.) that the systemd unit's
          sourced setup.bash already put there, crashing rclpy's import at startup. Must append
-         via $(env ...) substitution instead.
-         Q6A_CAM_URL=192.168.1.213 matches the ACTUAL deployed ROBOT_ADDR (same substitution
-         pattern as A1's drivers.launch.xml entries). -->
+         via $(env ...) substitution instead. mjpeg_url (with the ACTUAL deployed ROBOT_ADDR) is
+         now a declared param in q6a_vision.yaml (A2), not an env var like the rest of this
+         block - only LD_LIBRARY_PATH/ADSP_LIBRARY_PATH stay env vars here since they're native
+         library search paths, not node tunables. -->
     <env name="LD_LIBRARY_PATH"
          value="$(env LD_LIBRARY_PATH ''):/home/radxa/qairt_2.42.0.251225/lib/aarch64-oe-linux-gcc11.2"/>
     <env name="ADSP_LIBRARY_PATH" value="/home/radxa/qairt_2.42.0.251225/lib/hexagon-v68/unsigned"/>
-    <env name="Q6A_CAM_URL" value="http://192.168.1.213:8090/"/>
+    <param from="$(find-pkg-share ippolit_bringup)/config/q6a_vision.yaml"/>
   </node>
-  <node pkg="ippolit_perception" exec="q6a_objmap" name="q6a_objmap"/>
+  <node pkg="ippolit_perception" exec="q6a_objmap" name="q6a_objmap">
+    <param from="$(find-pkg-share ippolit_bringup)/config/q6a_objmap.yaml"/>
+  </node>
 </launch>

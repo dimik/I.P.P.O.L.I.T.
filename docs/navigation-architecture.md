@@ -219,10 +219,17 @@ Each phase = PR-sized, behavior-preserving unless stated, ends with: verify → 
   ✅ Full stack up via `ros2 launch ippolit_bringup robot.launch.xml`; same topics/rates as before
   (compare `ros2 topic hz` for `/scan`, `/pose`, `/vision/detections`); reboot test passes; slam lifecycle
   transition handled by launch (bash poller retired).
-- **A2 — parameters.** Declare all tunables as ROS params with YAML in `ippolit_bringup/config/`;
-  document each with description strings. Env-var reads deleted. The safety constants (`MAX_SAFE_VEL`,
-  caution thresholds, MIN_RESUME_BYTES) get validation (rejected if out of proven ranges).
-  ✅ `ros2 param dump` per node matches YAML; grep confirms no `os.environ` left outside machine.env.
+- **A2 — parameters. ✅ DONE (2026-07-12).** Declare all tunables as ROS params with YAML in
+  `ippolit_bringup/config/`; document each with description strings. Env-var reads deleted. The
+  safety constants (caution thresholds, `min_resume_bytes`) get validation (rejected if out of
+  proven ranges). (`MAX_SAFE_VEL` lives in `q6a_creep_test.py`, a manual-testing script outside
+  ros2_ws — out of this phase's scope, unaffected.)
+  ✅ All 6 nodes with env-var tunables converted (`cliff_guard`, `q6a_laser_odom`,
+  `q6a_map_persist`, `q6a_announce`, `q6a_objmap`, `q6a_vision`) — the 4 A1 driver nodes already
+  used declared parameters exclusively. `ros2 param get` per node matches
+  `ippolit_bringup/config/<node>.yaml`; grep confirms `ROBOT_ADDR` is the only `os.environ` read
+  left anywhere in `ros2_ws` (the one sanctioned machine-local exception). Safety ranges verified
+  live: an out-of-range `ros2 param set` is rejected, not silently clamped.
 - **A3 — interfaces.** Create `ippolit_interfaces`, port topics per §2.2 with the compatibility window.
   ✅ `ros2 topic echo` shows typed data; Foxglove plots FloorDrop fields directly; JSON publishers removed.
 - **A4 — URDF + robot_state_publisher.** Measure/encode geometry once (wheel base, BODY_R→radius, laser

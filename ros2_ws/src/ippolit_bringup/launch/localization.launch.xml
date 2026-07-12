@@ -5,6 +5,10 @@
      lifecycle configure/activate dance is a separate concern from this migration's scope (see
      docs/navigation-architecture.md's G3 and the A1 phase notes). -->
 <launch>
-  <node pkg="ippolit_localization" exec="q6a_laser_odom" name="q6a_laser_odom"/>
-  <node pkg="ippolit_localization" exec="q6a_map_persist" name="q6a_map_persist"/>
+  <node pkg="ippolit_localization" exec="q6a_laser_odom" name="q6a_laser_odom">
+    <param from="$(find-pkg-share ippolit_bringup)/config/q6a_laser_odom.yaml"/>
+  </node>
+  <node pkg="ippolit_localization" exec="q6a_map_persist" name="q6a_map_persist">
+    <param from="$(find-pkg-share ippolit_bringup)/config/q6a_map_persist.yaml"/>
+  </node>
 </launch>

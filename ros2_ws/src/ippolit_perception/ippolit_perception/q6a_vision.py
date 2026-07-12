@@ -15,6 +15,11 @@ robot-perception — see docs/companion-autonomy.md.
 Run: source /opt/ros/jazzy/setup.bash && \
      LD_LIBRARY_PATH=~/qairt_2.42.0.251225/lib/aarch64-oe-linux-gcc11.2 \
      ADSP_LIBRARY_PATH=~/qairt_2.42.0.251225/lib/hexagon-v68/unsigned python3 q6a_vision.py
+
+Parameters are declared below (see ippolit_bringup/config/q6a_vision.yaml for the deployed
+values); this replaces the earlier Q6A_CAM_*/Q6A_YOLO_CONF/Q6A_VISION_* environment-variable reads
+(A2). LD_LIBRARY_PATH/ADSP_LIBRARY_PATH stay machine-local env vars (QNN/QAIRT native lib paths,
+not node tunables) set node-scoped in perception.launch.xml.
 """
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
@@ -29,20 +34,12 @@ from ippolit_perception.q6a_yolo import YoloDetector
 import numpy as np
 from PIL import Image, ImageDraw
 from qai_appbuilder import DataType, QNNContext
+from rcl_interfaces.msg import FloatingPointRange, IntegerRange, ParameterDescriptor
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 
-MJPEG_URL = os.environ.get('Q6A_CAM_URL', 'http://192.168.10.1:8090/')
-VALID_ROWS = int(os.environ.get('Q6A_CAM_VALID_ROWS', '504'))   # camstream pads 672x504 -> 672x672
-# detector floor (0.1 leaked junk; real furniture is >=0.62, floor false-positives like
-# cat/laptop sit ~0.44-0.55)
-CONF = float(os.environ.get('Q6A_YOLO_CONF', '0.30'))
-VIEW_PORT = int(os.environ.get('Q6A_VISION_PORT', '8093'))
-DET_FPS = float(os.environ.get('Q6A_VISION_FPS', '8'))
-MIDAS_BIN = os.path.expanduser('~/midas_depth_w8a8.bin')
 MIDAS_RES = 256                                                # MiDaS-v21-small is 256x256
-DEPTH = os.environ.get('Q6A_VISION_DEPTH', '1') != '0'         # run MiDaS depth alongside YOLO
 _PALETTE = [(255, 64, 64), (64, 200, 64), (64, 160, 255), (255, 200, 0),
             (255, 64, 255), (0, 220, 220), (255, 128, 0), (160, 96, 255)]
 
@@ -56,11 +53,11 @@ class Shared:
     lock = threading.Lock()
 
 
-def puller():
+def puller(mjpeg_url, valid_rows):
     """Pull the robot MJPEG stream, decode the newest JPEG into Shared.rgb (valid rows only)."""
     while True:
         try:
-            r = urllib.request.urlopen(MJPEG_URL, timeout=10)
+            r = urllib.request.urlopen(mjpeg_url, timeout=10)
             buf = b''
             while True:
                 chunk = r.read(16384)
@@ -75,7 +72,7 @@ def puller():
                     jpg = buf[i:j + 2]
                     buf = buf[j + 2:]
                     try:
-                        arr = np.asarray(Image.open(io.BytesIO(jpg)).convert('RGB'))[:VALID_ROWS]
+                        arr = np.asarray(Image.open(io.BytesIO(jpg)).convert('RGB'))[:valid_rows]
                         Shared.rgb = np.ascontiguousarray(arr)
                     except Exception:
                         pass
@@ -187,22 +184,66 @@ class ViewHandler(BaseHTTPRequestHandler):
 class VisionNode(Node):
     def __init__(self):
         super().__init__('q6a_vision')
+        self.declare_parameter(
+            'mjpeg_url', 'http://192.168.10.1:8090/',
+            ParameterDescriptor(description='Robot camera MJPEG stream URL.'))
+        self.declare_parameter(
+            'valid_rows', 504,
+            ParameterDescriptor(
+                description='Rows to keep from each frame (camstream pads 672x504->672x672).',
+                integer_range=[IntegerRange(from_value=1, to_value=4096)]))
+        self.declare_parameter(
+            'yolo_conf', 0.30,
+            ParameterDescriptor(
+                description=(
+                    'Detector confidence floor (0.1 leaked junk; real furniture is >=0.62, '
+                    'floor false-positives like cat/laptop sit ~0.44-0.55).'),
+                floating_point_range=[FloatingPointRange(from_value=0.0, to_value=1.0)]))
+        self.declare_parameter(
+            'view_port', 8093,
+            ParameterDescriptor(
+                description='TCP port serving the annotated MJPEG view.',
+                integer_range=[IntegerRange(from_value=1, to_value=65535)]))
+        self.declare_parameter(
+            'det_fps', 8.0,
+            ParameterDescriptor(
+                description='Target detection loop rate (Hz); 0 disables throttling.',
+                floating_point_range=[FloatingPointRange(from_value=0.0, to_value=60.0)]))
+        self.declare_parameter(
+            'midas_bin', os.path.expanduser('~/midas_depth_w8a8.bin'),
+            ParameterDescriptor(description='Path to the MiDaS w8a8 QNN context binary.'))
+        self.declare_parameter(
+            'enable_depth', True,
+            ParameterDescriptor(description='Run MiDaS depth alongside YOLO.'))
+
+        self.mjpeg_url = self.get_parameter('mjpeg_url').value
+        self.valid_rows = self.get_parameter('valid_rows').value
+        self.conf = self.get_parameter('yolo_conf').value
+        self.view_port = self.get_parameter('view_port').value
+        self.det_fps = self.get_parameter('det_fps').value
+        self.midas_bin = self.get_parameter('midas_bin').value
+        self.enable_depth = self.get_parameter('enable_depth').value
+
         self.pub = self.create_publisher(String, '/vision/detections', 10)
         # MiDaS floor profile (cliff cue)
         self.pub_floor = self.create_publisher(String, '/vision/floor', 10)
-        self.det = YoloDetector(conf=CONF)          # Configs the HTP backend + loads YOLO context
+        self.det = YoloDetector(conf=self.conf)     # Configs the HTP backend + loads YOLO context
         self.labels = self.det.labels
-        self.tracker = ByteTracker(high_thresh=0.4, low_thresh=CONF)
+        self.tracker = ByteTracker(high_thresh=0.4, low_thresh=self.conf)
         self.midas = None
-        if DEPTH and os.path.exists(MIDAS_BIN):     # 2nd NPU context in the same process (OK)
-            self.midas = QNNContext('midas_depth_w8a8', MIDAS_BIN,
+        if self.enable_depth and os.path.exists(self.midas_bin):  # 2nd NPU ctx, same process (OK)
+            self.midas = QNNContext('midas_depth_w8a8', self.midas_bin,
                                     input_data_type=DataType.NATIVE,
                                     output_data_type=DataType.NATIVE)
             self.get_logger().info('MiDaS depth context loaded (per-detection relative disparity)')
         midas_tag = '+MiDaS' if self.midas else ''
         self.get_logger().info(
-            f'q6a_vision up: {MJPEG_URL} -> YOLO(NPU)+ByteTrack{midas_tag} '
-            f'-> /vision/detections + :{VIEW_PORT}')
+            f'q6a_vision up: {self.mjpeg_url} -> YOLO(NPU)+ByteTrack{midas_tag} '
+            f'-> /vision/detections + :{self.view_port}')
+        threading.Thread(
+            target=puller, args=(self.mjpeg_url, self.valid_rows), daemon=True).start()
+        srv = ThreadingHTTPServer(('0.0.0.0', self.view_port), ViewHandler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
         threading.Thread(target=self.infer_loop, daemon=True).start()
 
     def depth_map(self, rgb):
@@ -226,7 +267,7 @@ class VisionNode(Node):
         return int(np.median(patch)) if patch.size else -1
 
     def infer_loop(self):
-        period = 1.0 / DET_FPS if DET_FPS > 0 else 0.0
+        period = 1.0 / self.det_fps if self.det_fps > 0 else 0.0
         while rclpy.ok():
             t0 = time.time()
             rgb = Shared.rgb
@@ -276,9 +317,6 @@ class VisionNode(Node):
 
 
 def main():
-    threading.Thread(target=puller, daemon=True).start()
-    srv = ThreadingHTTPServer(('0.0.0.0', VIEW_PORT), ViewHandler)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
     rclpy.init()
     node = VisionNode()
     try:

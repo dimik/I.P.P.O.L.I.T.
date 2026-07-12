@@ -4,5 +4,6 @@
   <node pkg="ippolit_safety" exec="cliff_guard" name="cliff_guard">
     <!-- ROBOT_ADDR env var read as a fallback default inside cliff_guard.py itself; no ROS
          param override needed here since the estop PUT target rarely changes per-deployment. -->
+    <param from="$(find-pkg-share ippolit_bringup)/config/cliff_guard.yaml"/>
   </node>
 </launch>

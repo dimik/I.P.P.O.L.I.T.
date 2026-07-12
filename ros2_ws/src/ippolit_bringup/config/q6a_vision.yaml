@@ -1,0 +1,12 @@
+q6a_vision:
+  ros__parameters:
+    # ROBOT_ADDR substitution matches the actual deployed value (same pattern as A1's
+    # drivers.launch.xml entries) - not a machine-local env var since it's node config, not a
+    # deployment path.
+    mjpeg_url: http://192.168.1.213:8090/
+    valid_rows: 504
+    yolo_conf: 0.30
+    view_port: 8093
+    det_fps: 8.0
+    midas_bin: /home/radxa/midas_depth_w8a8.bin
+    enable_depth: true

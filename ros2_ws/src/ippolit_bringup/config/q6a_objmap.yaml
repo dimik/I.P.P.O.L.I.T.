@@ -1,0 +1,29 @@
+q6a_objmap:
+  ros__parameters:
+    cam_hfov_deg: 110.0
+    cam_yaw_deg: 0.0
+    bear_sign: -1.0
+    merge_dist_m: 0.5
+    min_conf: 0.45
+    min_n: 3
+    allow_labels:
+      - chair
+      - couch
+      - bed
+      - dining table
+      - tv
+      - refrigerator
+      - oven
+      - microwave
+      - sink
+      - toilet
+      - potted plant
+      - bench
+      - book
+      - clock
+      - vase
+      - suitcase
+    pose_topic: /pose
+    objmap_file: /home/radxa/ros/maps/object_map.json
+    save_period_s: 30.0
+    bump_front_m: 0.20

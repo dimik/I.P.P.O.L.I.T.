@@ -1,0 +1,9 @@
+q6a_map_persist:
+  ros__parameters:
+    map_dir: /home/radxa/ros/maps
+    map_name: apartment
+    save_period_s: 30.0
+    deserialize_timeout_s: 60.0
+    # SAFETY: see the node's docstring CRASH FOUND note - a saved posegraph below this size
+    # reliably SEGFAULTS slam_toolbox on deserialize_map. Do not lower without re-reading that.
+    min_resume_bytes: 51200
