@@ -31,9 +31,12 @@ from std_msgs.msg import String, Bool
 
 ROBOT_ADDR = os.environ.get('ROBOT_ADDR', '192.168.1.213')
 CAP = f'http://{ROBOT_ADDR}/api/v2/robot/capabilities/HighResolutionManualControlCapability'
-# ramp window: velocity scales from max (at RAMP_START) down to the floor (at RAMP_END and beyond)
-RAMP_START = float(os.environ.get('Q6A_CREEP_RAMP_START', '0.20'))   # center reading where slowdown begins
-RAMP_END = float(os.environ.get('Q6A_CREEP_RAMP_END', '0.55'))       # center reading where floor speed hits
+# ramp window: velocity scales from max (at RAMP_START) down to the floor (at RAMP_END and beyond).
+# RAMP_START=0.42 matches q6a_drive.py's proven hard-stop threshold (STOP_CENTER) -- full speed right up
+# until that point, THEN ease off, rather than easing off from ~1m out on ordinary floor-gradient noise
+# (0.20 was too sensitive -- confirmed live 2026-07-12, it started slowing at ~1m from the edge).
+RAMP_START = float(os.environ.get('Q6A_CREEP_RAMP_START', '0.42'))   # center reading where slowdown begins
+RAMP_END = float(os.environ.get('Q6A_CREEP_RAMP_END', '0.58'))       # center reading where floor speed hits
 HZ = 6.6
 
 
@@ -105,9 +108,14 @@ class CreepTest(Node):
             self.stop('WHEEL-DROP (last-resort backstop fired)')
         if not have_scan or not have_floor:
             self.stop('stale sensors (refuse to drive blind even in creep mode)')
-        # proportional speed reduction, NOT a stop -- floors at self.min_vel, never zero
-        frac = (self.center - RAMP_START) / (RAMP_END - RAMP_START)
-        frac = max(0.0, min(1.0, frac))
+        # proportional speed reduction, NOT a stop -- floors at self.min_vel, never zero. Gated on sharpness
+        # too (matches q6a_drive.py's MIN_SHARP=3.0): a smooth floor gradient can read a moderate center
+        # value without being a real edge -- ignore the ramp entirely below that, same as the proven logic.
+        if self.center_sharp < 3.0:
+            frac = 0.0
+        else:
+            frac = (self.center - RAMP_START) / (RAMP_END - RAMP_START)
+            frac = max(0.0, min(1.0, frac))
         vel = self.max_vel - frac * (self.max_vel - self.min_vel)
         self.move(vel, 0.0)
         self.get_logger().info(f'center={self.center:.3f} sharp={self.center_sharp:.1f} frac={frac:.2f} '
