@@ -1,351 +1,318 @@
-# Navigation Architecture — room navigation, object mapping, stairwell safety, visualization
+# IPPOLIT companion software architecture — production-grade ROS 2 plan
 
-**Status: PLAN (2026-07-12).** This doc is the architecture + step-by-step implementation plan for taking
-IPPOLIT from "validated building blocks" to "navigates a room, maps it with objects, never falls down the
-stairwell, and you can watch it all live." It is written to be executed incrementally by a simpler model:
-every phase has exact files, exact interfaces, a verification procedure, and the relevant landmines from
-past sessions. **Read the Gotchas section (§8) before touching anything.**
+**Status: ACTIVE PLAN (2026-07-12, rev 2).** Rev 1 of this doc planned the navigation features but kept
+the historical "loose scripts + hand-managed systemd units" convention. **That convention is now
+superseded by explicit user direction**: the solution must be architected as a whole, production-grade
+ROS 2 system — proper workspace, packages, interfaces, launch, tests, CI, deployment — not a set of
+manually managed scripts. This rev is the full plan: Part A builds the engineering foundation, Part B
+builds the robot features (room navigation, object mapping, stairwell safety, visualization) on top of it.
 
-Guiding constraints (non-negotiable, from project decisions):
-- **Everything runs on the Q6A companion.** The robot keeps only AVA/Valetudo + the LD_PRELOAD taps +
-  ROS-free forwarders. No ROS on the robot.
-- **AVA is used as little as possible** — but it *owns the motors*, so the one unavoidable AVA-path is
-  Valetudo's `HighResolutionManualControlCapability` REST endpoint (velocity+angle PUTs). The architecture
-  therefore funnels ALL actuation through exactly one node (§3.1) so the AVA/REST surface stays minimal
-  and swappable.
-- **ROS best practices**: standard messages (`geometry_msgs/Twist`, `nav_msgs/OccupancyGrid`), REP-105
-  frames, Nav2 for planning/control, `twist_mux` for command arbitration, lifecycle-managed nodes,
-  per-node systemd units (this project deliberately does NOT use colcon packages or `ros2 launch` — each
-  node is a plain script + a systemd unit; keep that convention).
+Written to be executed incrementally by a simpler model: every phase has exact deliverables, a
+verification gate, and references the landmine list (§9). **Read §9 before touching anything.**
 
----
-
-## 1. Current state (verified, as of 2026-07-12)
-
-### Working and validated
-
-| Layer | Node / unit | Topics / TF | Notes |
-|---|---|---|---|
-| LiDAR | `lds-scan-node` | `/scan` (~5 Hz) | robot LDS tap → TCP ring → LaserScan. Bearing offset+sign calibrated 2026-07-12 (`angle_offset_deg:=43.0`, sign flipped in `lds_scan_node.py`) |
-| Odometry | `q6a-laser-odom` | `odom→base_link` TF, `/odom_laser` | ICP scan matcher. Wheel odom (`/odom/wheel` from `mcu-node`) exists but slips during in-place pivots — laser odom is authoritative |
-| SLAM | `q6a-slam-toolbox` | `/map`, `map→odom` TF, `/pose` | Jazzy lifecycle node — needs `slam_lifecycle_up.sh` (ExecStartPost) or it idles unconfigured forever |
-| Map persistence | `q6a-map-persist` | (services) | periodic serialize every 30 s to `/home/radxa/ros/maps/apartment.posegraph`; resume on start. **Real multi-node resume UNVERIFIED** (only tested vs empty graphs). Has `MIN_RESUME_BYTES` guard — deserializing a zero-scan graph SEGFAULTS slam_toolbox (found live) |
-| Vision | `q6a-vision` | `/vision/detections`, `/vision/floor` (JSON String) | YOLOv8+ByteTrack+MiDaS on the robot's OV8856 (siphoned frames). MiDaS is *relative* disparity, not metric |
-| Object map | `q6a-objmap` | `/object_map` (JSON String), `/object_markers` (MarkerArray) | conf gate + class allowlist + ≥3-sighting persistence + 0.5 m merge. Persists to `maps/object_map.json`. Camera HFOV/yaw/bearing-sign are ESTIMATES (never calibrated) |
-| MCU signals | `mcu-node` | `/cliff`, `/cliff/front`, `/cliff/rear`, `/wheel_floating`, `/bumper`, `/imu/data`, `/odom/wheel`, `/mcu/*` | full Triggers decode. **Key finding: downward IR (`d_view_*`) gives NO early warning — co-fires with wheel-drop at the instant of failure** |
-| Cliff safety | `cliff-guard` | `/cliff/ahead` (advisory) + hard e-stop on `/cliff` | e-stop = REST `disable` ×3. Advisory layer never blocks motion (edge-following must stay possible) |
-| Drive (scripts, not services) | `q6a_drive.py`, `q6a_edge_follow.py`, `q6a_creep_test.py` | — | each does its OWN raw REST PUTs — this is the main refactor target (§3.1) |
-| Bridge | `valetudo-bridge` | `/battery`, `/robot/status`, `/map_valetudo` (relabeled aside) | Valetudo's own map/pose deliberately NOT in the TF tree |
-| Audio | `audio-bridge`, `q6a-announce` | `/robot/speak` | |
-
-TF tree (REP-105, correct, single-parent): `map ─(slam_toolbox)→ odom ─(laser_odom)→ base_link ─(static)→ laser`.
-
-Environment (`/etc/default/ippolit-robot`): `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`,
-`ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST` (⚠️ topics are NOT visible off-board — see §6),
-`ROBOT_ADDR=192.168.1.213`.
-
-Installed already: `ros-jazzy-nav2-bringup`, `ros-jazzy-nav2-costmap-2d`, `ros-jazzy-nav2-map-server`.
-NOT installed yet: `twist-mux`, `foxglove-bridge` (both are Phase deps below).
-
-### Validated safety behaviors (edge/stairwell) — the inputs to §5
-
-1. **MiDaS floor-drop** (`/vision/floor` center+sharp): reliable mid-range (calibration 2026-07-12:
-   strongest at 15–20 cm from edge, center≈0.65–0.68 / sharp≈16–17; declining by 10 cm; **fully blind ≤5 cm**
-   and at any point the chassis occludes the view). Trigger thresholds are noisy run-to-run (center peak
-   0.5–0.76 observed) — bias thresholds toward *reliably firing early* over precisely-timed.
-2. **Caution zone** (creep-test v7): on MiDaS trigger, drop to 0.15 and **latch** (never un-latch on a low
-   reading — a low reading up close IS the blind spot); re-arm only on >15° direction change.
-3. **Odometry blind-creep**: latch pose at a confident MiDaS reading, creep a fixed odometry-tracked
-   distance. Worked (5–13 cm landings) but variance up to 35 cm at identical setup — precision open item.
-4. **`/wheel_floating`** is the earliest reflex signal; pause (true zero, not low velocity) while it's
-   active +0.6 s settle. Continuously commanding ANY nonzero velocity fights AVA's recovery reflex.
-5. **`MAX_SAFE_VEL = 0.4`**: AVA's wheel-drop self-recovery works at ≤0.4, **fails at 1.0** (momentum →
-   wheels off ground, physical rescue needed). The caution zone independently prevented a repeat even at
-   raw 1.0 — but 0.4 stays a hard clamp in the actuation layer.
-6. **A 2-D LiDAR cannot see a hole in the floor.** The stairwell reads as *open space* in `/scan` and in
-   the SLAM map. This is THE reason the stairwell needs map-level annotation (§5.1) + perception-level
-   virtual obstacles (§5.2) — the occupancy grid alone will happily route a planner straight into the hole.
+Non-negotiable project constraints (unchanged):
+- Everything runs on the Q6A companion; the robot keeps only AVA/Valetudo + LD_PRELOAD taps + ROS-free
+  forwarders. No ROS on the robot.
+- AVA is used minimally — but it owns the motors, so Valetudo's `HighResolutionManualControlCapability`
+  REST endpoint is the single unavoidable actuation path. The architecture funnels ALL motion through
+  exactly one node so that surface stays minimal and swappable.
+- Sensor access stays via the existing taps (`/scan` ring-forward, camera siphon, MCU decode) — those are
+  robot-side and out of scope here except as driver-package wrappers.
 
 ---
 
-## 2. Gap analysis — what's missing for the stated goals
+## 1. Where we are vs where production-grade points (gap summary)
 
-| Goal | Missing |
+What exists **works and is live-validated** (SLAM chain, object map, persistence, edge-safety behaviors —
+see rev-1 inventory, now in §8 appendix), but structurally it is prototype-grade:
+
+| Area | Today | Production practice (grounded via 2025/2026 ROS-Industrial / community guidance) |
+|---|---|---|
+| Code organization | ~15 loose Python files in `scripts/companion/`, hand-`scp`'d to `/home/radxa/ros/` | colcon workspace, ament packages with single responsibilities, versioned deploys |
+| Configuration | env vars in `/etc/default/ippolit-robot` + constants edited in-file | declared ROS parameters loaded from per-node YAML in a bringup package |
+| Interfaces | JSON blobs on `std_msgs/String` (`/vision/detections`, `/vision/floor`, `/object_map`, `/mcu/triggers`) | standard msgs (`vision_msgs`, `sensor_msgs/Range`) + a small `ippolit_interfaces` package for the rest |
+| Robot model | ad-hoc static TF publishes, geometry constants (BODY_R) duplicated across scripts | URDF/xacro + `robot_state_publisher`; one source of truth for geometry |
+| Startup | 12 independent systemd units, ordering by `After=` guesswork, lifecycle handled by a bash poller | launch files (XML preferred as the launch front-end) + lifecycle management; systemd supervises ONE launch per subsystem |
+| Actuation | every drive script does its own raw REST PUTs; safety node races them | one `cmd_vel` sink node; `twist_mux` arbitration; Nav2 on top |
+| Testing / CI | none; every regression found live on hardware | pytest per package, `launch_testing` smoke, lint; GitHub Actions colcon build+test on every push |
+| Deployment | `scp` file-by-file, drift between repo and device found repeatedly (mcu_node decode gap, stray drop-in) | one deploy script: git pull → `rosdep install` → `colcon build` → restart; device state fully derived from the repo |
+| Observability | ssh + journalctl + ad-hoc monitor scripts | `/diagnostics` (diagnostic_updater + aggregator), rolling rosbag2/MCAP incident recorder, Foxglove |
+
+The repeated real-world failures this structure caused: the deployed `mcu_node.py` silently missing a
+month of decode work; a stray systemd drop-in overriding a unit edit; three drive scripts and a safety
+node fighting over the REST endpoint; constants like `MAX_SAFE_VEL`/camera FOV duplicated and drifting.
+Part A eliminates these classes of failure, not just instances.
+
+---
+
+## 2. Target architecture
+
+### 2.1 Workspace and packages (new repo layout)
+
+```
+ros2_ws/src/
+  ippolit_interfaces/     # msg/srv: FloorDrop.msg, MappedObject.msg, MappedObjectArray.msg,
+                          #   McuTriggers.msg, CliffState.msg  (ament_cmake, msgs only)
+  ippolit_description/    # URDF/xacro (base_link, laser, camera, wheel geometry, BODY_R),
+                          #   robot_state_publisher config  (replaces ad-hoc static TFs)
+  ippolit_drivers/        # lds_scan_node, mcu_node, valetudo_bridge, audio_bridge
+                          #   (hardware/robot I/O only — no business logic)
+  ippolit_control/        # cmd_vel_bridge (Twist→Valetudo REST; THE only actuation surface),
+                          #   twist_mux config
+  ippolit_safety/         # cliff_guard, cliff_scan (virtual-obstacle publisher), estop logic
+  ippolit_perception/     # vision node (YOLO+ByteTrack+MiDaS), objmap node
+  ippolit_localization/   # laser_odom (custom ICP, kept — see D3), map_persist
+  ippolit_navigation/     # nav2 params, costmap filter masks, goto_object action client
+  ippolit_teleop/         # (thin) foxglove teleop remaps, joystick later
+  ippolit_bringup/        # launch/*.launch.xml, config/*.yaml (ALL node params), systemd templates,
+                          #   deploy script, rosbag recorder config
+```
+
+Rules: ament_python for the Python nodes (entry points in `setup.py`, no more `python3 /path/file.py`);
+`ippolit_interfaces` is ament_cmake (message generation); every node = one class, ROS wiring separated
+from core logic (testable without rclpy where practical); parameters **declared** with types/descriptions
+and loaded from `ippolit_bringup/config/<node>.yaml` — env vars are retired except `ROBOT_ADDR`-class
+machine-local values, which move to one `machine.env` sourced by the systemd unit.
+
+### 2.2 Interfaces (retiring JSON-on-String)
+
+| Today | Becomes |
 |---|---|
-| **Navigate the room** (go to a pose/object) | No `cmd_vel` abstraction; no Nav2 bringup (planner/controller/BT/costmaps); no command arbitration (nav vs safety vs teleop currently race each other with raw REST) |
-| **Map the room with objects** | No verified map resume with real data; no full-room coverage drive; camera extrinsics uncalibrated (object positions systematically skewed); no room/segment tagging |
-| **Handle the stairwell** | Nothing marks the hole on the map (LiDAR sees it as free!); cliff logic lives in per-script code instead of the costmap where the *planner* can see it; user wants "caution/slow zone", not hard no-go → Nav2 SpeedFilter + small lethal KeepoutFilter core |
-| **Visualize** | DDS is localhost-only → RViz on another machine sees nothing; no websocket bridge; no saved viz layout |
+| `/vision/detections` JSON String | `vision_msgs/Detection2DArray` (standard; label/score/bbox/track id in `id`) |
+| `/vision/floor` JSON String | `ippolit_interfaces/FloorDrop` (per-sector drop + sharpness + header) |
+| `/object_map` JSON String | `ippolit_interfaces/MappedObjectArray` (class, pose, n, conf, room) + keep RViz/Foxglove `MarkerArray` |
+| `/mcu/triggers` JSON String | `ippolit_interfaces/McuTriggers` (named bools) — `/cliff`, `/bumper`, `/wheel_floating` stay `Bool` (they're fine) |
+| persistence files | unchanged (posegraph + JSON on disk is an implementation detail of map_persist/objmap) |
 
----
+Migration is per-topic with a compatibility window: new typed topic published alongside the JSON one until
+all consumers are ported, then the JSON publisher is deleted (grep the repo to confirm zero subscribers).
 
-## 3. Target architecture
+### 2.3 Runtime graph (unchanged in shape from rev 1 — now expressed as packages)
 
 ```
-                 PERCEPTION (exists)                      NAVIGATION (new)
-  /scan ─┬─→ q6a-laser-odom ─→ odom→base_link      ┌────────────────────────────────┐
-         ├─→ q6a-slam-toolbox ─→ /map, map→odom,   │ nav2: map_server(+keepout,     │
-         │      /pose            ↑ resume/save     │  +speed masks), planner_server,│
-         │                 q6a-map-persist         │  controller_server, bt_navigator,│
-         ├────────────────────────────────────────→│  behavior_server, lifecycle_mgr │
-  camera → q6a-vision ─→ /vision/detections ──────→│  global+local costmaps          │
-                     └─→ /vision/floor ──┐         └───────────────┬────────────────┘
-                                         │                         │ /cmd_vel_nav
-                                         ▼                         ▼
-                              q6a-cliff-scan (new)          twist_mux (new)
-                              MiDaS drop → virtual          priorities:
-                              obstacle LaserScan ──→ local   1. /cmd_vel_safety (cliff_guard)
-                              costmap obstacle layer         2. /cmd_vel_teleop (Foxglove)
-                                                             3. /cmd_vel_nav (Nav2)
-                                                                   │ /cmd_vel
-                                                                   ▼
-                                                        q6a-cmd-vel-bridge (new)
-                                                        Twist → Valetudo REST
-                                                        · MAX_SAFE_VEL clamp (0.4)
-                                                        · enable/disable ownership
-                                                        · explicit-zero on idle (Valetudo
-                                                          HOLDS last velocity!)
-                                                        · watchdog: no Twist 0.5s → zero
-                                                                   │ one REST surface
-                                                                   ▼
-                                                     Valetudo HighResolutionManualControl
-                                                              (the only AVA touchpoint)
-
-  VISUALIZATION (new): foxglove_bridge :8765 (websocket) → Foxglove Studio on Mac/Odyssey
-    panels: /map + masks, /object_markers, /pose, /scan, camera MJPEG (robot :8090), teleop→/cmd_vel_teleop
+ drivers: lds_scan → /scan          mcu → /imu /odom/wheel /cliff /wheel_floating (+McuTriggers)
+          valetudo_bridge → /battery /robot/status
+ localization: laser_odom → odom→base_link ;  slam_toolbox → /map, map→odom, /pose ;  map_persist
+ description: robot_state_publisher → base_link→laser, base_link→camera (from URDF)
+ perception: vision → Detection2DArray + FloorDrop ;  objmap → MappedObjectArray + markers
+ safety: cliff_guard → /cmd_vel_safety (zero-Twist hold) + REST disable backstop
+         cliff_scan → /virtual_cliff_scan (synthetic LaserScan from FloorDrop, latched per §9-G9)
+ navigation: nav2 (planner/controller/BT/behaviors, lifecycle-managed)
+             costmaps: static(/map) + obstacle(/scan) + obstacle(/virtual_cliff_scan, local) + inflation
+             + KeepoutFilter (stairwell hole+rim, lethal) + SpeedFilter (caution zone ~40%)
+             → /cmd_vel_nav
+ control: twist_mux (safety 100 > teleop 50 > nav 10) → /cmd_vel → cmd_vel_bridge → Valetudo REST
+          bridge: MAX_SAFE_VEL clamp, explicit-zero watchdog (G1), enable/disable ownership, ~6.6 Hz
+ viz: foxglove_bridge :8765 (websocket; LOCALHOST-only DDS makes off-board RViz a non-starter — D5)
+ observability: diagnostic_updater in every driver → /diagnostics → aggregator; rosbag2 MCAP
+          rolling recorder (snapshot service) for incident capture
 ```
 
-Design rationale:
-- **One actuation node** (`q6a-cmd-vel-bridge`) = the entire AVA dependency behind one standard interface.
-  If the REST path ever changes (or a future direct-MCU path appears), one file changes.
-- **twist_mux** (`ros-jazzy-twist-mux`, config-only, no code) replaces today's implicit race where
-  cliff_guard's REST `disable` fights a drive script's REST `move` — the exact "fighting" class of bug
-  that burned a whole day on 2026-07-12, solved by construction.
-- **Cliff hazards live in the costmap**, where the planner can route around them *proactively*, instead of
-  only in reactive per-script checks. Reactive layers stay as the inner safety net (defense in depth, §5).
-- **Foxglove over RViz**: works through the existing localhost-only DDS (single websocket out), browser/
-  desktop app on any machine, has map/marker/teleop panels. RViz stays possible later via DDS peers config,
-  but is not required.
+### 2.4 Launch & process supervision
+
+- `ippolit_bringup/launch/`: `drivers.launch.xml`, `localization.launch.xml`, `perception.launch.xml`,
+  `safety_control.launch.xml`, `navigation.launch.xml` (wraps Nav2 bringup + filter mask servers),
+  `viz.launch.xml`, and a top-level `robot.launch.xml` including them all.
+- systemd shrinks from ~12 hand-ordered units to **4 supervised groups**, each `ExecStart=ros2 launch ...`:
+  `ippolit-core` (drivers+description+localization+safety+control), `ippolit-perception`,
+  `ippolit-nav`, `ippolit-viz`. Groups = restart blast-radius boundaries (perception can crash-loop
+  without taking the safety chain down). `Restart=on-failure`, `KillSignal=SIGINT` (rclpy needs it),
+  journald logging as today.
+- Lifecycle: nav2's own lifecycle manager handles the nav set; `slam_toolbox`'s configure/activate moves
+  from the bash poller into the launch file (launch lifecycle transition events); custom nodes stay
+  regular nodes unless a real bring-up ordering need appears (don't cargo-cult lifecycle everywhere).
+
+### 2.5 Testing & CI
+
+- Unit: pytest per package for the logic that has burned us — Twist→(velocity,angle) mapping + clamps,
+  caution-zone latch state machine, objmap merge/dedup, MIN_RESUME_BYTES guard, mask coordinate math.
+- Integration: `launch_testing` smoke — bring up drivers+localization with a recorded `/scan` bag input,
+  assert expected topics publish and TF tree resolves `map→base_link` (catches the "deployed but silent"
+  class).
+- Lint: `ament_flake8` + `ament_pep257` as test dependencies.
+- CI (GitHub Actions): on every push/PR — `ubuntu-24.04` runner, install ros-jazzy-ros-base via apt,
+  `rosdep install`, `colcon build`, `colcon test`. This validates source + interfaces on amd64; the Q6A
+  is arm64 but ament_python + msgs are arch-independent (add a qemu arm64 job only if a compiled package
+  ever appears). Hardware-in-loop stays manual by design — CI gates structure, not physics.
+
+### 2.6 Deployment (D4)
+
+Native build on the Q6A (12 GB RAM / 8 cores — colcon of pure-Python packages takes seconds; Debian
+packages remain the preferred channel for upstream deps, per ROS guidance). One idempotent script in the
+repo, `ippolit_bringup/scripts/deploy.sh`, run **on the Q6A**:
+
+```
+git -C ~/ippolit pull --ff-only            # repo clone ON the device (replaces scp-drift forever)
+rosdep install --from-paths ~/ippolit/ros2_ws/src -y
+cd ~/ippolit/ros2_ws && colcon build --symlink-install
+sudo systemctl daemon-reload && sudo systemctl restart ippolit-core ippolit-perception ippolit-nav ippolit-viz
+```
+
+Releases = git tags (`v0.x`); the device runs a tag, not a branch tip, once stable. Docker (multi-stage
+cacher/builder/runner) is the documented **future** option if a second robot or an x86 dev-parity need
+appears — deliberately not now: one robot, native deps already proven, containers would add a layer
+between us and the NPU/camera stack for zero current benefit. Rollback = `git checkout <prev-tag> && deploy.sh`.
+
+### 2.7 Observability
+
+- `diagnostic_updater` in every driver: scan rate, ring-forward connection state, MCU frame rate, REST
+  reachability, battery; `diagnostic_aggregator` publishes a single tree Foxglove renders natively.
+- **Rolling incident recorder**: rosbag2 MCAP, snapshot mode (RAM ring, service-triggered dump), topics:
+  `/scan /pose /cmd_vel* /cliff* /wheel_floating FloorDrop /diagnostics`. Every "it fought AVA again"
+  moment this week was reconstructed from grep-ing text logs; a bag dump makes those one-click analyses.
+  cliff_guard's e-stop path triggers a snapshot automatically.
 
 ---
 
-## 4. Implementation plan — phases and steps
+## 3. Decision records
 
-Conventions for every step: scripts live in `scripts/companion/`, units in `scripts/companion/systemd/`;
-deploy = `scp` to `ippolit-lan:/tmp/` then `sudo cp` into `/home/radxa/ros/` (+ `/etc/systemd/system/` for
-units, then `daemon-reload`); **every deployed file gets committed to git in the same session** (standing
-rule); every change gets a CHANGELOG entry. All new units copy the pattern of `q6a-objmap.service`
-(`KillSignal=SIGINT`, `EnvironmentFile=-/etc/default/ippolit-robot`, `User=radxa`, `Restart=on-failure`).
-
-### Phase 0 — close the open verification items (no new code)
-
-0.1 **Verify real map resume** (task #22). Drive the robot manually (or `q6a_drive.py`) for ≥1 min while
-    SLAM maps; confirm `maps/apartment.posegraph` grows ≫50 KB; `sudo systemctl restart q6a-slam-toolbox
-    q6a-map-persist`; confirm log `resumed saved map`, `/map` still shows the previously-mapped area, and
-    slam_toolbox does NOT segfault (watch `journalctl -fu q6a-slam-toolbox` during the restart).
-    *If it segfaults with a real graph too, STOP — the persistence design needs rework before anything
-    downstream (masks are drawn against this map).*
-0.2 **Calibrate camera bearing for objmap.** Place one high-confidence object (the tv) at a known bearing;
-    compare `/object_markers` position against reality; tune `Q6A_CAM_HFOV_DEG` / `Q6A_CAM_YAW_DEG` /
-    `Q6A_CAM_BEAR_SIGN` env vars (in `/etc/default/ippolit-robot`) until the marker lands right. The LiDAR
-    bearing fix (2026-07-12) makes this meaningful now; before it, object bearings were doubly wrong.
-
-### Phase 1 — actuation layer (`cmd_vel`) — everything else depends on this
-
-1.1 **`q6a_cmd_vel_bridge.py` + `q6a-cmd-vel-bridge.service`.** Subscribes `/cmd_vel`
-    (`geometry_msgs/Twist`), translates to Valetudo `{action:"move", vector:{velocity, angle}}`.
-    Requirements (each encodes a live-learned lesson):
-    - Clamp `velocity` to `MAX_SAFE_VEL=0.4` unconditionally. No override flag in this node — the
-      `--force-unsafe-velocity` escape hatch stays only in the supervised `q6a_creep_test.py`.
-    - Own `enable`/`disable`: enable on first nonzero Twist, disable on clean shutdown.
-    - **Watchdog**: if no Twist for 0.5 s, send an explicit `{velocity:0}` — Valetudo HOLDS the last
-      commanded velocity indefinitely (confirmed live; "pausing" by not sending is NOT stopping).
-    - Send at a steady ~6.6 Hz from a persistent process (bash-loop/subprocess delivery gaps let the
-      motion decay — confirmed live).
-    - **Twist→(velocity,angle) mapping is UNKNOWN and must be calibrated** (step 1.2). Start with:
-      `velocity = clamp(|linear.x|, 0, 0.4)`, `angle = clamp(degrees-ish * angular.z, -90, 90)`,
-      reverse unsupported initially (Valetudo vector semantics for reverse unverified — treat
-      `linear.x < 0` as stop until calibrated).
-    - Params via env: `Q6A_CMDVEL_MAX_VEL`, `Q6A_CMDVEL_WATCHDOG_S`, `Q6A_CMDVEL_ANGLE_GAIN`.
-1.2 **Calibrate the mapping** with a `turn_diag.py`-style script (exists in scratchpad history; rewrite:
-    publish fixed Twists, watch `/odom_laser` yaw/position — NOT wheel odom, it slips in pivots). Produce:
-    m/s per `velocity` unit, rad/s per `angle` degree, minimum effective values, pure-rotation recipe.
-    Record results as constants + comments in the bridge.
-1.3 **Install `twist_mux`** (`sudo apt install ros-jazzy-twist-mux`) + `twist_mux.yaml` + unit. Topics/
-    priorities: `/cmd_vel_safety` (prio 100, timeout 0.5 s), `/cmd_vel_teleop` (50), `/cmd_vel_nav` (10)
-    → out `/cmd_vel`.
-1.4 **Port `cliff_guard` to the mux.** On wheel-drop e-stop: publish zero-Twist to `/cmd_vel_safety` at
-    ~7 Hz for a hold period (this outranks and *silences* nav/teleop — no more REST races). KEEP the direct
-    REST `disable ×3` as the second, independent action (belt-and-braces; it also covers non-cmd_vel
-    scripts like creep-test). Add `/wheel_floating` → safety-zero while active +0.6 s settle (validated
-    behavior, §1.4).
-1.5 **Port one drive script as proof** (`q6a_drive.py` → publish `/cmd_vel_nav` instead of raw REST) and
-    verify behavior unchanged. `q6a_edge_follow.py` / `q6a_creep_test.py` can migrate later — they are
-    supervised tools, not services.
-    ✅ Phase gate: teleop Twist moves robot; killing the publisher stops it in <0.5 s; wheel-drop test
-    (lift robot) zeroes `/cmd_vel` regardless of publishers.
-
-### Phase 2 — visualization
-
-2.1 `sudo apt install ros-jazzy-foxglove-bridge`; new unit `q6a-foxglove-bridge.service`
-    (`ros2 run foxglove_bridge foxglove_bridge --ros-args -p port:=8765`). Works with LOCALHOST-only DDS
-    since it's an on-board node exporting over its own websocket.
-2.2 Foxglove Studio (Mac or Odyssey) → `ws://radxa-dragon-q6a.local:8765`. Build + save a layout into the
-    repo (`docs/foxglove-layout.json`): Map panel (`/map`), 3D panel (`/object_markers`, `/pose`, `/scan`,
-    TF), Raw topic (`/object_map`), Image panel via the robot camera MJPEG (`http://192.168.1.213:8090/`),
-    Teleop panel → `/cmd_vel_teleop`, plots for `/vision/floor` center/sharp (invaluable for edge work).
-    ✅ Phase gate: watch the map grow + markers appear live while teleoping from the Foxglove panel.
-
-### Phase 3 — map the room properly (needs 1+2)
-
-3.1 **Coverage drive**: teleop (Foxglove) around the full room perimeter + interior at ≤0.3, LiDAR turret
-    forced on (see gotcha G6), ending back near the start to give loop closure a chance. Watch `/map` live.
-    Confirm at least one loop-closure log line from slam_toolbox (first-ever real loop-closure validation).
-3.2 Save + verify resume again (Phase 0.1 procedure) — now with a full-room graph.
-3.3 **Export the grid**: `apartment.yaml/.pgm` already saved by `q6a-map-persist` (`save_map` succeeds once
-    a real map exists — `result=1` just meant "no map yet").
-3.4 **Author the stairwell masks** (the "caution not no-go" answer, per explicit user direction):
-    - `maps/keepout_mask.pgm/.yaml`: copy of the map with a LETHAL band only over the physical hole +
-      ~15 cm rim (matches blind-creep landing variance) — the region where being there at all = falling.
-    - `maps/speed_mask.pgm/.yaml`: broader zone (~0.8 m around the hole) encoding "max 40% speed here"
-      (SpeedFilter percentage semantics) — the caution-driving zone.
-    - Mask authoring = editing the PGM (GIMP/Python/PIL); document exact pixel↔world math
-      (`resolution`, `origin` from the map yaml) in a comment/README next to the masks.
-    - Locate the hole in map coords by teleoping near it (supervised!) and reading `/pose`, or from
-      recorded `/cliff/ahead` events + `/pose` during the coverage drive.
-    ✅ Phase gate: full-room map survives a Q6A reboot; masks exist and align with the map in Foxglove.
-
-### Phase 4 — Nav2 bringup (needs 1+3)
-
-4.1 `nav2_params.yaml` (in repo, deployed next to the other configs). Key choices for THIS robot:
-    - Costmaps: global = static layer (`/map` from slam_toolbox) + obstacle layer (`/scan`) + inflation
-      (radius ≥0.25 m; robot_radius 0.18 m per BODY_R work) + **KeepoutFilter + SpeedFilter** (masks via
-      two extra `nav2_map_server` instances serving the Phase-3 masks); local = rolling, obstacle layer
-      from `/scan` **and** `/virtual_cliff_scan` (Phase 5), inflation.
-    - Controller: RPP (regulated pure pursuit) or DWB with `max_vel_x` mapped to real m/s from the 1.2
-      calibration (≤ the m/s equivalent of Valetudo 0.4); in-place rotation allowed (diff-drive).
-    - Planner: default NavFn is fine at apartment scale.
-    - `cmd_vel` remap → `/cmd_vel_nav` (into the mux — Nav2 NEVER talks REST).
-    - Lifecycle: one `nav2_lifecycle_manager` autostarting the nav2 nodes; all under ONE
-      `q6a-nav2.service` unit (exception to one-node-per-unit — nav2 is a managed set; use
-      `ros2 launch nav2_bringup navigation_launch.py params_file:=...` inside the unit, or a minimal
-      python launch file in the repo. This is the one place `ros2 launch` earns its keep).
-4.2 First goal test: send `NavigateToPose` from Foxglove (3D panel → pose goal) across open floor, away
-    from the stairwell. Expect ~5 Hz `/scan` to make the local costmap laggy — keep speeds low
-    (this is also why the reactive layers stay).
-4.3 Tune until: reaches goals ±0.15 m, no oscillation, respects keepout/speed masks (watch costmap
-    overlays in Foxglove).
-    ✅ Phase gate: repeatable A→B navigation across the room with masks honored.
-
-### Phase 5 — cliff-aware navigation (the stairwell, end-to-end)
-
-Four independent layers, outermost first (all four must hold):
-1. **Map masks** (Phase 3.4 / 4.1): planner never *plans* near the hole; SpeedFilter enforces caution
-   speed if a path skirts the zone.
-2. **`q6a_cliff_scan.py` (new) + unit**: consumes `/vision/floor` + `/pose`; when center-drop fires
-   (cliff_guard thresholds: 0.30/sharp≥4, LiDAR-fused 0.24), publish a synthetic `LaserScan`
-   (`/virtual_cliff_scan`, frame `base_link`) with a short-range return in the drop's direction → local
-   costmap marks it lethal → controller steers off *dynamically*, even if the robot was placed somewhere
-   the masks don't cover. **Latch each virtual obstacle for ≥10 s and clear only on >15° heading change**
-   (MiDaS blind-spot rule — never clear because the reading went quiet up close).
-3. **Reactive mux layer** (Phase 1.4): `/wheel_floating` pause + wheel-drop safety-zero.
-4. **AVA's own recovery**: proven at ≤0.4 — guaranteed by the bridge clamp.
-   Test protocol (supervised, human ready to catch, exactly like the creep-test sessions): goal on the far
-   side of the speed zone → expect detour/slowdown; goal *inside* the keepout → Nav2 must refuse/fail
-   gracefully; robot hand-placed pointing at the hole outside the speed zone, goal beyond it → virtual
-   cliff scan must divert it. Watch `/virtual_cliff_scan` + local costmap in Foxglove throughout.
-   ✅ Phase gate: all three scenarios pass twice each.
-
-### Phase 6 — object map integration ("go to the fridge")
-
-6.1 **Room tagging**: segment the finished map into named rooms — simplest: a `maps/rooms.yaml` of named
-    rectangles in map coords (hand-authored while looking at Foxglove). `q6a_objmap.py` stamps each object
-    with its room at publish time.
-6.2 **`q6a_goto_object.py`**: resolve class/room query against `/object_map` → standoff pose (~0.6 m back
-    along the robot→object bearing) → `NavigateToPose` action. This is the hook the cloud voice worker's
-    `goto-object` action already emits (see `docs/voice-cloud.md`).
-6.3 (Optional, later) migrate `/object_map` JSON-String to `vision_msgs/Detection3DArray` for
-    ecosystem-standard tooling. Not blocking anything.
-
-### Phase 7 — stretch (explicitly out of scope for now)
-Frontier exploration (m-explore-ros2) for autonomous coverage; metric MiDaS scaling vs `/scan`;
-multi-floor. Do not start these before Phases 0–6 are done.
+- **D1 (supersedes rev-1/companion-autonomy "no colcon" convention):** full colcon workspace + ament
+  packages. Rationale: user direction to production grade; the loose-script model demonstrably caused
+  deploy drift, config drift, and duplicated constants. The old convention is retired everywhere, not
+  case-by-case.
+- **D2 — single actuation node** (`cmd_vel_bridge`) + `twist_mux`: eliminates the REST-race bug class by
+  construction; keeps the whole AVA dependency behind one standard interface.
+- **D3 — keep the custom ICP laser odom for now.** Evaluated alternatives: `robot_localization` EKF
+  (wheel+IMU fusion) and community 2-D laser odometry (rf2o/kiss-icp). Ours is live-validated on this
+  exact sensor; wheel odom slips in pivots (measured), so an EKF fed by it needs careful covariance work.
+  Revisit only if laser odom becomes the accuracy bottleneck after Phase F3 mapping. Not a blocker.
+- **D4 — native-on-device builds, no Docker yet** (see 2.6).
+- **D5 — Foxglove over RViz** for off-board viz: `ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST` is deliberate
+  (DDS stability); foxglove_bridge exports over one websocket without touching DDS. RViz possible later
+  via CycloneDDS static peers; nothing depends on it.
+- **D6 — stairwell = caution zone, not blanket no-go** (explicit user direction): small lethal
+  KeepoutFilter over the physical hole + ~15 cm rim (matches measured stop-distance variance), broader
+  SpeedFilter (~40 %) caution zone, PLUS dynamic MiDaS virtual obstacles, PLUS reactive reflexes. Four
+  independent layers because the hole is invisible to the 2-D LiDAR (reads as free space) and MiDaS goes
+  blind at the boundary — authored map data and sensed layers cover each other's failure modes.
+- **D7 — XML launch files** (current community guidance: Python launch wasn't meant as the everyday
+  front-end; XML keeps them declarative). Python launch only where logic is unavoidable (nav2 wrap).
 
 ---
 
-## 5. Stairwell decision record (why this shape)
+## 4. Part A — engineering foundation (phases A0–A5)
 
-- User explicitly rejected a blanket permanent no-go: the robot must be able to *work near* the edge
-  (edge-following at 5–10 cm is a project goal). Hence **SpeedFilter caution zone** (slow, not forbidden)
-  + a **small lethal keepout only over the physical hole + rim**.
-- The hole is invisible to every mapping sensor we have (2-D LiDAR at turret height sees free space;
-  MiDaS goes blind at the boundary). So the map annotation is *authored*, not sensed — and the sensed
-  layers (2–4) exist precisely because authored data can be wrong or the robot can start off-map.
-- IR floor sensors were conclusively shown useless for early warning (co-fire with wheel-drop). Do not
-  spend more time on them.
+Each phase = PR-sized, behavior-preserving unless stated, ends with: verify → CHANGELOG → commit → push.
 
-## 6. Visualization decision record
+- **A0 — workspace scaffold.** Create `ros2_ws/src/` with all packages (empty nodes OK), CI workflow,
+  `colcon build && colcon test` green in CI and on the Q6A. Nothing deployed yet.
+  ✅ CI badge green; build clean on device.
+- **A1 — wrap existing nodes.** Move each script into its package **unchanged in logic**, add entry
+  points, keep old topics/params (env vars still read as fallback). Deploy via new `deploy.sh`; replace
+  the 12 units with the 4 group units running launch files. Old `/home/radxa/ros/*.py` copies deleted
+  after verification.
+  ✅ Full stack up via `ros2 launch ippolit_bringup robot.launch.xml`; same topics/rates as before
+  (compare `ros2 topic hz` for `/scan`, `/pose`, `/vision/detections`); reboot test passes; slam lifecycle
+  transition handled by launch (bash poller retired).
+- **A2 — parameters.** Declare all tunables as ROS params with YAML in `ippolit_bringup/config/`;
+  document each with description strings. Env-var reads deleted. The safety constants (`MAX_SAFE_VEL`,
+  caution thresholds, MIN_RESUME_BYTES) get validation (rejected if out of proven ranges).
+  ✅ `ros2 param dump` per node matches YAML; grep confirms no `os.environ` left outside machine.env.
+- **A3 — interfaces.** Create `ippolit_interfaces`, port topics per §2.2 with the compatibility window.
+  ✅ `ros2 topic echo` shows typed data; Foxglove plots FloorDrop fields directly; JSON publishers removed.
+- **A4 — URDF + robot_state_publisher.** Measure/encode geometry once (wheel base, BODY_R→radius, laser
+  and camera poses — the camera yaw/HFOV calibration from F0 feeds this). All static TF publishes and
+  duplicated geometry constants removed in favor of TF lookups / one xacro property file.
+  ✅ `ros2 run tf2_tools view_frames` shows the full tree sourced from URDF; objmap bearing math consumes
+  the camera frame from TF.
+- **A5 — tests + observability.** The §2.5 test set green in CI; diagnostics + aggregator live; rolling
+  MCAP recorder unit + snapshot service; cliff e-stop wired to auto-snapshot.
+  ✅ Foxglove diagnostics panel shows all-OK tree; pulling the LiDAR ring cable flips its diagnostic to
+  ERROR within 5 s; a triggered snapshot bag opens in Foxglove.
 
-`ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST` (deliberate, part of the DDS-stability fix) means off-board
-RViz sees nothing without config surgery. `foxglove_bridge` runs on-board and serves everything over one
-websocket — no DDS changes, works from the Mac and the Odyssey, includes teleop + map + 3-D panels.
-RViz remains an option later via CycloneDDS static peers, but nothing in Phases 0–6 needs it.
+## 5. Part B — robot features (phases F0–F6)
 
-## 7. What we deliberately do NOT do
+Same functional content as rev 1, now landing inside the packages. Preconditions: F1 needs A1; F4+ needs
+A2 (param-driven nav tuning) and ideally A3/A4.
 
-- No ROS on the robot (settled 2026-07-08). No new AVA shims for motion — REST manual control only.
-- No colcon/workspace conversion — plain scripts + systemd units stay (the one launch-file exception is
-  the Nav2 set, §4.1).
-- No Valetudo GoTo/segment cleaning for autonomy (blocked in work_mode 17 during manual control; and it
-  hands control to AVA's planner — the opposite of the project direction).
-- No attempt to make the on-device 1B LLM do anything agentic (settled 2026-07-04; voice/LLM = cloud).
+- **F0 — close verification debt.** (a) Real map resume (task #22): drive ≥1 min, posegraph ≫50 KB,
+  restart slam+persist, confirm resumed map and NO segfault (G4 — if a real graph also crashes, STOP and
+  rework persistence before anything downstream). (b) Camera bearing/FOV calibration against a known
+  object → values recorded for A4's URDF.
+- **F1 — actuation layer** (`ippolit_control`): `cmd_vel_bridge` per §2.3 (clamp, explicit-zero watchdog
+  G1, persistent ~6.6 Hz sender G-rate, enable/disable ownership; reverse unsupported until calibrated),
+  Twist mapping calibrated against `/odom_laser` (G8), `twist_mux` config, cliff_guard ported to
+  `/cmd_vel_safety` (keeps REST-disable backstop), `q6a_drive` behavior re-implemented as a cmd_vel
+  publisher. Supervised-only tools (`edge_follow`, `creep_test`) migrate last.
+  ✅ Teleop Twist drives; killing publisher stops <0.5 s; lifted-wheel test zeroes /cmd_vel regardless of
+  other publishers.
+- **F2 — visualization**: foxglove_bridge in `ippolit-viz` group; repo-committed layout
+  (`docs/foxglove-layout.json`): map+masks, 3-D (markers/pose/scan/TF), FloorDrop plots, camera MJPEG
+  panel (robot :8090), teleop→`/cmd_vel_teleop`, diagnostics.
+- **F3 — map the room**: teleop coverage drive at ≤0.3 (turret gate G6!), loop closure confirmed in logs
+  (first real validation), save/resume verified with the full-room graph; author stairwell masks
+  (keepout: hole+15 cm rim lethal; speed: ~0.8 m zone at 40 %) with documented pixel↔world math; hole
+  located via supervised `/pose` readings + recorded `/cliff/ahead` events.
+- **F4 — Nav2 bringup** (`ippolit_navigation` + nav group unit): params per §2.3; controller RPP with
+  `max_vel_x` = calibrated m/s equivalent of Valetudo 0.4; `/cmd_vel`→`/cmd_vel_nav` remap (Nav2 NEVER
+  touches REST); expect a laggy local costmap at 5 Hz scan — keep speeds low, reactive layers cover.
+  ✅ Repeatable A→B ±0.15 m, masks honored (watch costmap overlays).
+- **F5 — cliff-aware navigation**: `cliff_scan` virtual-obstacle node (FloorDrop → short-range synthetic
+  LaserScan, latched ≥10 s, cleared only on >15° heading change per G9). Supervised test triple: goal
+  across speed zone (slows), goal inside keepout (refused), hand-placed aimed at hole off-mask (virtual
+  scan diverts). Twice each, human ready to catch.
+- **F6 — objects**: room tagging (`rooms.yaml` rectangles → objmap stamps room), `goto_object` action
+  client (MappedObjectArray query → 0.6 m standoff pose → `NavigateToPose`) — the hook the cloud voice
+  worker's `goto-object` action already emits.
+- **F7 (stretch, do not start early)**: frontier exploration, metric MiDaS scaling, multi-floor.
 
-## 8. Gotchas the implementer MUST know (all learned the hard way)
+Suggested order: A0→A1→F0→F1→F2→A2→F3→A3→A4→F4→F5→A5→F6. (Foundation first where it de-risks features;
+features early where they unblock verification debt; A5 before the heavy live-testing of F5 so incident
+bags exist.)
 
-- **G1 — Valetudo holds the last velocity.** Stopping = actively sending zero. A watchdog that merely
-  stops sending does nothing. (Cost a live "fighting AVA" incident.)
-- **G2 — DDS discovery takes 10–12 s** for a fresh node on this box. Any "no data → abort" warm-up gate
-  needs ≥20 s. `ros2 topic hz/list` needs long timeouts too — an empty first answer is usually discovery,
-  not an outage.
-- **G3 — slam_toolbox is a lifecycle node** — without configure+activate it sits silent. `slam_lifecycle_up.sh`
-  handles it; any new lifecycle node needs the same treatment (Nav2's lifecycle_manager does it for nav2).
-- **G4 — deserialize_map on a ~zero-node pose graph SEGFAULTS slam_toolbox** (crash loop). The
-  `MIN_RESUME_BYTES` guard in `q6a-map-persist` covers the known case; if slam_toolbox ever crash-loops
-  right after a "will resume" log: `systemctl stop q6a-map-persist`, delete `maps/apartment.posegraph*`.
-- **G5 — rclpy shutdown**: you cannot make ROS service calls from a `finally:` after SIGINT (context
-  already dead), and disabling rclpy's SIGINT handler breaks `spin()` interruption entirely (process hangs
-  to SIGKILL). Periodic-timer persistence only; no "final save on shutdown".
-- **G6 — the fanoff LiDAR gate is load-bearing.** During manual control the turret is parked by default →
-  `/scan` goes silent → everything above starves. For any driving session:
-  `ssh robot-wifi 'pkill -f fanoff_flag; touch /tmp/lidar_allow'`, and restore the daemon after
-  (`nohup setsid sh /data/fanoff_flag.sh ...` + `rm /tmp/lidar_allow`). A future `q6a-nav` session-manager
-  could automate this; until then it's a manual checklist item.
-- **G7 — `pkill -f` self-match**, including the subtle variant: in a multi-line `ssh host '...'` script the
-  remote shell's cmdline contains EVERY line, so a bracket-escaped pattern still matches a *later* line
-  mentioning the same filename and kills the whole session. Separate SSH calls for pkill vs start.
-- **G8 — wheel odometry lies during in-place pivots** (slip). Use `/odom_laser` or LiDAR bearings as
-  rotation ground truth. Straight-line short-distance wheel odom is fine (blind-creep uses it).
-- **G9 — MiDaS blind zone**: never treat a low floor-drop reading at close range as "clear". Latched
-  hazard states clear on direction change or explicit re-verification, never on signal disappearance.
-- **G10 — sim-to-real placement variance is real**: nominally identical hand placements produced 5–35 cm
-  differences in stop distance. Build margins (mask rim width, standoff distances) at the ≥15 cm scale,
-  and never tune a threshold to the edge of one good run.
-- **G11 — REST schema**: manual control is `{"action": ...}` (NOT `{"operation": ...}` → 400);
-  move vector is `{"velocity": 0..1, "angle": deg}`.
-- **G12 — battery**: Valetudo's charging flag is broken on this model; use `/battery` (AVA `charge_state`
-  via valetudo-bridge). `q6a-brownout` already handles low-battery poweroff — don't duplicate.
+---
 
-## 9. Suggested execution order & effort
+## 6. What we deliberately do NOT do (unchanged)
 
-| Order | Phase | New files | Risk |
-|---|---|---|---|
-| 1 | 0.1 resume verify | — | low, but BLOCKING if it fails |
-| 2 | 1 cmd_vel + mux | `q6a_cmd_vel_bridge.py`, `twist_mux.yaml`, 2 units, cliff_guard edit | medium (drive-by-wire swap) — test with wheels-off-ground first |
-| 3 | 2 Foxglove | 1 unit, layout json | trivial |
-| 4 | 0.2 camera calib | env edits | low |
-| 5 | 3 room map + masks | 2 mask pairs, rooms doc | low code, careful hand-work |
-| 6 | 4 Nav2 | `nav2_params.yaml`, `q6a-nav2.service` (+launch) | high tuning effort |
-| 7 | 5 cliff nav | `q6a_cliff_scan.py` + unit | supervised live tests, human present |
-| 8 | 6 objects | `q6a_goto_object.py`, `rooms.yaml`, objmap edit | low |
+No ROS on the robot; no new AVA shims for motion (REST manual control only); no Valetudo GoTo for
+autonomy (work_mode 17 + wrong direction); no on-device LLM agents (cloud voice worker instead); no
+Docker yet (D4); no exploration before F0–F6 done.
 
-Every phase ends with: verify → CHANGELOG entry → commit (incl. every deployed file) → push.
+## 7. Success criteria (the user-visible definition of done)
+
+1. From a cold boot: one `systemctl` tree brings up everything; Foxglove connects and shows map, robot
+   pose, objects, diagnostics — no ssh needed for routine operation.
+2. "Map the room": teleop drive from Foxglove produces a persistent full-room map + object layer that
+   survives reboots.
+3. Click a nav goal in Foxglove → robot drives there, slowing in the stairwell caution zone, never
+   entering the hole rim, with three sensed safety layers behind the map.
+4. Repo = single source of truth: device state is `git tag` + `deploy.sh`, CI green, every constant in
+   version-controlled YAML, incident bags on every e-stop.
+
+## 8. Appendix — validated-behavior inventory (carried from rev 1)
+
+Working today: `/scan` (5 Hz, bearing calibrated 2026-07-12), laser-ICP odom, slam_toolbox (+lifecycle
+poller), map/objmap persistence (+MIN_RESUME_BYTES segfault guard), YOLO+ByteTrack+MiDaS vision, object
+map (allowlist/dedup/persistence-gate), full MCU Triggers decode, cliff_guard (advisory + e-stop),
+edge-follow controller (corner logic validated), creep-test v7 (caution latch + wheel_floating pause +
+odometry blind-creep, landings 5–13 cm, variance up to 35 cm open item), MAX_SAFE_VEL=0.4 proven recovery
+envelope (1.0 fails), MiDaS edge calibration table (65→5 cm), thermal enclosure headroom, cloud voice
+worker. Battery telemetry via `/battery` (Valetudo charging flag broken on this model). IR floor sensors
+conclusively useless for early warning (co-fire with wheel-drop).
+
+## 9. Gotchas (G1–G12) — unchanged from rev 1, all live-learned; MUST READ
+
+- **G1** Valetudo holds the last velocity — stopping requires actively sending zero; a silent watchdog is
+  not a stop.
+- **G2** DDS discovery takes 10–12 s for fresh nodes here — warm-up gates ≥20 s; empty first `ros2 topic`
+  answers are usually discovery, not outages.
+- **G3** slam_toolbox (Jazzy) is a lifecycle node — unconfigured = silent. Launch-file transitions own
+  this after A1.
+- **G4** `deserialize_map` on a ~zero-node pose graph SEGFAULTS slam_toolbox (crash loop). Guard exists
+  (`MIN_RESUME_BYTES`); on crash-loop after a "will resume" log: stop map-persist, delete the posegraph pair.
+- **G5** No ROS service calls from `finally:` after SIGINT (context dead), and disabling rclpy's SIGINT
+  handler hangs `spin()` to SIGKILL. Periodic-timer persistence only.
+- **G6** The robot-side fanoff LiDAR gate is load-bearing: manual control parks the turret → `/scan`
+  starves everything. Driving sessions need `pkill -f fanoff_flag; touch /tmp/lidar_allow` on the robot,
+  restore after. Candidate for automation in `ippolit_drivers` later (SSH toggle from the bridge).
+- **G7** `pkill -f` self-match, incl. the multi-line-SSH variant (remote shell's cmdline contains every
+  line — a later mention of the filename matches). Separate SSH calls for kill vs start.
+- **G8** Wheel odometry lies during in-place pivots. Rotation ground truth = `/odom_laser` / LiDAR
+  bearings. Short straight-line wheel odom is fine.
+- **G9** MiDaS blind zone: never treat a low floor-drop reading at close range as "clear". Latched
+  hazards clear on heading change or explicit re-verification, never on signal disappearance.
+- **G10** Hand-placement variance is ≥15 cm-scale: build mask rims/standoffs accordingly; never tune a
+  threshold to the edge of one good run.
+- **G11** REST schema: `{"action": ...}` (not `operation`); move vector `{"velocity": 0..1, "angle": deg}`.
+- **G12** Battery: use `/battery` (AVA charge_state); Valetudo's charging flag is broken on the D10S Pro;
+  `q6a-brownout` already owns low-battery poweroff.

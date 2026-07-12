@@ -7,6 +7,35 @@ current active roadmap)**.
 
 ---
 
+## 2026-07-12 (rev 2) — Architecture plan rewritten to production-grade ROS 2 engineering
+
+`docs/navigation-architecture.md` substantially revised per explicit user direction: architect the whole
+solution as production-grade robot software, not a manually-managed script collection. Grounded against
+current (2025/2026) ROS 2 community/industry guidance via web research.
+
+**The big decision (D1): the historical "loose scripts + hand-scp'd files + 12 hand-ordered systemd
+units" convention is RETIRED.** New foundation (Part A, phases A0-A5): colcon workspace with ~10
+single-responsibility ament packages (`ippolit_interfaces/description/drivers/control/safety/perception/
+localization/navigation/bringup`), declared ROS parameters from YAML (env vars retired), real message
+types replacing every JSON-on-String topic (vision_msgs + a small ippolit_interfaces pkg), URDF +
+robot_state_publisher as the single source of geometry truth (BODY_R etc. currently duplicated across
+scripts), XML launch files with systemd shrunk to 4 supervised groups, pytest + launch_testing + lint in
+GitHub Actions CI, an idempotent on-device deploy script (git pull + rosdep + colcon build — kills the
+scp-drift failure class that bit us twice), diagnostics (/diagnostics + aggregator) and a rolling MCAP
+incident recorder auto-snapshotted on e-stop.
+
+**Decision records D1-D7** capture the judgment calls: keep the custom ICP laser odom for now (validated;
+revisit vs rf2o/kiss-icp/robot_localization only if it becomes the bottleneck), native on-device builds
+over Docker (one robot, NPU/camera stack friction, documented as future option), Foxglove over RViz
+(localhost-only DDS is deliberate), stairwell as caution-zone-not-no-go (4 independent layers).
+
+Feature phases F0-F6 (cmd_vel bridge + twist_mux, Foxglove, room mapping + stairwell masks, Nav2,
+cliff-aware nav, go-to-object) unchanged in content from rev 1 but now land inside the packages, with an
+interleaved A/F execution order. Rev-1's validated-behavior inventory and the G1-G12 live-learned gotchas
+carried over intact.
+
+---
+
 ## 2026-07-12 — Navigation architecture plan: docs/navigation-architecture.md
 
 Full review of the current state + a phased, step-by-step architecture doc for the next stage: room
