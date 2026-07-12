@@ -1,0 +1,17 @@
+[Unit]
+Description=Companion slam_toolbox map persistence: resume saved pose graph on start, periodic save
+After=network-online.target q6a-slam-toolbox.service
+Wants=network-online.target
+
+[Service]
+KillSignal=SIGINT
+TimeoutStopSec=8
+Type=simple
+User=radxa
+EnvironmentFile=-/etc/default/ippolit-robot
+ExecStart=/bin/bash -c "source /opt/ros/jazzy/setup.bash && exec python3 /home/radxa/ros/q6a_map_persist.py"
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -6,6 +6,260 @@ it derives from).
 
 ---
 
+## 2026-07-12 — Map + object-map persistence, and a real slam_toolbox crash found + mitigated
+
+**Context**: neither the SLAM occupancy grid nor the semantic object map survived a reboot/restart before
+today — both lived only in memory. This was flagged as the single biggest gap in the mapping pipeline
+("what's left from SLAM and mapping the apartment") and tackled directly.
+
+**Object map (`q6a_objmap.py`)**: added `Q6A_OBJMAP_FILE` (default `/home/radxa/ros/maps/object_map.json`).
+Loads on startup if present, saves every 30s and (best-effort) on clean shutdown, atomic write (temp file
++ `os.replace`) so a mid-write crash can't corrupt the persisted file. Straightforward, no ROS-service
+dependency -- this half worked cleanly on first deploy.
+
+**SLAM map**: iterated through two designs.
+1. **First cut**: bash scripts (`slam_save_map.sh` on `ExecStop`, a deserialize call added to
+   `slam_lifecycle_up.sh`'s `ExecStartPost`) calling slam_toolbox's own standard `serialize_map`/
+   `deserialize_map`/`save_map` services -- the same services RViz's SlamToolboxPlugin buttons call.
+   Not a custom protocol, just automating an existing one via the systemd hooks already used for
+   slam_toolbox's Jazzy lifecycle (configure->activate) dance.
+2. **User asked why not a dedicated ROS node instead of shell+systemd hooks.** Agreed and rebuilt as
+   `q6a_map_persist.py` + `q6a-map-persist.service`: same three services, now owned by one node with its
+   own service clients, a startup resume-retry timer, and a periodic save timer. Reverted the bash-hook
+   version entirely (`slam_save_map.sh` deleted, `ExecStop` removed from `q6a-slam-toolbox.service`,
+   `slam_lifecycle_up.sh` back to lifecycle-only).
+
+**Dead end during that rebuild**: tried adding a synchronous "final save on clean SIGINT" in the node's
+`finally:` block. Every attempt failed with "rcl node's context is invalid" -- rclpy's default SIGINT
+handler tears the context down before `finally:` runs. Tried disabling that handler
+(`signal_handler_options=SignalHandlerOptions.NO`) so the context would still be alive -- this was WORSE:
+without it, plain SIGINT doesn't reliably interrupt the blocking rcl wait inside `spin()` at all, so the
+process just hung until systemd's `TimeoutStopSec` elapsed and SIGKILL'd it (confirmed live: a restart
+that should take ~1s took ~45s with zero log output, graceful or otherwise). Reverted; the node relies
+solely on its periodic save timer, accepting a bounded staleness window equal to the save period rather
+than fighting rclpy's shutdown internals.
+
+**⚠️ Real crash found and mitigated**: live-testing the resume path, `slam_toolbox` started
+**segfaulting in a repeating Configuring->Activating->crash loop**. Root-caused by isolation (stopping
+`q6a-map-persist` immediately stabilized slam_toolbox) to `deserialize_map` being called against a saved
+pose graph that had **zero real scan nodes** -- every rapid restart-cycle test that day had the robot
+sitting still, so every "saved map" was an empty graph, and `match_type=START_AT_FIRST_NODE` against an
+empty graph reliably crashes slam_toolbox's C++ process. Mitigated with a size heuristic
+(`MIN_RESUME_BYTES`, default 50KB): the node now refuses to attempt `deserialize_map` if the saved
+`.posegraph` file is suspiciously small to contain real scan data, logging why and starting from empty
+instead. This is a heuristic, not a real fix for the underlying crash -- if slam_toolbox ever
+crash-loops again right after "will resume" is logged, suspect this bug first, `systemctl stop
+q6a-map-persist` immediately, and delete the saved `.posegraph`/`.data` pair. **Real end-to-end resume
+(loading an actual multi-node graph from a real drive) is still unverified** -- everything tested today
+was against trivial/empty graphs; this needs a real mapping drive followed by a restart to confirm.
+
+**Side effect, unavoidable**: restarting `q6a-objmap` to deploy its persistence fix wiped out that
+service's *in-memory* object map accumulated from earlier (pre-persistence) sessions -- 16 objects
+(refrigerator, tv, several chairs, dining table, some with 500-900 observations) were lost, since the old
+code had no way to save them before the restart. Persistence now works going forward; that specific
+accumulated map needs a new drive to rebuild.
+
+---
+
+## 2026-07-12 (final) — LATCH_CENTER lowered then rolled back: stationary calibration doesn't fully predict
+in-motion behavior
+
+Tried lowering `LATCH_CENTER` 0.60 -> 0.55 to fix the recurring near-miss pattern (center peaking at
+0.59-0.60, just under the old threshold, and never latching). Live-tested at 0.55: latch fired almost
+immediately after caution entry this time (center jumped 0.00 -> 0.43 -> 0.54 -> 0.57 in ~3 ticks, ~0.4s),
+and blind-creep completed cleanly to 5.2cm traveled -- but the user tape-measured the actual final distance
+at **35cm from the true edge**, at the SAME physical location and setup as the two earlier successful runs
+that landed at ~5-13cm. That's a real, unexplained discrepancy between the stationary tape-measure
+calibration and how the signal behaves while actually driving (possibly approach-angle sensitivity, or
+processing latency between frame capture and the published reading, or something else not yet diagnosed) --
+not just threshold noise on the scale seen elsewhere today. Rather than keep tuning blindly without
+understanding the cause, rolled `LATCH_CENTER` back to 0.60 (the value behind both actual successful
+landings), accepting the occasional missed-latch fallback (safe -- continuous caution creep to wheel-drop)
+over a threshold that's now demonstrated it can also land 30cm+ off in the "too conservative" direction.
+
+**Open item for next session**: the blind-creep distance has ranged from 5.2cm to 35cm across attempts at
+supposedly the same setup -- every miss so far has erred toward stopping FARTHER from the edge (safe
+direction, never closer/riskier), but the spread is too wide to trust for precision close-approach work
+yet. Needs either an in-motion calibration pass (not just stationary) or a hypothesis test for what's
+actually driving the variance (approach angle, latency, floor lighting) before further threshold tuning is
+likely to help.
+
+---
+
+## 2026-07-12 (even later) — blind-creep latch AND-gate fragility fix + vel=1.0 incident does NOT reproduce
+under the caution zone
+
+**Latch AND-gate was too brittle.** First live test of the odometry blind-creep never actually latched: on a
+run where caution triggered and drove cleanly, `center` and `sharp` kept narrowly missing their thresholds
+on the SAME tick (e.g. `center=0.60/sharp=13.5`, next tick `center=0.56/sharp=14.0`) — the robot drove
+continuously at caution speed all the way to a safe wheel-drop stop, but blind-creep never got a chance to
+run. Loosened `LATCH_SHARP` 14.0 -> 8.0 (closer to how `MIN_SHARP` is just a noise-reject gate for caution
+entry, rather than a second precision requirement) since `center` crossing 0.60 is already the primary
+confidence signal. Also nudged `BASE_ENTER` 0.52 -> 0.56 and `BLIND_CREEP_M` 0.07 -> 0.05 after two clean
+runs landed at slightly different final distances (user: 2nd run "started to slow down too early" and
+"stopped a bit further" than the 1st) — inherent sensor noise, expect this to reduce but not eliminate
+run-to-run variance. **Verified live again at vel=0.4 (max cap)**: caution + latch + blind-creep all fired
+cleanly, landed at 5.2cm traveled since latch, no wheel-drop, no fighting.
+
+**User then asked to explicitly bypass `MAX_SAFE_VEL` and retest at true vel=1.0** — the exact speed that
+caused the original wheel-hang incident earlier the same day. Flagged this clearly before doing anything
+(this is the documented cause of a real incident, and the caution-zone/blind-creep logic was only ever
+designed/tested at ≤0.4) and got explicit confirmation, plus confirmed the user was physically ready to
+catch the robot. Added a `--force-unsafe-velocity` opt-in flag (bypasses the clamp only when explicitly
+passed; default behavior for any future run is unchanged) rather than editing the safety constant directly.
+
+**Result: the incident did NOT reproduce.** Even with the raw velocity uncapped, the caution zone triggered
+promptly (`center=0.51`, well before the true edge) and dropped the ACTUAL driving speed to `CAUTION_VEL`
+(0.15) for essentially the entire remaining approach (~7.5s) — meaning the robot's real momentum at the
+moment of wheel-drop was based on 0.15, not 1.0. Blind-creep's latch didn't quite fire this run either
+(`center` peaked at 0.59, just under 0.60 -- another near-miss, noted for further LATCH_CENTER tuning), but
+wheel-drop stopped it cleanly regardless. **User confirmed: "no repeat of the incident."** This validates
+that the day's caution-zone work is a real, independent safety layer -- it protected against the original
+failure mode even when the speed cap that was ALSO built in response to that incident was deliberately
+bypassed.
+
+---
+
+## 2026-07-12 (latest) — MILESTONE: odometry blind-creep — first-ever planned close-approach stop, not a
+wheel-drop recovery
+
+**Stationary MiDaS calibration pass** (`scripts/companion/q6a_creep_test.py` region + the throwaway
+`midas_calib.py` logger): robot placed by hand at 8 tape-measured distances from a real edge (65/50/40/30/
+20/15/10/5cm), `/vision/floor` center+sharp logged at each, stationary, no driving:
+
+| Distance | center (avg) | sharp (avg) |
+|---|---|---|
+| 65cm | 0.28 | 2.8 |
+| 50cm | 0.45 | 5.6 |
+| 40cm | 0.41 | 6.8 |
+| 30cm | 0.41 | 7.9 |
+| 20cm | 0.65 | 16.1 |
+| 15cm | 0.68 | 17.2 |
+| 10cm | 0.54 | 12.1 (declining) |
+| 5cm | 0.06 | 2.4 (fully blind) |
+
+Findings: the strongest/most confident reading is **~15-20cm out** (center 0.65-0.68, sharp 16-17); decline
+starts between 15cm and 10cm; fully blind by 5cm (matches every wheel-drop-time reading logged all day).
+`center` is noisier than expected in the 30-50cm band (barely moves, sometimes non-monotonic) — `sharp`
+tracks proximity more cleanly there, though both converge to the same story near the edge.
+
+**Implemented odometry blind-creep on top of the (already-validated) event-driven caution zone**: once
+`center`/`sharp` cross into the confirmed-strong band (`LATCH_CENTER=0.60`, `LATCH_SHARP=14.0`), latch the
+current `/odom/wheel` position and STOP trusting MiDaS's live reading entirely — from that instant, creep
+`BLIND_CREEP_M` (default 0.07m, tunable via `--blind-creep`) tracked purely by odometry distance from the
+latch point. Deliberately conservative (targets landing ~8-13cm from the true edge, not the full 5-10cm
+goal, given the calibration is only 8 points). Straight-line wheel odometry is trusted here specifically
+because the previously-established unreliability was for IN-PLACE PIVOTS (wheel slip during rotation), not
+forward travel. `/wheel_floating` reactive pausing stays active during blind creep (doesn't depend on
+MiDaS); wheel-drop (`/cliff`) remains the final, unconditional safety net throughout.
+
+**Verified live, first try**: caution entered cleanly (event mode, continuous drive, no fighting), latched
+at `center=0.63 sharp=14.7`, blind-crept smoothly from 0.0cm to 7.0cm over ~2.3s, and **stopped itself on
+the distance target** — `STOP: BLIND-CREEP target reached (7.0cm since latch)`. **No wheel-drop fired.**
+User confirmed both that it stopped safely on its own and that the measured real distance to the edge was
+in the expected ~8-13cm range. This is the first time this project has stopped the robot at a *planned*
+safe distance from a real edge, rather than relying on AVA's own wheel-drop recovery as the terminal event.
+
+---
+
+## 2026-07-12 — q6a_creep_test.py v7: speed-scaled MiDaS caution zone (not a stop-ramp) + hard velocity ceiling
+
+Follow-up to the max-velocity (1.0) near-miss (robot's momentum carried it past the point where AVA's own
+wheel-drop recovery could work, leaving it hanging at the edge with wheels off the ground — recovered by
+hand). Two fixes, driven directly by user guidance on what a real driving strategy should look like:
+
+1. **`MAX_SAFE_VEL = 0.4` clamped unconditionally in code** (not just advised) — every velocity ≤0.4 tested
+   let AVA's wheel-drop recovery work reliably; 1.0 didn't. The ceiling being advisory-only is exactly what
+   caused the incident, so `CreepTest.__init__` now clamps `self.vel = min(vel, MAX_SAFE_VEL)` regardless
+   of what `--velocity` requests.
+2. **MiDaS caution zone reintroduced, but NOT as a stop-ramp.** User's explicit correction: a detected edge
+   should mean "drive with caution at reduced speed," not "this location is now off-limits" — a permanent
+   no-go would break the actual edge-following use case (traveling parallel to a drop at 5-10cm). New
+   design: `enter_thresh(v) = 0.50 - 0.15*(v/MAX_SAFE_VEL)` — the trigger point moves earlier (lower
+   center threshold = farther out) as commanded speed rises, approximating a physics-based stopping
+   distance without a true metric MiDaS calibration (MiDaS is a relative disparity signal, not calibrated
+   to real distance — a calibration pass was offered and explicitly deferred this session, "skip
+   calibration, use rough estimates for now").
+3. **Direction-change re-arm**: the MiDaS blind spot is specific to the current approach angle, not the
+   physical location. `move()` now clears the caution latch whenever the commanded angle changes by more
+   than `REARM_DEG=15`, so a new heading gets a fresh MiDaS assessment instead of trusting a stale one.
+
+**Two more bugs found and fixed via live testing the same day, both re-deriving lessons from v1-v5:**
+- **Removed the center-based caution EXIT.** First cut cleared caution once `center` dropped back below
+  threshold (with hysteresis) — but live-tested, it exited right at the true edge (`center=0.06`, the known
+  MiDaS blind spot, misread as "clear floor") and resumed full 0.3 velocity for ~1.3s before wheel-drop —
+  reproducing the exact v1-v5 "fighting AVA" failure at a caution-zone level. Fix: caution is now a one-way
+  latch — once triggered it holds `CAUTION_VEL` until the direction-change re-arm or the run ends
+  (wheel-drop/time bound). No exit on a low reading, ever.
+- **Added pulse-and-settle inside caution** (`PULSE_ON_S=0.4` / `PULSE_OFF_S=0.5`). Even a *constant* 0.15
+  creep still visibly fought AVA a couple of times right at the true edge before the final wheel-drop —
+  user confirmed live ("was trying to fight a couple of times then stopped"). Some protective reflex (not
+  necessarily the same signal as our decoded `/cliff` bit) nudges the robot back, and continuously
+  re-commanding forward every tick just re-pushes into it. Switched caution to short driving bursts
+  separated by an explicit `vel=0` pause, giving the reflex room to settle instead of being fought every
+  cycle. **Verified live, twice** (once cut short by an oversized outer test-harness timeout on my end, not
+  a robot issue; once to completion) — the second full run held the pulse pattern cleanly through ~6s of
+  caution and stopped in one clean wheel-drop event, **user-confirmed: "Yes, clean this time."**
+
+**Still open** (discussed, not yet implemented): getting reliably close (5-10cm) to a bare edge needs an
+odometry-based "blind creep" for the final approach once MiDaS's last confident reading is latched — MiDaS
+itself goes blind exactly in that range. This needs one calibration data point (real distance from "MiDaS's
+last strong/sharp reading" to the true edge) that the user deferred; noted as the next concrete step.
+
+---
+
+## 2026-07-12 (later) — q6a_creep_test.py: found the real earlier signal (`/wheel_floating`), settled on
+continuous-in-caution as clean, entry-threshold saga, two operational bugs found and fixed
+
+Continuation of the same day's work above. User pushed back on the pulse-and-settle result ("it was moving
+with jerks. not smoothly. can it drive smooth just slower?"), which led to a chain of live tests narrowing
+down what the actual fix needed to be:
+
+- **Continuous, slower (`CAUTION_VEL=0.08`, no pulsing): still fought.** Falsified "slower avoids
+  provoking the reflex" — confirmed it's specifically about reaching zero, not magnitude.
+- **Smooth sinusoidal soft-pulse (`--soft`, oscillating `0.02<->0.15`, never a discrete step): still
+  fought**, live-confirmed by the user picking "same fighting as before" — nails down that even a *smooth*
+  nonzero trough doesn't release whatever reflex fires; only an actual return to zero does. Reverted the
+  default back to the hard on/off pulse (jerky, but the only thing verified clean at that point).
+- **Entry threshold saga**: user reported caution triggering "~half a meter before the edge" (`BASE_ENTER`
+  0.50) — raised to 0.62 (still ~20-30cm out per user estimate) — raised again to 0.68 — which then live-
+  tested to **never trigger at all** in one run (`center` peaked at 0.56, threshold was 0.64, robot drove
+  full speed the whole way to the edge and "was fighting 3 times" right at the end, completely outside any
+  caution logic). Lesson: `center`'s peak-before-blind-spot is noisy run-to-run (~0.5-0.76 seen across
+  today's tests), so a threshold tuned for "trigger closer" risks never triggering — worse than triggering
+  early, since a miss reproduces the exact full-speed-to-edge danger this whole feature exists to prevent.
+  Settled on `BASE_ENTER=0.52`, biased toward reliably triggering over precisely-timed triggering.
+- **Found the actual missing signal, `/wheel_floating`.** Our `/cliff` subscription only ever watched the
+  downward IR sensors (Triggers byte[1]) — already established to co-fire only AT the final wheel-drop
+  instant. There's a separate, dedicated `/wheel_floating` topic (Triggers byte[0] bits 6-7, decoded
+  2026-07-11) that no test this entire day had ever subscribed to. Added a new `event` mode (now default):
+  drive continuously at `CAUTION_VEL`, pause (vel=0) only when `/wheel_floating` actually fires, hold for
+  `WF_SETTLE_S=0.6` after it clears. `--pulse` (old hard on/off) and `--soft` kept as fallback/reference.
+- **Verified live, twice, clean**: at both `--velocity 0.3` and `--velocity 0.4` (the `MAX_SAFE_VEL` cap),
+  caution triggered correctly and drove **continuously** the whole way — `/wheel_floating` never even
+  fired, no fighting either time, single clean wheel-drop stop both times. This also resolves the earlier
+  apparent contradiction (continuous 0.15 fought once, was clean another time): most likely just run-to-run
+  physical variability in hand-placement, not a deterministic bug — with entry timing and warm-up fixed,
+  every subsequent continuous-mode test has been clean.
+
+**Two operational bugs hit and fixed along the way (not robot-behavior bugs, but real live-test blockers):**
+- **`pkill -f` self-kill, subtler variant.** Documented before for camstream/fanoff (a pkill pattern
+  matching its own invocation's cmdline), but hit a new form here: since `ssh host 'multi-line script'`
+  passes the WHOLE script as one argument to the remote `bash -c`, that shell's own `/proc/self/cmdline`
+  contains every line of the script — including a *later*, unrelated, unbracketed occurrence of the same
+  filename (a `nohup python3 /tmp/cliff_monitor.py &` line further down). `pkill -f "[c]liff_monitor.py"`
+  (the usual bracket-escape trick) still matched that later occurrence and killed the invoking shell,
+  silently dropping the whole SSH session with no output. Fix: never combine a `pkill -f <name>` with a
+  later literal occurrence of `<name>` in the *same* multi-line SSH command — split them into separate SSH
+  invocations.
+- **DDS discovery latency was masquerading as a sensor outage.** The script's warm-up gave up after 8s if
+  `/scan` hadn't arrived, but a fresh rclpy node's discovery of an existing publisher can legitimately take
+  ~10-12s on this setup (matches the previously-documented FastDDS re-match fragility). Confirmed the LiDAR
+  itself was fine throughout (ring buffer's write-pointer advancing at full rate; `ros2 topic hz /scan`
+  succeeded once given a longer window) — raised the warm-up timeout 8.0s -> 20.0s.
+
+---
+
 ## 2026-07-08 — Cloud voice brain live: Cloudflare Workers AI endpoint (STT + LLM) + robot speaks LLM replies
 
 **Milestone:** the cloud half of voice control is **deployed and verified end-to-end** — the planned

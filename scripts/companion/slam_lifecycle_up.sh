@@ -5,6 +5,10 @@
 # forever — no solver load, no /scan subscription, no logs, no errors (this cost us a whole debugging
 # arc on 2026-07-08). This script walks it up state-by-state and is idempotent: safe to re-run, safe
 # if the node is already active.
+#
+# Map save/resume is handled by q6a_map_persist.py (its own ROS node + systemd service), not this
+# script -- a brief 2026-07-12 iteration had this script also calling deserialize_map directly, but
+# that was reverted in favor of a dedicated node (see q6a_map_persist.py's docstring).
 source /opt/ros/jazzy/setup.bash
 export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
 

@@ -14,6 +14,14 @@ publish /object_map (JSON) + /object_markers (RViz MarkerArray).
 CALIBRATION (do during the first drive): the camera H-FOV (Q6A_CAM_HFOV_DEG), any camera-yaw offset
 (Q6A_CAM_YAW_DEG), and the bearing sign are estimates — tune against RViz (object markers vs the real room).
 Room-tagging (which Valetudo segment each object is in) is a TODO refinement.
+
+DISK PERSISTENCE (added 2026-07-12): until this, the object list lived only in memory -- a node restart or
+reboot lost everything, forcing a full re-drive to rebuild it. Now loads Q6A_OBJMAP_FILE (default
+/home/radxa/ros/maps/object_map.json) at startup if present, and saves it periodically + on clean shutdown
+(atomic write: temp file + rename, so a mid-write crash/power-cut can't corrupt the persisted file -- worst
+case you lose the last SAVE_PERIOD_S of updates, not the whole map). Same limitation as the slam_toolbox
+map: only a CLEAN stop triggers the shutdown save; a hard power loss just loses anything since the last
+periodic save.
 """
 import json, math, os
 
@@ -47,6 +55,8 @@ ALLOW = set(s.strip().lower() for s in os.environ.get('Q6A_OBJMAP_ALLOW',
     'chair,couch,bed,dining table,tv,refrigerator,oven,microwave,sink,toilet,'
     'potted plant,bench,book,clock,vase,suitcase').split(',') if s.strip())
 POSE_TOPIC = os.environ.get('Q6A_OBJMAP_POSE_TOPIC', '/pose')            # slam_toolbox map-frame pose ('' = off)
+OBJMAP_FILE = os.environ.get('Q6A_OBJMAP_FILE', '/home/radxa/ros/maps/object_map.json')  # '' = disable
+SAVE_PERIOD_S = float(os.environ.get('Q6A_OBJMAP_SAVE_PERIOD_S', '30.0'))  # periodic save cadence
 
 
 class ObjMap(Node):
@@ -56,6 +66,7 @@ class ObjMap(Node):
         self.scan = None
         self.objects = []           # [{cls, x, y, n, conf}]
         self.slam_pose = False      # once slam's map-frame /pose flows, it wins over /odom (odom drifts)
+        n_loaded = self.load()
         self.create_subscription(Odometry, '/odom', self.on_odom, 10)
         if POSE_TOPIC:
             self.create_subscription(PoseWithCovarianceStamped, POSE_TOPIC, self.on_posecov, 10)
@@ -72,8 +83,36 @@ class ObjMap(Node):
         self.pub_map = self.create_publisher(String, '/object_map', 10)
         self.pub_mk = self.create_publisher(MarkerArray, '/object_markers', 10) if HAVE_MARKERS else None
         self.create_timer(2.0, self.publish)
+        if OBJMAP_FILE:
+            self.create_timer(SAVE_PERIOD_S, self.save)
         self.get_logger().info(f'q6a_objmap up (HFOV={math.degrees(H_FOV):.0f}deg, merge={MERGE_DIST}m, '
-                               f'min_conf={MIN_CONF}); needs /vision/detections + /odom (+ /scan for range)')
+                               f'min_conf={MIN_CONF}, loaded {n_loaded} objects from disk); needs '
+                               f'/vision/detections + /odom (+ /scan for range)')
+
+    def load(self):
+        if not OBJMAP_FILE or not os.path.exists(OBJMAP_FILE):
+            return 0
+        try:
+            with open(OBJMAP_FILE) as f:
+                data = json.load(f)
+            self.objects = data.get('objects', [])
+            return len(self.objects)
+        except Exception as e:
+            self.get_logger().warn(f'load {OBJMAP_FILE} failed: {e} -- starting from an empty map')
+            self.objects = []
+            return 0
+
+    def save(self):
+        if not OBJMAP_FILE:
+            return
+        try:
+            os.makedirs(os.path.dirname(OBJMAP_FILE), exist_ok=True)
+            tmp = OBJMAP_FILE + '.tmp'
+            with open(tmp, 'w') as f:
+                json.dump({'objects': self.objects}, f)
+            os.replace(tmp, OBJMAP_FILE)   # atomic on the same filesystem -- no half-written file on crash
+        except Exception as e:
+            self.get_logger().warn(f'save {OBJMAP_FILE} failed: {e}')
 
     @staticmethod
     def _to_pose(pose):
@@ -192,6 +231,13 @@ def main():
     except (KeyboardInterrupt, SystemExit):
         pass
     finally:
+        try:
+            node.save()   # best-effort final save on a CLEAN stop; a hard power-cut/SIGKILL skips this.
+        except Exception:
+            pass          # pure file I/O so this should succeed regardless of ROS context state, but
+                          # don't let a failure here (e.g. the except branch's own get_logger call, if
+                          # rclpy's SIGINT handler already tore the context down -- see q6a_map_persist.py's
+                          # docstring for the same class of bug) skip destroy_node()/shutdown() below.
         node.destroy_node()
         try:
             rclpy.shutdown()

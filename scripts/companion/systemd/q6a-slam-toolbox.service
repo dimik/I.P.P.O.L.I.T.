@@ -13,6 +13,7 @@ ExecStart=/bin/bash -c "source /opt/ros/jazzy/setup.bash && exec ros2 run slam_t
 # Jazzy slam_toolbox is a LIFECYCLE node: without configure+activate it idles in 'unconfigured'
 # (no solver, no /scan subscription, no errors). ExecStartPost walks it to 'active'.
 ExecStartPost=/home/radxa/ros/slam_lifecycle_up.sh
+# Map save/resume: see q6a-map-persist.service (a dedicated node, not a hook on this unit).
 TimeoutStartSec=180
 Restart=on-failure
 RestartSec=3
