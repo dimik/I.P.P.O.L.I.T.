@@ -44,6 +44,37 @@ the Q6A's `robot-usb`/`robot-wifi` aliases, whose key works).
 
 ---
 
+## 2026-07-12 — RESOLVED (negative): downward IR cliff sensors don't detect a real edge in practice
+
+User asked to confirm whether we actually have working data from the robot's downward-facing IR cliff
+sensors, given the 2026-07-09/07-11 investigation left this genuinely open (decode confirmed correct, but
+never verified to trip during a real approach, only during a full lift).
+
+**First found a real deployment gap:** the mcu_node.py decoder that added /cliff/front, /cliff/rear, and
+/mcu/triggers (2026-07-11) had never actually been pushed to the Q6A's running mcu-node.service -- it only
+existed in the repo. Confirmed via grep (zero matches for decode_triggers/d_view in the deployed file).
+Deployed it, verified /cliff and /bumper (the existing safety-critical topics) still worked identically
+before proceeding -- no regression.
+
+**Live test at the REAL stairwell edge**, using q6a_drive.py (hard-stops on wheel-drop OR MiDaS sharp
+floor-drop) while separately monitoring /cliff/front, /cliff/rear, and raw /mcu/triggers bits:
+- First attempt: robot was already very close to the edge, wheel-drop fired almost immediately (1.7s) --
+  didn't give us a window to observe the IR sensors before the last-resort backstop engaged.
+- Repositioned ~10-15cm back for more runway, retested: **MiDaS correctly stopped the robot** (DROP AHEAD,
+  center=0.66 sharp=662.6 -- an unambiguous, far-past-threshold cliff signature) **while /cliff/front stayed
+  False the entire time and no d_view_* bit ever activated.**
+
+**Conclusion: the front IR cliff sensors do not detect this real edge, even while actively driving toward
+it** -- rules out the "only works while driving" hypothesis from 2026-07-09 (this test WAS while driving).
+This is a confirmed negative, not an open question anymore. Real fall protection remains MiDaS+LiDAR
+forward-drop detection (validated again here) as early warning, plus wheel-drop /cliff as the last-resort
+backstop (validated in the first attempt) -- NOT the downward IR sensors, despite them being correctly
+decoded and wired into ROS.
+
+Files: `docs/sensors.md` (resolved the open item), mcu-node.service redeployed on the Q6A.
+
+---
+
 ## 2026-07-12 — Corner-avoidance logic validated live (first time), edge-follow now fully calibrated
 
 With both LiDAR bearing fixes deployed (offset + sign), re-ran the edge-follow controller with --side right

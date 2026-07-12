@@ -411,11 +411,27 @@ just never broken out per-position. Validated against our own captures + histori
 dict as JSON on `/mcu/triggers` — additive; the original `/cliff` (byte[1]!=0) and `/bumper` (byte[0]!=0)
 keep their exact old semantics for the existing safety consumers (`cliff_guard.py`, `q6a_drive.py`).
 
-**Open/unverified:** whether the front `d_view_*` sensors actually trip while the robot is held stationary
-at a real edge (the 2026-07-09 test read 0 throughout — possibly because AVA only samples/transmits them
-while actively driving, or the hold geometry didn't put the sensor windows themselves over the void). Needs
-a live re-test with the robot **driving** toward a real edge, watching `/cliff/front` and the per-position
-bits in `/mcu/triggers`.
+**RESOLVED 2026-07-12 (negative result): the front `d_view_*` sensors do NOT detect a real edge in
+practice, even while actively driving toward it.** First had to fix a real deployment gap: the decoder that
+added `/cliff/front`/`/cliff/rear`/`/mcu/triggers` (2026-07-11) had never actually been deployed to the
+Q6A's running `mcu-node.service` — it was sitting in the repo only. Deployed it, verified `/cliff`/`/bumper`
+still worked identically (no regression), then ran a live test at the REAL stairwell edge using
+`q6a_drive.py` (which hard-stops on either wheel-drop `/cliff` OR a MiDaS sharp floor-drop) while separately
+monitoring `/cliff/front`, `/cliff/rear`, and the raw `/mcu/triggers` bits.
+
+Result: driving slowly toward the real edge, MiDaS correctly stopped the robot (`DROP AHEAD center=0.66
+sharp=662.6` — an unambiguous, far-past-threshold cliff signature) **while `/cliff/front` stayed `False`
+the entire time** and no `d_view_*` bit ever activated. This directly rules out the "only works while
+driving" hypothesis from 2026-07-09 (this test WAS while driving) — the sensor genuinely does not fire for
+this real edge, at least not via the MCU-serial channel we decode.
+
+**Practical implication:** the front IR cliff sensors are not usable as a cliff-detection input on this
+hardware/firmware, despite being correctly decoded and wired into ROS. Real protection against a fall
+remains: **MiDaS+LiDAR forward-drop detection** (`cliff_guard.py`/`q6a_drive.py`, validated again in this
+same test) as the early warning, and **wheel-drop `/cliff`** as the last-resort hard backstop (also
+validated separately, in an earlier version of this same test session). Do not add reliance on
+`/cliff/front`/`/cliff/rear` for safety-critical logic without further investigation (e.g. whether a
+different `_CtrlMcuCMD` subcommand enables/requests them, which we have not explored).
 
 **`edgeDis` (Status20ms, int16, mm) — decoded since day one but never published.** A CONTINUOUS reading
 (50 Hz, not event-gated like Triggers), now published as `/cliff/edge_dist` (m). Meaning/threshold is
