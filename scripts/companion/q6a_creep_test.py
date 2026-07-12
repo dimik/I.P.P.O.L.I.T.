@@ -128,11 +128,17 @@ class CreepTest(Node):
             self.stop('stale sensors (refuse to drive blind even in creep mode)')
         # PAUSE (not a hard stop) while AVA's own wheel-drop is active, or within the cooldown after it
         # clears -- do NOT re-approach immediately and undo AVA's own recovery (see docstring incident).
+        # MUST actively command zero velocity here, not just skip sending a command -- Valetudo appears to
+        # hold the LAST commanded velocity persistently rather than auto-decelerating on its own, so
+        # merely withholding a fresh command let the robot keep coasting at full speed back into the edge
+        # every cycle (confirmed live 2026-07-12: /cliff oscillated true/false every ~1.3s for 12+s straight
+        # even with this "pause" in place, because it was never actually a stop).
         in_cooldown = (not self.cliff) and (time.monotonic() - self.cliff_clear_t < CLIFF_COOLDOWN_S) \
             and self.cliff_clear_t > 0
         if self.cliff or in_cooldown:
+            self.move(0.0, 0.0)
             self.get_logger().info(f'PAUSED (AVA /cliff={self.cliff}, cooldown={in_cooldown}) -- '
-                                   f'not pushing forward, letting AVA finish its own recovery')
+                                   f'commanding STOP (vel=0), not pushing forward, letting AVA recover')
             return
         # proportional speed reduction, NOT a stop -- floors at self.min_vel, never zero. Gated on sharpness
         # too (matches q6a_drive.py's MIN_SHARP=3.0): a smooth floor gradient can read a moderate center
