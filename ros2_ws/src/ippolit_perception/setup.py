@@ -20,6 +20,8 @@ setup(
     entry_points={
         'console_scripts': [
             'q6a_announce = ippolit_perception.q6a_announce:main',
+            'q6a_vision = ippolit_perception.q6a_vision:main',
+            'q6a_objmap = ippolit_perception.q6a_objmap:main',
         ],
     },
 )

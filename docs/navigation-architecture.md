@@ -204,16 +204,18 @@ Each phase = PR-sized, behavior-preserving unless stated, ends with: verify → 
   points, keep old topics/params (env vars still read as fallback). Deploy via new `deploy.sh`; replace
   the 12 units with the 4 group units running launch files. Old `/home/radxa/ros/*.py` copies deleted
   after verification.
-  🔶 IN PROGRESS (2026-07-12). `ippolit_drivers` **✅ DONE**: all 4 foundational nodes migrated and
-  cut over in production — `audio_bridge`, `mcu_node`, `lds_scan_node` (+ `lds_decode` helper),
-  `valetudo_bridge` (first argparse-based node, uses `<node args="...">` not `<param>`). `ippolit_safety`
-  **✅ DONE**: `cliff_guard` (wheel-drop hard e-stop + MiDaS `/cliff/ahead` advisory) migrated and cut
-  over, written flake8/pep257-clean from the start per G20's lesson. `ippolit_localization` **✅ DONE**:
+  ✅ DONE (2026-07-12). `ippolit_drivers`: all 4 foundational nodes migrated and cut over in
+  production — `audio_bridge`, `mcu_node`, `lds_scan_node` (+ `lds_decode` helper), `valetudo_bridge`
+  (first argparse-based node, uses `<node args="...">` not `<param>`). `ippolit_safety`: `cliff_guard`
+  (wheel-drop hard e-stop + MiDaS `/cliff/ahead` advisory) migrated and cut over. `ippolit_localization`:
   `q6a_laser_odom` + `q6a_map_persist` migrated and cut over (`slam_toolbox` itself deliberately stays
-  on its own standalone `q6a-slam-toolbox.service` for now — see G3). `ippolit_perception` partially
-  done (`q6a_announce` migrated+cut over; `q6a_vision`/`q6a_objmap` still on old standalone units,
-  the only remaining A1 work). All 38 tests across 10 packages green (`colcon test-result --all`) —
-  see G20 for the real flake8/pep257 lint debt found and fixed along the way.
+  on its own standalone `q6a-slam-toolbox.service` for now — see G3). `ippolit_perception`: all four
+  nodes migrated and cut over — `q6a_announce`, `q6a_vision` (+ folded-in `q6a_yolo`/`q6a_bytetrack`
+  helper submodules, no more `sys.path` hack), `q6a_objmap`. Every legacy standalone systemd unit
+  stopped+disabled; single clean instance of every node confirmed. All 38 tests across 10 packages
+  green (`colcon test-result --all`) — see G20 (real flake8/pep257 lint debt) and G21 (XML launch
+  `<env>` replaces, doesn't append — broke `q6a_vision`'s NPU lib path) for what was found along
+  the way.
   ✅ Full stack up via `ros2 launch ippolit_bringup robot.launch.xml`; same topics/rates as before
   (compare `ros2 topic hz` for `/scan`, `/pose`, `/vision/detections`); reboot test passes; slam lifecycle
   transition handled by launch (bash poller retired).
@@ -303,7 +305,7 @@ envelope (1.0 fails), MiDaS edge calibration table (65→5 cm), thermal enclosur
 worker. Battery telemetry via `/battery` (Valetudo charging flag broken on this model). IR floor sensors
 conclusively useless for early warning (co-fire with wheel-drop).
 
-## 9. Gotchas (G1–G20) — G1-G12 unchanged from rev 1, G13-G20 found live during A0/A1; MUST READ
+## 9. Gotchas (G1–G21) — G1-G12 unchanged from rev 1, G13-G21 found live during A0/A1; MUST READ
 
 - **G1** Valetudo holds the last velocity — stopping requires actively sending zero; a silent watchdog is
   not a stop.
@@ -412,4 +414,25 @@ conclusively useless for early warning (co-fire with wheel-drop).
   `I101` import-name ordering, which `flake8-import-order` sorts **case-insensitively**, so a lowercase
   name (e.g. `qos_profile_sensor_data`) can sort before CamelCase names from the same module
   (`QoSDurabilityPolicy` etc.) in a single multi-name import line. Worth checking on any future
-  multi-name import from `rclpy.qos` or similarly mixed-case modules.
+  multi-name import from `rclpy.qos` or similarly mixed-case modules. Also caught (migrating
+  `q6a_vision`/`q6a_objmap`/`q6a_yolo`/`q6a_bytetrack`): `ament_pep257`'s **D403** flags any
+  docstring whose first word is a mixed-case acronym ("IoU", "LiDAR", "MiDaS", etc.) — pydocstyle
+  compares the word against Python's `.capitalize()` output (which lowercases everything after the
+  first letter), so "IoU" != "Iou" and it's flagged as "improperly capitalized" even though it
+  looks fine to a human. Fix: rephrase so the docstring's first word is a normal English word
+  ("Compute IoU between..." not "IoU between...").
+- **G21** (found in A1, cutover of `q6a_vision`) **ROS 2 XML launch's `<env name="" value=""/>`
+  action REPLACES the named environment variable — it does NOT append.** `q6a_vision` needs
+  `LD_LIBRARY_PATH` to include the QNN/QAIRT native lib dir for `qai_appbuilder` (Hexagon NPU). The
+  pre-migration systemd unit got this right only by accident: its `Environment=LD_LIBRARY_PATH=
+  <qnn-path>` ran *before* `ExecStart`'s `source /opt/ros/jazzy/setup.bash`, and ROS's own setup
+  script *prepends* its lib dir onto whatever was already set — so the final value had both. Setting
+  the identical value via a node-scoped `<env>` in the new `perception.launch.xml` runs *after* the
+  systemd unit's setup.bash has already populated `LD_LIBRARY_PATH` with ROS's own libs
+  (`librcl_action.so` etc.), so the plain `<env value="<qnn-path>"/>` overwrote and lost them —
+  `q6a_vision` crash-looped immediately on `import rclpy` itself. Caught fast because the node was
+  simply absent from `ros2 node list` after the restart (an absent node is easier to catch than a
+  silently-wrong one — always check the full expected node list after any launch-file env change).
+  Fix: append instead of replace, `value="$(env LD_LIBRARY_PATH ''):<qnn-path>"`. Check any future
+  `<env>` use in a launch file for the same replace-vs-append trap, especially for any variable
+  ROS/rclpy itself depends on (`LD_LIBRARY_PATH`, `PYTHONPATH`, `AMENT_PREFIX_PATH`, etc.).

@@ -7,6 +7,50 @@ current active roadmap)**.
 
 ---
 
+## 2026-07-12 — Phase A1 COMPLETE: q6a_vision + q6a_objmap migrated into ippolit_perception; G21 found
+
+Migrated the last two A1 nodes: `q6a_vision.py` (robot camera -> YOLO(NPU)+ByteTrack+MiDaS ->
+`/vision/detections` + `/vision/floor` + annotated `:8093` MJPEG) and `q6a_objmap.py` (semantic
+object map fusion + disk persistence). Also folded `q6a_yolo.py` and `q6a_bytetrack.py` — until
+now standalone helper scripts living in `~/` on the Q6A, imported via a `sys.path.insert` hack —
+into the package proper as real submodules (`ippolit_perception/q6a_yolo.py`,
+`ippolit_perception/q6a_bytetrack.py`), removing the path hack entirely. All four files written
+flake8/pep257-compliant from the start per G20; only a handful of E127 continuation-indent slips
+and D403 (docstrings starting with a mixed-case acronym like "IoU"/"LiDAR"/"MiDaS" fail
+pydocstyle's `.capitalize()` comparison — rephrase to start with a normal word) needed fixing
+after the first deploy.
+
+**G21 (found live, cutover of `q6a_vision`): ROS 2 XML launch's `<env>` action REPLACES the named
+variable, it does not append.** `q6a_vision` needs `LD_LIBRARY_PATH` to include the QNN/QAIRT
+native lib dir for `qai_appbuilder` (Hexagon NPU) — the pre-migration systemd unit got this right
+by accident, since `Environment=LD_LIBRARY_PATH=<qnn-path>` ran *before* `ExecStart`'s `source
+/opt/ros/jazzy/setup.bash`, and ROS's setup script itself *prepends* its own lib dir onto
+whatever was already there. Setting the same value via a node-scoped `<env>` in
+`perception.launch.xml` runs *after* the systemd unit's setup.bash has already populated
+`LD_LIBRARY_PATH` with ROS's own libs (`librcl_action.so` etc.) — so the plain `<env
+value="...">` wiped them out, and `q6a_vision` crash-looped on `import rclpy` itself
+(`ImportError: librcl_action.so: cannot open shared object file`). Caught immediately because the
+node was simply absent from `ros2 node list` after the first restart. Fixed by appending instead
+of replacing: `value="$(env LD_LIBRARY_PATH ''):<qnn-path>"`. Worth checking any future `<env>`
+use for the same replace-vs-append trap, especially for any variable ROS/rclpy itself depends on.
+
+Given `q6a_vision` holds an exclusive NPU/HTP session, verification used a different pattern than
+prior migrations: rather than briefly overlapping old+new instances, the legacy
+`q6a-vision.service`/`q6a-objmap.service` were stopped FIRST, the new nodes verified standalone
+(confirmed live YOLO+MiDaS inference at ~8Hz, `/vision/detections`+`/vision/floor` publishing real
+data), then cut over via `ippolit-perception.service` with zero overlap. A vendor QNN loader
+`libQnnHtpV68Skel.so.2` "not found" message during startup is a harmless versioned-then-unversioned
+probe/fallback in the underlying fastrpc stack, not a real error (confirmed by the immediate
+successful fallback + working inference right after).
+
+**Phase A1 is now fully complete**: `ippolit_drivers`, `ippolit_safety`, `ippolit_localization`,
+and `ippolit_perception` all migrated and cut over in production; every legacy standalone
+systemd unit stopped+disabled; single clean instance of every node confirmed. Next per
+`docs/navigation-architecture.md`: A2 (declared ROS parameters replacing env-var reads) or
+resuming the feature-track work (F0-F3) — see the doc's suggested interleaved order.
+
+---
+
 ## 2026-07-12 — Phase A1: q6a_laser_odom + q6a_map_persist migrated into ippolit_localization, cut over
 
 Migrated the last two localization scripts: `q6a_laser_odom.py` (LiDAR scan-matching ICP odometry,
