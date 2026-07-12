@@ -1,6 +1,6 @@
-<?xml version="1.0"?>
+<?xml version="1.0" encoding="UTF-8"?>
 <!-- robot.launch.xml — top-level bringup, scaffolded in A0. Includes every group launch file.
-     Each include is a stub until the corresponding phase (A1 wraps existing nodes; F1-F6 add
+     Each include is a stub until the corresponding phase (A1 wraps existing nodes -  F1-F6 add
      features) fills it in — see docs/navigation-architecture.md. -->
 <launch>
   <include file="$(find-pkg-share ippolit_description)/launch/description.launch.xml"/>

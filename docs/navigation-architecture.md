@@ -293,7 +293,7 @@ envelope (1.0 fails), MiDaS edge calibration table (65→5 cm), thermal enclosur
 worker. Battery telemetry via `/battery` (Valetudo charging flag broken on this model). IR floor sensors
 conclusively useless for early warning (co-fire with wheel-drop).
 
-## 9. Gotchas (G1–G15) — G1-G12 unchanged from rev 1, G13-G15 found live during A0; MUST READ
+## 9. Gotchas (G1–G18) — G1-G12 unchanged from rev 1, G13-G18 found live during A0/A1; MUST READ
 
 - **G1** Valetudo holds the last velocity — stopping requires actively sending zero; a silent watchdog is
   not a stop.
@@ -334,3 +334,40 @@ conclusively useless for early warning (co-fire with wheel-drop).
   time) with "Failed to convert". `ros2 launch <file> --show-args` parsing cleanly is not sufficient
   proof a launch file works; always also run it (even briefly, `timeout Ns ros2 launch ...`) and check
   the node actually comes up.
+- **G16** (found in A1) **XML comments can never contain a literal `--` (double hyphen), and can't end in
+  `-` before `-->`** — this is a plain XML spec rule, nothing ROS-specific, but this whole project's prose
+  style uses "--" constantly as a parenthetical separator (in every doc, docstring, and now launch-file
+  comment), so it hit on the very first real `.launch.xml` edit. Symptom is a confusing multi-parser
+  traceback (`InvalidFrontendLaunchFileError` wrapping an `xml.etree.ElementTree.ParseError: not
+  well-formed (invalid token)` at the `--` position, PLUS a red-herring `SyntaxError: invalid character
+  '—'` from a fallback parser if an em-dash happens to be nearby — chasing the em-dash first cost real
+  time; the em-dash was never the actual problem, `encoding="UTF-8"` is good practice regardless but
+  didn't fix this). Fixed project-wide by replacing every `--` inside a comment BODY with a single hyphen
+  (`sed`-ing the delimiters `<!--`/`-->` themselves by accident is its own trap — they contain `--` too;
+  fix comment bodies with a script that captures `<!--(.*?)-->` and only touches the captured group).
+  **Also a live process-hygiene lesson surfaced by the same incident**: the failure was initially masked
+  because the OLD, still-running production node of the same name answered `ros2 node list` queries,
+  making it look like the NEW launch had started when it had actually errored out immediately — always
+  check `systemctl is-active <old-unit>` / stop the old node BEFORE trusting `ros2 node list` during a
+  migration verification. And: `ros2 launch <file> --show-args` parsing cleanly is not proof a *different*
+  file in the same include chain also parses — test the exact file/command that will actually run.
+- **G17** (found in A1) `colcon build --symlink-install` generates `install/` content (including
+  `local_setup.bash`) with **absolute-path symlinks back into `src/`**. Moving/renaming the workspace root
+  after building (e.g. promoting a test dir like `~/ippolit_ws_test` to its permanent location `~/ippolit`)
+  leaves every symlink dangling — the package still "builds" fine on inspection but `ros2 launch`
+  crash-loops with `Package '<pkg>' not found` because `local_setup.bash` can't be read. Fix: rebuild
+  (`rm -rf build install log && colcon build --symlink-install`) at the final path; don't `mv` a built tree.
+- **G18** (found in A1, migrating `audio_bridge`) **`audio_bridge`'s SSH-based TTS round-trip genuinely
+  takes ~10-15s** (SSH to the robot + Piper synth + ffmpeg + mediad playback) — checking logs or asking "did
+  you hear it" within a few seconds of publishing to `/robot/speak` will read as a total failure when it's
+  actually just still in flight. This single timing mistake produced an hour-long false debugging trail
+  during the migration (chased a `colcon test`-style discovery-range mismatch between an ad-hoc SSH test
+  shell — which defaults to `ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET` — and the services, which use
+  `LOCALHOST` via `/etc/default/ippolit-robot`; then chased a thread-pileup theory from `_speak()`'s
+  serializing lock — both were real, secondary observations, NEITHER was the actual cause). **The fix that
+  actually mattered: wait 15-20s after publishing before checking the log or asking whether audio played.**
+  The discovery-range mismatch is still worth matching in ad-hoc test shells (`export
+  ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST RMW_IMPLEMENTATION=rmw_cyclonedds_cpp` before any manual
+  `ros2 <verb>` query) since it's a genuine inconsistency, just not the culprit here. Broader lesson: when
+  a live verification seems to fail, check the SIMPLEST explanation (wrong timeout) before reaching for
+  DDS-layer theories.

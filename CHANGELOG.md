@@ -7,6 +7,42 @@ current active roadmap)**.
 
 ---
 
+## 2026-07-12 — Phase A1 begins: audio_bridge migrated end-to-end, real production cutover, 3 more gotchas
+
+First node migration of A1 (task #23): `audio_bridge.py` moved into `ippolit_drivers` unchanged in logic,
+wired into `drivers.launch.xml` (part of the `ippolit-core` systemd group), and **actually cut over in
+production** — the old standalone `audio-bridge.service` is stopped and disabled; `/robot/speak` is now
+served by the packaged node via `ippolit-core.service`.
+
+This one node took far longer than expected because of three more real bugs (not migration-logic bugs —
+the Python was copied unchanged) found via live verification, all recorded as G16-G18:
+
+- **G16**: XML comments can't contain a literal `--` — this whole project's prose style uses it
+  constantly, so it broke on the very first real `.launch.xml` edit. An em-dash red herring (a secondary
+  parser's error, chased first, cost real time) turned out to be irrelevant; `encoding="UTF-8"` is good
+  practice but wasn't the fix. Fixed project-wide with a script that only touches comment bodies (blindly
+  sed-ing `--` also corrupts the `<!--`/`-->` delimiters themselves — hit that too, then fixed properly).
+- **G17**: `colcon build --symlink-install` embeds absolute-path symlinks into `install/`; promoting a
+  test workspace to its permanent path via `mv` leaves them all dangling. Fix: rebuild at the final path.
+- **G18**: the real reason "nothing" seemed to happen after publishing a test utterance for over an
+  hour of debugging: the SSH+Piper+ffmpeg round-trip genuinely takes ~10-15s, and every verification
+  check was impatient (a few seconds). This sent the investigation down two mostly-unnecessary paths (a
+  real but non-causal discovery-range mismatch between an ad-hoc test shell and the services; a red-herring
+  thread-pileup theory) before landing on "wait longer" as the actual fix. Both dead ends are documented
+  so they don't get re-chased, but the headline lesson is simpler: check the timeout before the theory.
+
+Also production-restored the old `audio-bridge.service` mid-investigation as soon as the new one looked
+broken, rather than leaving live TTS down while debugging — confirmed working again immediately, then
+re-cut-over once the real fix (patience) was found and verified live (user confirmed hearing two
+consecutive test utterances through the new production path).
+
+Next: continue A1 with the remaining drivers (`lds_scan_node`, `mcu_node`, `valetudo_bridge`) and the
+other packages (`ippolit_safety`/`cliff_guard`, `ippolit_localization`/laser-odom+map-persist,
+`ippolit_perception`/vision+objmap), applying the same rigor (build, deploy, live-verify with correct
+patience, disable the old unit only after confirming the new one works).
+
+---
+
 ## 2026-07-12 — Phase A0: colcon workspace scaffold, live-validated on the Q6A + a real ecosystem gotcha found
 
 First execution step of the architecture plan (task #23): `ros2_ws/src/` with all 10 packages from

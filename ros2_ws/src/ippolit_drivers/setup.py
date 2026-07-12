@@ -19,6 +19,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
+            'audio_bridge = ippolit_drivers.audio_bridge:main',
         ],
     },
 )

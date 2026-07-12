@@ -1,4 +1,4 @@
-<?xml version="1.0"?>
+<?xml version="1.0" encoding="UTF-8"?>
 <launch>
   <let name="urdf_path" value="$(find-pkg-share ippolit_description)/urdf/ippolit.urdf.xacro"/>
   <node pkg="robot_state_publisher" exec="robot_state_publisher" name="robot_state_publisher">

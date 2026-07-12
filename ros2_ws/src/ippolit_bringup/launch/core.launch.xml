@@ -1,4 +1,4 @@
-<?xml version="1.0"?>
+<?xml version="1.0" encoding="UTF-8"?>
 <!-- core.launch.xml — the ippolit-core systemd group: description + drivers + localization +
      safety_control. Deliberately excludes perception/navigation/viz (separate restart
      blast-radius groups, see docs/navigation-architecture.md §2.4) so e.g. a vision-pipeline

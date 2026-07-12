@@ -1,6 +1,14 @@
-<?xml version="1.0"?>
-<!-- drivers.launch.xml — stub, scaffolded in A0. Filled in during A1 (wrap existing nodes) /
-     later feature phases per docs/navigation-architecture.md. Intentionally empty for now:
-     colcon build/test only needs this file to be valid+installable, not functional. -->
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- drivers.launch.xml — robot I/O drivers (ippolit-core systemd group). Being filled in
+     incrementally during A1 as each node is migrated from scripts/companion + scripts/robot into
+     ros2_ws/src/ippolit_drivers — see docs/navigation-architecture.md. -->
 <launch>
+  <node pkg="ippolit_drivers" exec="audio_bridge" name="audio_bridge">
+    <!-- robot_ssh=robot-wifi to match the ACTUAL deployed value (/etc/default/ippolit-robot's
+         ROBOT_SSH=robot-wifi overrode the old unit's robot-usb fallback  -  preserving behavior,
+         not the code's hardcoded default, per A1's "unchanged in logic" rule) -->
+    <param name="robot_ssh" value="robot-wifi"/>
+    <param name="volume" value="90"/>
+    <param name="default_voice" value="amy"/>
+  </node>
 </launch>
