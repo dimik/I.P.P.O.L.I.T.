@@ -44,6 +44,28 @@ the Q6A's `robot-usb`/`robot-wifi` aliases, whose key works).
 
 ---
 
+## 2026-07-12 — Corner-avoidance logic validated live (first time), edge-follow now fully calibrated
+
+With both LiDAR bearing fixes deployed (offset + sign), re-ran the edge-follow controller with --side right
+now correctly corresponding to the true physical right. The robot happened to be positioned right at the
+90deg interior corner set up earlier for this exact test -- took the opportunity to validate corner-handling
+directly rather than reposition.
+
+**7s supervised run, clean result:** front=0.28m triggered CORNER (rotate-away, angle=-14deg clamp) ->
+front clearance grew smoothly (0.28->0.35m) as it rotated -> transitioned cleanly back to normal
+wall-following (d=0.244m tracking toward the 0.299m setpoint) -> oscillated a few more times between
+corner-avoid/follow near the tight bend (expected) -> settled around d~=0.30-0.32m by the end -> stopped
+cleanly on schedule, no collision, no stuck state.
+
+This is the first live validation of the corner/reactive-avoidance logic (previously only the straight-
+wall-following convergence had been tested). Combined with the two LiDAR bearing fixes and the BODY_R
+clearance calibration from earlier today, task #14 (edge-following drive controller) now has: correct
+sign, calibrated clearance, validated straight-line convergence, AND validated corner handling -- all under
+the NOW-correct bearing convention (previous tests before today's fixes should not be trusted for which
+physical side was followed, though the control math itself was always sound).
+
+---
+
 ## 2026-07-12 — SAFETY FIX #2: LiDAR bearing had the WRONG SIGN (left/right swapped), not just offset
 
 Follow-up to the angle_offset_deg fix. After correcting the offset, re-verified with the wall the user
