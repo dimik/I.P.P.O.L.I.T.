@@ -7,6 +7,47 @@ current active roadmap)**.
 
 ---
 
+## 2026-07-13 — Phase A5 follow-up: closed the three remaining gaps (audio diag + objmap/map_persist tests)
+
+Closed all three items the A5 entry below explicitly flagged as "not done":
+- **`audio_bridge` diagnostic_updater**: reports the outcome of the LAST utterance (there's no
+  persistent connection to watch -- each utterance is its own ssh round-trip) -- OK if idle/none
+  spoken yet or the last one succeeded, ERROR with the failure detail otherwise (an ssh/robot-link
+  problem is the likely cause of a failure, not a one-off fluke).
+- **`q6a_objmap` merge/dedup unit tests**: pulled the inline merge logic out of `ObjMap.merge` into
+  a plain module-level `merge_object(objects, cls, x, y, conf, merge_dist)` function (same pattern
+  as F1's `clamp`/`twist_to_valetudo`) so it's testable without a live rclpy Node. 7 new pytest
+  cases: new-entry creation, same-class-within-distance merge + running-average position, distance
+  exactly at the merge_dist boundary does NOT merge (strict `<`), far same-class detections stay
+  separate, different classes never merge even at the same position, confidence keeps the max seen
+  (not the latest), and a 3-observation running average.
+- **`q6a_map_persist` `min_resume_bytes` guard unit tests**: pulled the resume-size classification
+  out of `MapPersist.__init__` into a plain `resume_decision(size, min_resume_bytes)` function
+  returning `'empty'/'refuse'/'resume'`. 5 new pytest cases, including the two states that must
+  never be confused: a 0-byte file (nothing to resume) vs. a small-but-nonzero file (refuse --
+  the actual crash-risk case from the docstring's CRASH FOUND note).
+
+**Verified live** (via `ippolit-lan`, the wired link from the Odyssey -- this session had no path
+to the `q6a`/`ippolit` mDNS alias, only the `ippolit-lan` static-IP alias worked): `colcon build` +
+`colcon test` for `ippolit_perception`/`ippolit_localization`/`ippolit_drivers` -- 59/59 tests green
+(caught two of my own D213 docstring violations and a test bug of my own, mirror of G20, fixed
+before commit -- see below). Restarted `ippolit-core` + `ippolit-perception`; confirmed all three
+nodes came back clean with no tracebacks from the refactors: `q6a_map_persist` correctly refused to
+resume the existing 7769B posegraph (identical decision to the pre-refactor code -- proves the
+`resume_decision` extraction didn't change behavior), `q6a_objmap` loaded cleanly, `audio_bridge`'s
+new diagnostic reads `idle -- no utterances spoken yet this run` on `/diagnostics`, and
+`/diagnostics_agg` correctly buckets it under `Other` (not in the `Drivers`/`Safety` allowlists --
+expected, not an error).
+
+**Lesson (mirrors G20):** wrote both new docstrings with the "summary right after `"""`" style used
+everywhere in this project's non-ROS docs/scripts, and `ament_pep257`'s D213 flagged both -- same
+gotcha as G20, still easy to trip even when you know the rule, because it's the opposite of this
+project's general house style. Also had a genuine test bug (not a lint issue): my own
+`merge_dist`/point-spacing choice in one running-average test landed exactly on the strict `<`
+boundary, so the second observation never actually merged -- `colcon test` caught it immediately.
+
+---
+
 ## 2026-07-13 — Phase A5: diagnostics + aggregator + rolling MCAP recorder; CORRECTION to F1's claim (G23)
 
 **Correction first:** F1's changelog entry claimed cliff_guard's `/cmd_vel_safety` zero-Twist hold

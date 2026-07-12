@@ -55,6 +55,27 @@ _DEFAULT_ALLOW = [
 ]
 
 
+def merge_object(objects, cls, x, y, conf, merge_dist):
+    """
+    Merge one observation into objects in place; return the (possibly new) entry.
+
+    Same-class observations within merge_dist of an existing entry are folded into it (position
+    running-averaged by observation count, confidence kept as the max seen); otherwise a new
+    entry is appended. Pulled out of ObjMap.merge as a plain function so it's testable without a
+    live rclpy Node.
+    """
+    for o in objects:
+        if o['cls'] == cls and math.hypot(o['x'] - x, o['y'] - y) < merge_dist:
+            o['x'] = (o['x'] * o['n'] + x) / (o['n'] + 1)
+            o['y'] = (o['y'] * o['n'] + y) / (o['n'] + 1)
+            o['n'] += 1
+            o['conf'] = max(o['conf'], conf)
+            return o
+    o = {'cls': cls, 'x': x, 'y': y, 'n': 1, 'conf': conf}
+    objects.append(o)
+    return o
+
+
 class ObjMap(Node):
     def __init__(self):
         super().__init__('q6a_objmap')
@@ -258,14 +279,7 @@ class ObjMap(Node):
             self.bumped = False
 
     def merge(self, cls, x, y, conf):
-        for o in self.objects:
-            if o['cls'] == cls and math.hypot(o['x'] - x, o['y'] - y) < self.merge_dist:
-                o['x'] = (o['x'] * o['n'] + x) / (o['n'] + 1)
-                o['y'] = (o['y'] * o['n'] + y) / (o['n'] + 1)
-                o['n'] += 1
-                o['conf'] = max(o['conf'], conf)
-                return
-        self.objects.append({'cls': cls, 'x': x, 'y': y, 'n': 1, 'conf': conf})
+        merge_object(self.objects, cls, x, y, conf, self.merge_dist)
 
     def publish(self):
         # persistence gate: only surface objects seen >= min_n times (a transient YOLO false

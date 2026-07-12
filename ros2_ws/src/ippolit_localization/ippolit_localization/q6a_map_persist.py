@@ -60,6 +60,22 @@ DESERIALIZE_RETRY_S = 3.0
 MATCH_START_AT_FIRST_NODE = 1
 
 
+def resume_decision(size, min_resume_bytes):
+    """
+    Classify a saved .posegraph file's on-disk byte size for the startup resume guard.
+
+    Pulled out of MapPersist.__init__ as a plain function so the min_resume_bytes SAFETY guard
+    (see the module docstring's CRASH FOUND note) is testable without a live rclpy Node.
+    Returns 'empty' (no file / zero bytes -- nothing to resume), 'refuse' (file exists but is
+    smaller than min_resume_bytes -- the crash-risk case), or 'resume' (safe to attempt).
+    """
+    if size == 0:
+        return 'empty'
+    if size < min_resume_bytes:
+        return 'refuse'
+    return 'resume'
+
+
 class MapPersist(Node):
     def __init__(self):
         super().__init__('q6a_map_persist')
@@ -107,10 +123,11 @@ class MapPersist(Node):
         self.deserialize_deadline = time.monotonic() + self.deserialize_timeout_s
         pg = self.base + '.posegraph'
         size = os.path.getsize(pg) if os.path.exists(pg) else 0
-        if size == 0:
+        decision = resume_decision(size, self.min_resume_bytes)
+        if decision == 'empty':
             self.resumed = True   # nothing to resume -- treat as "done" so we don't keep retrying
             self.get_logger().info(f'no saved map at {pg} -- starting from empty')
-        elif size < self.min_resume_bytes:
+        elif decision == 'refuse':
             # see min_resume_bytes / the docstring's CRASH FOUND note -- refusing to deserialize
             # a graph this small is what stopped a real crash loop
             self.resumed = True

@@ -258,9 +258,14 @@ Each phase = PR-sized, behavior-preserving unless stated, ends with: verify → 
   into `viz.launch.xml`, with `cliff_guard` auto-triggering a snapshot on wheel-drop — verified via
   a manual service call and via `cliff_guard`'s own trigger path. Found and fixed the safety-relevant
   G23 regression along the way (see above and the gotchas list). 47/47 `colcon test` green.
-  **Not done:** `audio_bridge` has no `diagnostic_updater` task yet; no additional pytest unit tests
-  for `q6a_objmap`'s merge/dedup logic or `q6a_map_persist`'s `min_resume_bytes` guard. **Not
-  user-verified** (needs the user physically present): pulling the LiDAR ring cable to confirm its
+  **Also done + live-verified (follow-up, same day):** `audio_bridge` now has a `diagnostic_updater`
+  task (reports the last utterance's outcome — OK/idle or ERROR with detail); `q6a_objmap`'s
+  merge/dedup logic pulled into a plain `merge_object()` function with 7 new pytest cases;
+  `q6a_map_persist`'s `min_resume_bytes` guard pulled into a plain `resume_decision()` function with
+  5 new pytest cases. 59/59 `colcon test` green; `ippolit-core`+`ippolit-perception` restarted clean,
+  confirmed identical resume behavior on the real (still-too-small) saved posegraph, confirmed the
+  new diagnostic live on `/diagnostics` and correctly bucketed under `Other` in `/diagnostics_agg`.
+  **Not user-verified** (needs the user physically present): pulling the LiDAR ring cable to confirm its
   diagnostic flips to ERROR within 5 s, and opening a triggered snapshot bag in an actual Foxglove
   client (no Foxglove client available in this environment — `foxglove-layout.json` itself is also
   still unverified per F2). The two ✅ acceptance lines below are therefore the phase's *target*
