@@ -44,6 +44,26 @@ the Q6A's `robot-usb`/`robot-wifi` aliases, whose key works).
 
 ---
 
+## 2026-07-12 — New SUPERVISED-ONLY creep-test script (does not hard-stop on MiDaS)
+
+User wants the MiDaS floor-drop signal to reduce speed rather than hard-stop, to observe sensor behavior
+during a slower approach to a real edge. Given we just confirmed wheel-drop only fires once a wheel has
+ALREADY left the ground (a last-instant signal, not a safety margin), asked directly whether this is for
+supervised testing or eventual autonomous use -- confirmed supervised-only (human present, hand ready, same
+as all of today's real-edge testing).
+
+Given that answer, implemented as a NEW, separate script (`q6a_creep_test.py`) rather than modifying
+`q6a_drive.py`'s default hard-stop behavior at all -- production safety logic is untouched. The new script:
+proportionally reduces velocity as the MiDaS center-drop signal strengthens (ramps from full speed at
+center=0.20 down to a floor speed at center=0.55, never fully to zero), with wheel-drop `/cliff` as the
+ONLY hard stop. Docstring and startup log both carry an explicit "NOT for autonomous/unsupervised use"
+warning. Not yet run live -- pending explicit go-ahead each time given it intentionally removes the MiDaS
+safety margin.
+
+Files: `scripts/companion/q6a_creep_test.py` (new).
+
+---
+
 ## 2026-07-12 — RESOLVED (negative): downward IR cliff sensors don't detect a real edge in practice
 
 User asked to confirm whether we actually have working data from the robot's downward-facing IR cliff
