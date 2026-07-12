@@ -3,14 +3,15 @@
 q6a_objmap.py — semantic object map (companion).
 
 Fuses the perception + localization we already publish into a persistent map of objects:
-  /vision/detections (YOLO label/bbox/conf/id + MiDaS disparity)
+  /vision/detections (vision_msgs/Detection2DArray: label/score/bbox/track id -- typed per A3)
   /odom               (robot pose in the map frame, from valetudo-bridge)
   /scan               (LiDAR range — metric distance at a bearing; only while the turret spins)
 
 Per confident detection: bearing = from the bbox x-center + the camera horizontal FOV; range =
-/scan at that bearing (metric; MiDaS disparity is a relative fallback). Project to the map frame
-via the robot pose, accumulate persistent objects (same class within merge_dist_m are merged,
-position running-averaged), and publish /object_map (JSON) + /object_markers (RViz MarkerArray).
+/scan at that bearing (metric). Project to the map frame via the robot pose, accumulate
+persistent objects (same class within merge_dist_m are merged, position running-averaged), and
+publish /object_map (ippolit_interfaces/MappedObjectArray, typed per A3) + /object_markers
+(RViz MarkerArray).
 
 CALIBRATION (do during the first drive): the camera H-FOV (cam_hfov_deg), any camera-yaw offset
 (cam_yaw_deg), and the bearing sign are estimates — tune against RViz (object markers vs the real
@@ -22,7 +23,8 @@ param (default /home/radxa/ros/maps/object_map.json) at startup if present, and 
 periodically + on clean shutdown (atomic write: temp file + rename, so a mid-write crash/power-cut
 can't corrupt the persisted file -- worst case you lose the last save_period_s of updates, not the
 whole map). Same limitation as the slam_toolbox map: only a CLEAN stop triggers the shutdown save;
-a hard power loss just loses anything since the last periodic save.
+a hard power loss just loses anything since the last periodic save. This on-disk JSON format is
+unaffected by A3 -- it's an implementation detail of this node, not a ROS interface.
 
 Parameters are declared below (see ippolit_bringup/config/q6a_objmap.yaml for the deployed
 values); this replaces the earlier Q6A_CAM_*/Q6A_OBJMAP_* environment-variable reads (A2).
@@ -32,13 +34,15 @@ import math
 import os
 
 from geometry_msgs.msg import PoseWithCovarianceStamped
+from ippolit_interfaces.msg import MappedObject, MappedObjectArray
 from nav_msgs.msg import Odometry
 from rcl_interfaces.msg import FloatingPointRange, IntegerRange, ParameterDescriptor
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
 from sensor_msgs.msg import LaserScan
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool
+from vision_msgs.msg import Detection2DArray
 try:
     from visualization_msgs.msg import Marker, MarkerArray
     HAVE_MARKERS = True
@@ -67,6 +71,14 @@ class ObjMap(Node):
         self.declare_parameter(
             'bear_sign', -1.0,
             ParameterDescriptor(description='Sign flip for image +x(right) -> bearing.'))
+        self.declare_parameter(
+            'img_width', 672,
+            ParameterDescriptor(
+                description=(
+                    'Camera frame width in pixels (fixed by the OV8856/camstream pipeline; '
+                    'Detection2DArray carries bbox pixel coords but not frame dimensions, so '
+                    'this is needed to normalize the bbox x-center for the bearing calc).'),
+                integer_range=[IntegerRange(from_value=1, to_value=8192)]))
         self.declare_parameter(
             'merge_dist_m', 0.5,
             ParameterDescriptor(
@@ -113,6 +125,7 @@ class ObjMap(Node):
         self.h_fov = math.radians(self.get_parameter('cam_hfov_deg').value)
         self.cam_yaw = math.radians(self.get_parameter('cam_yaw_deg').value)
         self.bear_sign = self.get_parameter('bear_sign').value
+        self.img_width = self.get_parameter('img_width').value
         self.merge_dist = self.get_parameter('merge_dist_m').value
         self.min_conf = self.get_parameter('min_conf').value
         self.min_n = self.get_parameter('min_n').value
@@ -133,14 +146,14 @@ class ObjMap(Node):
             self.create_subscription(
                 PoseWithCovarianceStamped, self.pose_topic, self.on_posecov, 10)
         self.create_subscription(LaserScan, '/scan', self.on_scan, 10)
-        self.create_subscription(String, '/vision/detections', self.on_dets, 10)
+        self.create_subscription(Detection2DArray, '/vision/detections', self.on_dets, 10)
         # A bump = a real obstacle the LiDAR can't see (thin table leg, etc.) right in front of
         # us. Record it on the map at the robot's front so we remember + route around it later.
         self.bumped = False
         latched = QoSProfile(depth=1, reliability=QoSReliabilityPolicy.RELIABLE,
                              durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(Bool, '/bumper', self.on_bumper, latched)
-        self.pub_map = self.create_publisher(String, '/object_map', 10)
+        self.pub_map = self.create_publisher(MappedObjectArray, '/object_map', 10)
         self.pub_mk = self.create_publisher(MarkerArray, '/object_markers', 10) \
             if HAVE_MARKERS else None
         self.create_timer(2.0, self.publish)
@@ -214,25 +227,23 @@ class ObjMap(Node):
     def on_dets(self, msg):
         if self.pose is None:
             return
-        try:
-            data = json.loads(msg.data)
-        except Exception:
-            return
-        w = data.get('w', 672)
         xr, yr, yaw = self.pose
-        for det in data.get('dets', []):
-            lab = det.get('label', '').lower()
-            if det.get('conf', 0) < self.min_conf or lab not in self.allow:
+        for det in msg.detections:
+            if not det.results:
+                continue
+            label = det.results[0].hypothesis.class_id
+            conf = det.results[0].hypothesis.score
+            if conf < self.min_conf or label.lower() not in self.allow:
                 continue                                   # skip low-conf + non-furniture
-            x1, y1, x2, y2 = det['bbox']
-            xc = (x1 + x2) / 2.0
-            bearing = self.bear_sign * ((xc / w) - 0.5) * self.h_fov + self.cam_yaw  # base_link
+            xc = det.bbox.center.position.x                # already center-of-bbox, in pixels
+            bearing = (self.bear_sign * ((xc / self.img_width) - 0.5) * self.h_fov
+                       + self.cam_yaw)                      # base_link bearing
             rng = self.scan_range(bearing)                  # metric range (needs turret spinning)
             if rng is None:
                 continue                                    # no LiDAR range yet -> can't place
             xm = xr + rng * math.cos(yaw + bearing)
             ym = yr + rng * math.sin(yaw + bearing)
-            self.merge(det['label'], xm, ym, det.get('conf', 0.0))
+            self.merge(label, xm, ym, conf)
 
     def on_bumper(self, m):
         if m.data and not self.bumped:      # rising edge = one obstacle mark per distinct hit
@@ -260,9 +271,19 @@ class ObjMap(Node):
         # persistence gate: only surface objects seen >= min_n times (a transient YOLO false
         # positive stays at n=1-2). Bump 'obstacle' marks are deliberate ground truth -> kept.
         pub = [o for o in self.objects if o['n'] >= self.min_n or o['cls'] == 'obstacle']
-        self.pub_map.publish(String(data=json.dumps(
-            {'objects': [{'cls': o['cls'], 'x': round(o['x'], 3), 'y': round(o['y'], 3),
-                          'n': o['n'], 'conf': round(o['conf'], 3)} for o in pub]})))
+        map_msg = MappedObjectArray()
+        map_msg.header.stamp = self.get_clock().now().to_msg()
+        map_msg.header.frame_id = 'map'
+        for o in pub:
+            mo = MappedObject()
+            mo.cls = o['cls']
+            mo.position.x = o['x']
+            mo.position.y = o['y']
+            mo.n = o['n']
+            mo.conf = o['conf']
+            # room-tagging is a TODO refinement (see module docstring); left blank for now
+            map_msg.objects.append(mo)
+        self.pub_map.publish(map_msg)
         if self.pub_mk is not None:
             ma = MarkerArray()
             for i, o in enumerate(pub):

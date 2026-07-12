@@ -12,10 +12,11 @@ Two very different responses, on purpose:
 
   * MiDaS floor-drop ahead = ADVISORY, NOT a freeze. The robot must be able to travel *along* an
     edge at a safe distance, not get blocked in front of it, so this layer only PUBLISHES the
-    hazard — it never cuts manual control. It republishes `/vision/floor`'s per-sector drop as
-    `/cliff/ahead` (Bool = drop in the CENTER path ahead) so the drive controller can refuse to
-    drive *forward* into a drop while still turning, reversing, or gliding parallel. Direction
-    lives in `/vision/floor` (sectors left/center/right).
+    hazard — it never cuts manual control. It republishes `/vision/floor`'s per-sector drop
+    (`ippolit_interfaces/FloorDrop`, typed per A3 -- was a JSON String) as `/cliff/ahead` (Bool =
+    drop in the CENTER path ahead) so the drive controller can refuse to drive *forward* into a
+    drop while still turning, reversing, or gliding parallel. Direction lives in `/vision/floor`
+    (left/center/right fields).
 
 Calibrated at the real ladder edge 2026-07-09: floor `max_step` room <=0.205 vs edge 0.35-0.65 ->
 center threshold 0.30 (fuse 0.24 when the forward LiDAR sector is anomalously open = stairwell
@@ -39,6 +40,7 @@ import time
 import urllib.request
 
 from geometry_msgs.msg import Twist
+from ippolit_interfaces.msg import FloorDrop
 from rcl_interfaces.msg import FloatingPointRange, IntegerRange, ParameterDescriptor
 import rclpy
 from rclpy.node import Node
@@ -131,7 +133,7 @@ class CliffGuard(Node):
         self.pub_cmd_vel_safety = self.create_publisher(Twist, '/cmd_vel_safety', 10)
         self.create_subscription(Bool, '/cliff', self.on_cliff, latched)
         self.create_subscription(Bool, '/bumper', self.on_bumper, latched)
-        self.create_subscription(String, '/vision/floor', self.on_floor, 10)
+        self.create_subscription(FloorDrop, '/vision/floor', self.on_floor, 10)
         self.create_subscription(LaserScan, '/scan', self.on_scan, qos_profile_sensor_data)
         self.create_timer(1.0 / CMD_VEL_SAFETY_HZ, self.publish_cmd_vel_safety)
         self.bumped = False
@@ -191,12 +193,8 @@ class CliffGuard(Node):
 
     # --- ADVISORY: drop ahead in the center path (never disables manual control) ---
     def on_floor(self, m):
-        try:
-            c = json.loads(m.data).get('sectors', {}).get('center', [0.0, 0, 0.0])
-            center = float(c[0])
-            sharp = float(c[2]) if len(c) > 2 else 0.0
-        except Exception:
-            return
+        center = m.center
+        sharp = m.center_sharp
         lidar_fresh = (time.monotonic() - self.lidar_at) < LIDAR_STALE_S
         # a real drop-off is a SHARP discontinuity, not a smooth floor gradient's steepest step
         # require LiDAR corroboration: a real down-edge reads as an OPEN forward sector (beam

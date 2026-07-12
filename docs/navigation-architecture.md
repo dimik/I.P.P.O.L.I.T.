@@ -230,8 +230,18 @@ Each phase = PR-sized, behavior-preserving unless stated, ends with: verify → 
   `ippolit_bringup/config/<node>.yaml`; grep confirms `ROBOT_ADDR` is the only `os.environ` read
   left anywhere in `ros2_ws` (the one sanctioned machine-local exception). Safety ranges verified
   live: an out-of-range `ros2 param set` is rejected, not silently clamped.
-- **A3 — interfaces.** Create `ippolit_interfaces`, port topics per §2.2 with the compatibility window.
-  ✅ `ros2 topic echo` shows typed data; Foxglove plots FloorDrop fields directly; JSON publishers removed.
+- **A3 — interfaces. ✅ DONE (2026-07-13).** Create `ippolit_interfaces`, port topics per §2.2 with
+  the compatibility window.
+  ✅ All four topics ported (`/mcu/triggers`, `/vision/detections`, `/vision/floor`,
+  `/object_map`) — the `.msg` definitions already existed from A0 and needed no changes. Given a
+  single-repo/single-developer project where every consumer is known, did a direct atomic
+  per-topic migration instead of the suggested publish-both window (grepped first to confirm the
+  full consumer list per topic; two had zero in-repo subscribers). `ros2 topic type`/`echo` show
+  typed data live for all four; `/vision/floor`'s FloorDrop fields are now genuinely Plot-panel
+  ready, closing F2's previously-flagged gap. JSON publishers are gone (not kept alongside).
+  Found an untracked `/tmp/cliff_monitor.py` debug script (not ours, pre-existing, still running)
+  whose `/mcu/triggers` subscription is now a harmless silent type-mismatch — flagged for the
+  user, not touched.
 - **A4 — URDF + robot_state_publisher.** Measure/encode geometry once (wheel base, BODY_R→radius, laser
   and camera poses — the camera yaw/HFOV calibration from F0 feeds this). All static TF publishes and
   duplicated geometry constants removed in favor of TF lookups / one xacro property file.

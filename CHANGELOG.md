@@ -7,6 +7,58 @@ current active roadmap)**.
 
 ---
 
+## 2026-07-13 — Phase A3 COMPLETE: typed interfaces retire JSON-on-String topics
+
+Ported all four JSON-on-String topics per the architecture doc's §2.2 table to typed messages:
+`/mcu/triggers` (`std_msgs/String` -> `ippolit_interfaces/McuTriggers`, `mcu_node.py`),
+`/vision/detections` (-> `vision_msgs/Detection2DArray`, `q6a_vision.py`), `/vision/floor` (->
+`ippolit_interfaces/FloorDrop`, `q6a_vision.py`), `/object_map` (->
+`ippolit_interfaces/MappedObjectArray`, `q6a_objmap.py`). All four `.msg` definitions already
+existed from A0's scaffold and needed no changes — their fields matched the actual JSON payloads
+exactly.
+
+Grepped the whole `ros2_ws` first to find every consumer before touching a publisher: `mcu/triggers`
+and `object_map` have zero in-repo subscribers (pure diagnostic/future-consumer topics), so no
+downstream code needed updating for those two. `/vision/detections` is subscribed by both
+`q6a_announce` and `q6a_objmap`; `/vision/floor` by `cliff_guard` — all three updated to read the
+typed fields directly (no more `json.loads`).
+
+Given this is a single-repo, single-developer project where every consumer is code I control, did
+a direct atomic per-topic migration rather than the doc's suggested compatibility window
+(publish-both-briefly): no external/uncontrolled consumer exists to protect during a transition,
+so the extra publish-both machinery would just be built and immediately deleted again.
+
+Two real design decisions along the way: (1) `vision_msgs/Detection2D`'s `BoundingBox2D` is
+center+size, not corner (x1,y1,x2,y2) — a genuine format conversion, not just a rename; (2) MiDaS
+per-detection disparity (the JSON's `disp` field) has no natural home in `vision_msgs` and nothing
+downstream ever consumed it (confirmed by grep) — dropped from the ROS-published message rather
+than forced into an unrelated field; it still exists internally for the `:8093` annotated view.
+(3) `Detection2DArray` carries pixel bbox coordinates but not frame width/height, which
+`q6a_objmap`'s bearing calc needs to normalize the bbox x-center — added a new `img_width`
+parameter (default 672, the fixed OV8856/camstream resolution) rather than inventing a
+non-standard message field.
+
+**Verified live:** all 47 tests pass; restarted `ippolit-core` + `ippolit-perception`, confirmed
+every topic now reports its typed `ros2 topic type`, and read real data off each: `/vision/floor`
+(FloorDrop numeric fields), `/object_map` + `/vision/detections` (typed empty arrays, correct
+given the robot is currently idle with no detections), `/mcu/triggers` (full McuTriggers field
+dump via explicit-type `ros2 topic echo`). No new errors in either group's journal beyond the
+already-known-harmless QNN loader probe pattern (see prior entries).
+
+**Found and flagging, not fixing:** `/tmp/cliff_monitor.py` — an untracked (not in git), ad-hoc
+debug script from earlier manual testing, still running on the Q6A (orphaned, PPID 1) — subscribes
+to `/mcu/triggers` expecting the old `String`/JSON type. Its subscription is now a silent type
+mismatch (ROS 2/DDS simply won't match publishers and subscribers of different types on the same
+topic name), so it stops receiving `d_view_*` updates. Its other subscriptions (`/cliff`,
+`/bumper`, etc., still `Bool`) are unaffected. Not part of the production system and not touched —
+flagged for the user to decide whether to kill it or leave it.
+
+Next per `docs/navigation-architecture.md`'s suggested order: A4 (URDF + robot_state_publisher
+real geometry) — also pure software, no physical driving required, unlike F3/F0's still-deferred
+physical tests.
+
+---
+
 ## 2026-07-13 — Phase F2 (visualization): foxglove_bridge deployed and verified; layout JSON authored but unverified
 
 Installed `ros-jazzy-foxglove-bridge` on the Q6A, wired it into the new `ippolit-viz` systemd

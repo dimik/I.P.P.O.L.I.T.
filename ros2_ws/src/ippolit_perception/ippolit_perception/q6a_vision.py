@@ -6,8 +6,9 @@ Robot OV8856 -> YOLO(NPU)+ByteTrack -> ROS detections + view.
 
 Pulls the robot's forward camera over the USB link (MJPEG on :8090), runs the w8a8 YOLOv8 on the
 Hexagon NPU with ByteTrack for stable track IDs, publishes detections on ROS /vision/detections
-(JSON String), and serves an annotated MJPEG on :8093 so you can watch it. The robot already
-hands us JPEG frames, so the Q6A skips the GPU-ISP/demosaic stack entirely — just decode -> YOLO.
+(vision_msgs/Detection2DArray, typed per A3), and serves an annotated MJPEG on :8093 so you can
+watch it. The robot already hands us JPEG frames, so the Q6A skips the GPU-ISP/demosaic stack
+entirely — just decode -> YOLO.
 
 Decision 2026-07-08: use the robot OV8856 (forward-facing, sees the room) over the Q6A IMX296 for
 robot-perception — see docs/companion-autonomy.md.
@@ -23,12 +24,12 @@ not node tunables) set node-scoped in perception.launch.xml.
 """
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
-import json
 import os
 import threading
 import time
 import urllib.request
 
+from ippolit_interfaces.msg import FloorDrop
 from ippolit_perception.q6a_bytetrack import ByteTracker
 from ippolit_perception.q6a_yolo import YoloDetector
 import numpy as np
@@ -37,7 +38,7 @@ from qai_appbuilder import DataType, QNNContext
 from rcl_interfaces.msg import FloatingPointRange, IntegerRange, ParameterDescriptor
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import String
+from vision_msgs.msg import Detection2D, Detection2DArray, ObjectHypothesisWithPose
 
 MIDAS_RES = 256                                                # MiDaS-v21-small is 256x256
 _PALETTE = [(255, 64, 64), (64, 200, 64), (64, 160, 255), (255, 200, 0),
@@ -224,9 +225,9 @@ class VisionNode(Node):
         self.midas_bin = self.get_parameter('midas_bin').value
         self.enable_depth = self.get_parameter('enable_depth').value
 
-        self.pub = self.create_publisher(String, '/vision/detections', 10)
+        self.pub = self.create_publisher(Detection2DArray, '/vision/detections', 10)
         # MiDaS floor profile (cliff cue)
-        self.pub_floor = self.create_publisher(String, '/vision/floor', 10)
+        self.pub_floor = self.create_publisher(FloorDrop, '/vision/floor', 10)
         self.det = YoloDetector(conf=self.conf)     # Configs the HTP backend + loads YOLO context
         self.labels = self.det.labels
         self.tracker = ByteTracker(high_thresh=0.4, low_thresh=self.conf)
@@ -289,8 +290,13 @@ class VisionNode(Node):
             Shared.depth = dmap
             if dmap is not None:                                  # floor-drop cue for cliff_guard
                 fm = floor_profile(dmap)
-                fm['stamp'] = self.get_clock().now().nanoseconds
-                self.pub_floor.publish(String(data=json.dumps(fm)))
+                sectors = fm['sectors']
+                floor_msg = FloorDrop()
+                floor_msg.header.stamp = self.get_clock().now().to_msg()
+                floor_msg.left, _, floor_msg.left_sharp = sectors['left']
+                floor_msg.center, _, floor_msg.center_sharp = sectors['center']
+                floor_msg.right, _, floor_msg.right_sharp = sectors['right']
+                self.pub_floor.publish(floor_msg)
             dets = []
             for (x1, y1, x2, y2, cf, ci, tid) in tracked:
                 lab = self.labels[int(ci)] if 0 <= int(ci) < len(self.labels) else str(int(ci))
@@ -299,20 +305,35 @@ class VisionNode(Node):
             Shared.dets = dets
             Shared.annot = annotate(rgb, dets, dmap)
             Shared.seq += 1
-            self.publish(dets, rgb.shape)
+            self.publish(dets)
             dt = time.time() - t0
             if period and dt < period:
                 time.sleep(period - dt)
 
-    def publish(self, dets, shape):
-        msg = String()
-        msg.data = json.dumps({
-            'stamp': self.get_clock().now().nanoseconds,
-            'w': int(shape[1]), 'h': int(shape[0]),
-            'dets': [{'label': lab, 'conf': round(cf, 3), 'bbox': [x1, y1, x2, y2],
-                      'id': tid, 'disp': dep}
-                     for (x1, y1, x2, y2, lab, cf, tid, dep) in dets],
-        })
+    def publish(self, dets):
+        """
+        Publish tracked detections as vision_msgs/Detection2DArray.
+
+        MiDaS disparity (the last tuple element) isn't published here -- vision_msgs has no
+        natural field for it, and nothing downstream currently consumes it (it only drives the
+        local :8093 annotated view). Bbox is stored as vision_msgs' native center+size form, not
+        the internal (x1,y1,x2,y2) corners.
+        """
+        msg = Detection2DArray()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        for (x1, y1, x2, y2, lab, cf, tid, _dep) in dets:
+            det = Detection2D()
+            det.header = msg.header
+            hyp = ObjectHypothesisWithPose()
+            hyp.hypothesis.class_id = lab
+            hyp.hypothesis.score = float(cf)
+            det.results.append(hyp)
+            det.bbox.center.position.x = (x1 + x2) / 2.0
+            det.bbox.center.position.y = (y1 + y2) / 2.0
+            det.bbox.size_x = float(x2 - x1)
+            det.bbox.size_y = float(y2 - y1)
+            det.id = str(tid)
+            msg.detections.append(det)
         self.pub.publish(msg)
 
 

@@ -3,8 +3,9 @@
 q6a_announce.py — speak recognized objects (companion).
 
 Watches YOLO detections and has the robot say what it sees ("I see a chair") through its own
-Piper voice. Subscribes /vision/detections (from q6a-vision) and publishes /robot/speak
-(std_msgs/String), which audio-bridge pipes to the robot's speak.py over the USB/WiFi link.
+Piper voice. Subscribes /vision/detections (vision_msgs/Detection2DArray, typed per A3 -- was a
+JSON String) and publishes /robot/speak (std_msgs/String), which audio-bridge pipes to the
+robot's speak.py over the USB/WiFi link.
 
 Debounced so it narrates rather than spams:
   - min_conf   : only speak confident detections
@@ -20,13 +21,13 @@ Run: source /opt/ros/jazzy/setup.bash && ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
 Parameters are declared below (see ippolit_bringup/config/q6a_announce.yaml for the deployed
 values); this replaces the earlier Q6A_ANNOUNCE_* environment-variable reads (A2).
 """
-import json
 import time
 
 from rcl_interfaces.msg import FloatingPointRange, IntegerRange, ParameterDescriptor
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
+from vision_msgs.msg import Detection2DArray
 
 _DEFAULT_ALLOW = [
     'person', 'chair', 'couch', 'bed', 'dining table', 'tv', 'refrigerator', 'oven',
@@ -85,20 +86,21 @@ class Announcer(Node):
         self.last_said = {}       # label -> monotonic time last announced
         self.last_utter = 0.0     # monotonic time of the last utterance (any label)
         self.pub = self.create_publisher(String, '/robot/speak', 10)
-        self.create_subscription(String, '/vision/detections', self.on_dets, 10)
+        self.create_subscription(Detection2DArray, '/vision/detections', self.on_dets, 10)
         self.get_logger().info(
             f'q6a_announce up: /vision/detections -> /robot/speak '
             f'(min_conf={self.min_conf}, min_hits={self.min_hits}, cooldown={self.cooldown}s, '
             f'phrase="{self.phrase}")')
 
     def on_dets(self, msg):
-        try:
-            dets = json.loads(msg.data).get('dets', [])
-        except Exception:
-            return
-        seen = {d['label'] for d in dets
-                if d.get('conf', 0) >= self.min_conf and d.get('label')
-                and d['label'].lower() in self.allow}
+        seen = set()
+        for det in msg.detections:
+            if not det.results:
+                continue
+            label = det.results[0].hypothesis.class_id
+            conf = det.results[0].hypothesis.score
+            if conf >= self.min_conf and label and label.lower() in self.allow:
+                seen.add(label)
         # persistence: bump seen labels, decay the rest
         for lab in list(self.hits) + list(seen):
             if lab in seen:

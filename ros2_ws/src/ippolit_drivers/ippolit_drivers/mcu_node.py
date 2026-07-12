@@ -6,8 +6,9 @@ Reads the raw /dev/ttyS4 byte stream that libserialtap.so tees into the tmpfs sh
 (/tmp/mcu_ring.buf), decodes every known MCU frame type, and publishes:
     /imu/data          sensor_msgs/Imu   (Status10ms 0x02 — BMI055 gyro+accel)
     /odom/wheel        nav_msgs/Odometry (Status20ms 0x01 — wheel dead-reckoning)
-    /cliff /bumper /cliff/front /cliff/rear /wheel_floating /mcu/triggers /mcu/error
-        (Triggers 0x00)
+    /cliff /bumper /cliff/front /cliff/rear /wheel_floating /mcu/error (Triggers 0x00)
+    /mcu/triggers                      (Triggers 0x00 full decode -- ippolit_interfaces/
+        McuTriggers, typed per A3; was a JSON String)
     /cliff/edge_dist /mcu/status20     (Status20ms extras: edgeDis, roller/side-brush current)
     /mcu/status10                      (Status10ms extra: leftDis/rightDis wheel-distance deltas)
     /mcu/status100 /dustbin_missing    (Status100ms 0x03 — pitch/roll, wheel current,
@@ -51,6 +52,7 @@ import struct
 import threading
 import time
 
+from ippolit_interfaces.msg import McuTriggers
 from nav_msgs.msg import Odometry
 import rclpy
 from rclpy.node import Node
@@ -193,7 +195,7 @@ class McuNode(Node):
         self.pub_cliff_front = self.create_publisher(Bool, '/cliff/front', latched)
         self.pub_cliff_rear = self.create_publisher(Bool, '/cliff/rear', latched)
         self.pub_wheel_floating = self.create_publisher(Bool, '/wheel_floating', latched)
-        self.pub_triggers_raw = self.create_publisher(String, '/mcu/triggers', latched)
+        self.pub_triggers_raw = self.create_publisher(McuTriggers, '/mcu/triggers', latched)
         self.front_state = self.rear_state = self.wf_state = None
         # Status20ms `edgeDis` (mm) — a CONTINUOUS distance-ish reading, decoded since day one
         # but never published (dead variable). Streamed every 20ms regardless of state change,
@@ -414,8 +416,13 @@ class McuNode(Node):
                 self.pub_cliff_rear.publish(Bool(data=rear))
                 self.pub_wheel_floating.publish(Bool(data=wf))
                 self.pub_mcu_error.publish(Bool(data=err))
-                self.pub_triggers_raw.publish(
-                    String(data=json.dumps(d)))   # FULL state, not just nonzero
+                trig_msg = McuTriggers()
+                trig_msg.header.stamp = now
+                for k in _TRIGGERS_BOOL_BITS:      # FULL state, not just nonzero
+                    setattr(trig_msg, k, bool(d[k]))
+                for k in _TRIGGERS_INT3_FIELDS:
+                    setattr(trig_msg, k, d[k])
+                self.pub_triggers_raw.publish(trig_msg)
                 if err != self.error_state:
                     self.error_state = err
                     active = [k for k in ERROR_BITS if d[k]]
