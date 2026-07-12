@@ -194,9 +194,12 @@ between us and the NPU/camera stack for zero current benefit. Rollback = `git ch
 
 Each phase = PR-sized, behavior-preserving unless stated, ends with: verify → CHANGELOG → commit → push.
 
-- **A0 — workspace scaffold.** Create `ros2_ws/src/` with all packages (empty nodes OK), CI workflow,
-  `colcon build && colcon test` green in CI and on the Q6A. Nothing deployed yet.
-  ✅ CI badge green; build clean on device.
+- **A0 — workspace scaffold. ✅ DONE (2026-07-12).** Create `ros2_ws/src/` with all packages (empty nodes
+  OK), CI workflow, `colcon build && colcon test` green in CI and on the Q6A. Nothing deployed yet.
+  ✅ Build clean on device (10/10 packages); 38/38 tests pass on device (0 errors, 0 failures); URDF valid
+  + `robot_state_publisher` actually runs and publishes correct TF; CI workflow added (not yet observed
+  green on a real push at time of writing — confirm on the next PR). Found and fixed 3 real bugs along
+  the way, not just scaffolding — see G13-G15.
 - **A1 — wrap existing nodes.** Move each script into its package **unchanged in logic**, add entry
   points, keep old topics/params (env vars still read as fallback). Deploy via new `deploy.sh`; replace
   the 12 units with the 4 group units running launch files. Old `/home/radxa/ros/*.py` copies deleted
@@ -290,7 +293,7 @@ envelope (1.0 fails), MiDaS edge calibration table (65→5 cm), thermal enclosur
 worker. Battery telemetry via `/battery` (Valetudo charging flag broken on this model). IR floor sensors
 conclusively useless for early warning (co-fire with wheel-drop).
 
-## 9. Gotchas (G1–G12) — unchanged from rev 1, all live-learned; MUST READ
+## 9. Gotchas (G1–G15) — G1-G12 unchanged from rev 1, G13-G15 found live during A0; MUST READ
 
 - **G1** Valetudo holds the last velocity — stopping requires actively sending zero; a silent watchdog is
   not a stop.
@@ -316,3 +319,18 @@ conclusively useless for early warning (co-fire with wheel-drop).
 - **G11** REST schema: `{"action": ...}` (not `operation`); move vector `{"velocity": 0..1, "angle": deg}`.
 - **G12** Battery: use `/battery` (AVA charge_state); Valetudo's charging flag is broken on the D10S Pro;
   `q6a-brownout` already owns low-battery poweroff.
+- **G13** (found in A0) `colcon test` silently runs ZERO tests for ament_python packages on this
+  Python 3.12/setuptools combo — auto-detection keys off `setup.py`'s `tests_require`, but setuptools
+  now silently drops that field before colcon reads it back (the "Unknown distribution option" warning
+  is the tell). Always pass `--python-testing pytest` explicitly to `colcon test` (done in the CI
+  workflow; do the same for any local/manual test run). Do NOT "fix" the warning by removing
+  `tests_require` — that field still has to be present for colcon, the warning is cosmetic.
+- **G14** `package.xml` (format 3) element ORDER is validated by `xmllint` and matters:
+  `member_of_group` must come after all `depend`/`test_depend` tags, immediately before `export`, or the
+  package fails lint with a schema error that only shows up under `colcon test`, not `colcon build`.
+- **G15** XML launch `<param>` values built from `$(command '...')` substitutions (e.g. xacro-expanded
+  URDF text passed to `robot_state_publisher`) need an explicit `type="str"` attribute — without it,
+  launch's automatic type inference can choke on multi-line content and fail at RUN time (not parse
+  time) with "Failed to convert". `ros2 launch <file> --show-args` parsing cleanly is not sufficient
+  proof a launch file works; always also run it (even briefly, `timeout Ns ros2 launch ...`) and check
+  the node actually comes up.

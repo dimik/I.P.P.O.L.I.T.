@@ -1,0 +1,61 @@
+name: ROS 2 CI
+
+# Validates the ros2_ws colcon workspace (source + interfaces + lint + unit tests) on every push/PR.
+# This gates STRUCTURE, not physics — hardware-in-the-loop stays manual by design (see
+# docs/navigation-architecture.md §2.5). Runs on amd64; the Q6A is arm64, but ament_python packages
+# and .msg interfaces are architecture-independent, so this still catches the vast majority of
+# structural regressions (missing deps, broken package.xml, failing unit tests, lint violations).
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'ros2_ws/**'
+      - '.github/workflows/ros2_ci.yml'
+  pull_request:
+    paths:
+      - 'ros2_ws/**'
+      - '.github/workflows/ros2_ci.yml'
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup ROS 2 Jazzy
+        uses: ros-tooling/setup-ros@v0.7
+        with:
+          required-ros-distributions: jazzy
+
+      - name: Build and test (ros2_ws)
+        uses: ros-tooling/action-ros-ci@v0.3
+        with:
+          package-name: >
+            ippolit_interfaces
+            ippolit_description
+            ippolit_drivers
+            ippolit_control
+            ippolit_safety
+            ippolit_perception
+            ippolit_localization
+            ippolit_navigation
+            ippolit_teleop
+            ippolit_bringup
+          target-ros2-distro: jazzy
+          import-token: ${{ secrets.GITHUB_TOKEN }}
+          vcs-repo-file-url: ''
+          colcon-defaults: |
+            {
+              "build": {
+                "base-paths": ["ros2_ws/src"]
+              },
+              "test": {
+                "base-paths": ["ros2_ws/src"],
+                "python-testing": "pytest"
+              }
+            }
+          # --python-testing pytest is NOT cosmetic: on this Python/setuptools version, `colcon test`'s
+          # auto-detection (keyed off setup.py's `tests_require`) silently fails and falls back to the
+          # legacy `setuppy_test` step, which reports "0 tests ran" for every ament_python package
+          # without actually running pytest at all — confirmed live on the Q6A during A0. Forcing the
+          # extension explicitly is the fix; see docs/navigation-architecture.md §9 gotchas.

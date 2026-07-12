@@ -7,6 +7,50 @@ current active roadmap)**.
 
 ---
 
+## 2026-07-12 — Phase A0: colcon workspace scaffold, live-validated on the Q6A + a real ecosystem gotcha found
+
+First execution step of the architecture plan (task #23): `ros2_ws/src/` with all 10 packages from
+`docs/navigation-architecture.md` §2.1 — `ippolit_interfaces` (ament_cmake, real msg definitions:
+`FloorDrop`, `MappedObject(Array)`, `McuTriggers` ported field-for-field from `mcu_node.py`'s
+`_TRIGGERS_BOOL_BITS`), `ippolit_description` (ament_cmake, a placeholder URDF/xacro + a
+`robot_state_publisher` launch — geometry values are honest placeholders pending A4/F0.2 calibration),
+`ippolit_bringup` (ament_cmake: 7 XML launch stubs, the 4 group systemd units, `deploy.sh`, `config/`
+placeholder), and the 7 ament_python node packages (`drivers/control/safety/perception/localization/
+navigation/teleop`) — currently empty node bodies per A0's scope, wrapped with real logic in A1. Added
+`.github/workflows/ros2_ci.yml` (colcon build+test on ubuntu-24.04 via `ros-tooling/action-ros-ci`).
+
+**Live-validated end-to-end on the Q6A** (the only machine with ROS 2 Jazzy — this dev box has none):
+`rosdep install` (all deps already present), `colcon build` (clean, 10/10 packages), `colcon test`
+(38 tests, 0 errors, 0 failures after two real fixes below), message generation (`ros2 interface show`),
+URDF validity (`xacro` + parse check), and — going beyond A0's own bar — actually **running**
+`core.launch.xml` and confirming `robot_state_publisher` starts and publishes a correct `base_link→laser`
+TF (0, 0, 0.09) matching the xacro joint definition exactly.
+
+**Three real bugs found and fixed, not just scaffolding:**
+1. **`colcon test` silently ran ZERO tests for every ament_python package**, reporting Python `unittest`'s
+   "Ran 0 tests / NO TESTS RAN" instead of any pytest output. Root cause: `colcon test`'s auto-detection
+   of the pytest step extension keys off `setup.py`'s `tests_require` field — but the setuptools version
+   in this Python 3.12 environment has deprecated/silently drops `tests_require` before colcon can read it
+   back (hence the "Unknown distribution option" warning seen on every build), so auto-detection always
+   falls through to the legacy `setuppy_test` step, which finds nothing. **Fix: force the extension
+   explicitly with `--python-testing pytest`** (added to the CI workflow's `colcon-defaults` and to
+   `docs/navigation-architecture.md` §9 as a new gotcha) — this is an ecosystem-version issue, not
+   something fixable by editing package files, so it has to be forced at the `colcon test` call site
+   every time. (Initially "fixed" the cosmetic warning by *removing* `tests_require` entirely — that was
+   wrong, since colcon still needs the field present even though setuptools ignores it; reverted.)
+2. **`ippolit_interfaces/package.xml` failed `xmllint`**: `<member_of_group>` was placed before the
+   `<depend>` tags, violating package_format3's required element ordering. Fixed by moving it to just
+   before `<export>`.
+3. **`core.launch.xml` failed at runtime** (not just parse time) with "Failed to convert" on the
+   `robot_description` param: XML launch's automatic parameter-type inference chokes on the multi-line
+   xacro-expanded URDF string. Fixed with an explicit `type="str"` attribute on the `<param>` tag.
+
+All three are now recorded in `docs/navigation-architecture.md` §9 so they don't get rediscovered.
+Next: A1 (wrap the existing scripts into these packages, unchanged in logic) or F0 (verify real map
+resume / calibrate the camera) — see the doc's suggested interleaved order.
+
+---
+
 ## 2026-07-12 (rev 2) — Architecture plan rewritten to production-grade ROS 2 engineering
 
 `docs/navigation-architecture.md` substantially revised per explicit user direction: architect the whole

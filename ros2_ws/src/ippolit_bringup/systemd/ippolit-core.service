@@ -1,0 +1,17 @@
+[Unit]
+Description=IPPOLIT core: description + drivers + localization + safety + control (restart blast-radius group 1 of 4)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+KillSignal=SIGINT
+TimeoutStopSec=8
+Type=simple
+User=radxa
+EnvironmentFile=-/etc/default/ippolit-robot
+ExecStart=/bin/bash -c "source /opt/ros/jazzy/setup.bash && source ~/ippolit/ros2_ws/install/setup.bash && exec ros2 launch ippolit_bringup core.launch.xml"
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

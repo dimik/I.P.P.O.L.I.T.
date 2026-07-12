@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+<!-- localization.launch.xml — stub, scaffolded in A0. Filled in during A1 (wrap existing nodes) /
+     later feature phases per docs/navigation-architecture.md. Intentionally empty for now:
+     colcon build/test only needs this file to be valid+installable, not functional. -->
+<launch>
+</launch>

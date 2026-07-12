@@ -1,0 +1,55 @@
+<?xml version="1.0"?>
+<!--
+  ippolit.urdf.xacro — placeholder robot description, scaffolded in A0.
+
+  Geometry below uses only values already known from live calibration (docs/navigation-architecture.md
+  §8 appendix): chassis diameter ~0.350m (spec) / BODY_R=0.219m (empirical clearance offset, NOT the same
+  thing — see q6a_creep_test.py's history comment for why they differ and are still unreconciled).
+  laser/camera poses are UNMEASURED placeholders (0,0,0) pending F0.2 (camera bearing/FOV calibration)
+  and the A4 step that's supposed to replace every ad-hoc static-TF publish in the codebase with this
+  file as the single source of geometry truth. Do not trust laser/camera offsets below for anything yet.
+-->
+<robot name="ippolit" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <material name="chassis_grey">
+    <color rgba="0.6 0.6 0.6 1.0"/>
+  </material>
+
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 0.04" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.175" length="0.08"/>
+      </geometry>
+      <material name="chassis_grey"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.04" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.175" length="0.08"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="3.0"/>
+      <origin xyz="0 0 0.04"/>
+      <inertia ixx="0.02" ixy="0" ixz="0" iyy="0.02" iyz="0" izz="0.03"/>
+    </inertial>
+  </link>
+
+  <!-- LDS turret: TODO A4 — measure real x/y/z offset from base_link center; 0.0 height placeholder -->
+  <link name="laser"/>
+  <joint name="laser_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="laser"/>
+    <origin xyz="0 0 0.09" rpy="0 0 0"/>
+  </joint>
+
+  <!-- OV8856 camera: TODO A4/F0.2 — HFOV/yaw calibration feeds this pose; currently a guess -->
+  <link name="camera_link"/>
+  <joint name="camera_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="camera_link"/>
+    <origin xyz="0.15 0 0.05" rpy="0 0 0"/>
+  </joint>
+
+</robot>
