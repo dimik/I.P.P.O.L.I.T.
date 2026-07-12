@@ -44,6 +44,34 @@ the Q6A's `robot-usb`/`robot-wifi` aliases, whose key works).
 
 ---
 
+## 2026-07-12 — SAFETY FIX #2: LiDAR bearing had the WRONG SIGN (left/right swapped), not just offset
+
+Follow-up to the angle_offset_deg fix. After correcting the offset, re-verified with the wall the user
+confirmed was on the robot's TRUE right (as if driving forward) — LiDAR still read it at bearing +90
+("left" in our convention). A pure offset error cannot swap left and right (it only shifts all bearings by
+a constant); only a wrong SIGN can. This meant the original 2026-06-19 "handedness -1" decision (`bearing =
+-ang_deg + offset`), based on a single Valetudo-SLAM heading comparison, was itself wrong — it apparently
+validated the FRONT alignment but not the LEFT/RIGHT sense.
+
+**Independently cross-checked with a second sensor before committing to the fix**, per the user's own
+suggestion: pulled a frame from the already-running combined YOLO+MiDaS camera stream (:8093). The RGB view
+clearly showed the flat wall occupying the center-to-right of frame (a window/chair alcove receding on the
+left) — visually confirming wall-on-the-right independent of the LiDAR entirely.
+
+**Fixed:** flipped the sign in `lds_scan_node.py` (`bearing = +ang_deg + offset`, was `-ang_deg + offset`)
+and re-derived the offset for the new sign convention (`angle_offset_deg=43.0`, was `-43.0`). Re-verified
+BOTH calibration points together after redeploying: wall (true right) now reads cleanly at bearing 270
+(dense, 0.3m), nothing at bearing 90 (left) — matches physical reality and the camera cross-check.
+
+**This means bearing was doubly wrong all session** (wrong offset AND wrong sign) until now — any earlier
+`--side left`/`--side right` edge-follow results should be treated as testing "whichever side ended up
+there," not verified to be the stated physical side. The control-loop math itself (STEER_SIGN, BODY_R,
+convergence behavior) remains valid; only the side-label correctness was in question, and is now fixed.
+
+Files: `scripts/robot/lds_scan_node.py`, `scripts/companion/systemd/lds-scan-node.service`.
+
+---
+
 ## 2026-07-12 — SAFETY FIX: LiDAR front-bearing was miscalibrated by ~43deg (never actually tuned)
 
 User asked "are you sure we have front lidar position calibrated properly?" during confusing corner-test

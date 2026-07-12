@@ -190,7 +190,12 @@ class LdsScanNode(Node):
         for ang_deg, dist_mm, q in d['samples']:
             if dist_mm is None:
                 continue
-            bearing = -math.radians(ang_deg) + self.offset
+            # SIGN FIXED 2026-07-12: was -ang_deg (assumed "LDS runs opposite ROS CCW", handedness -1, from a
+            # single 2026-06-19 Valetudo-SLAM heading comparison). Cross-checked with an independent sensor
+            # (MiDaS+camera) today: a wall confirmed on the robot's TRUE right (by camera view, wall occupies
+            # the right/center of frame) was reading at LiDAR bearing +90 (our "left") even after fixing the
+            # front offset -- a pure offset can't cause a left/right swap, only a wrong sign can. Flipped.
+            bearing = math.radians(ang_deg) + self.offset
             b = int((bearing % (2 * math.pi)) / (2 * math.pi) * BINS) % BINS
             r = dist_mm / 1000.0
             if self.rmin <= r <= self.rmax and r < self.bins[b]:
