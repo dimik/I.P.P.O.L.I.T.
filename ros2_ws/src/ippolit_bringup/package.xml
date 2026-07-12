@@ -19,6 +19,8 @@
   <exec_depend>ippolit_teleop</exec_depend>
   <exec_depend>twist_mux</exec_depend>
   <exec_depend>foxglove_bridge</exec_depend>
+  <exec_depend>diagnostic_aggregator</exec_depend>
+  <exec_depend>rosbag2_transport</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

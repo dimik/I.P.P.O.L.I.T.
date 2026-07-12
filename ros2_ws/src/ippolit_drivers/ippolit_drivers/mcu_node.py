@@ -42,6 +42,11 @@ boots docked). Axis/sign alignment vs base_link is a v1 passthrough — verify i
 if needed.
 
 Run:  source /opt/ros/jazzy/setup.bash && python3 mcu_node.py
+
+Publishes /diagnostics (A5): OK as long as ANY MCU frame (of any type) has been decoded within
+the last few seconds. Status20ms (wheel odom) flows continuously in every mode including idle/
+docked (unlike the IMU stream, which is active-only -- see the IMU notes above), so "no frames at
+all" for more than a couple of seconds means the tap/ring itself is dead, not just idle.
 """
 import json
 import math
@@ -52,6 +57,8 @@ import struct
 import threading
 import time
 
+from diagnostic_msgs.msg import DiagnosticStatus
+from diagnostic_updater import FunctionDiagnosticTask, Updater
 from ippolit_interfaces.msg import McuTriggers
 from nav_msgs.msg import Odometry
 import rclpy
@@ -59,6 +66,8 @@ from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
 from sensor_msgs.msg import Imu
 from std_msgs.msg import Bool, Float32, String, UInt8
+
+MCU_STALE_S = 3.0   # no frames at all within this long -> the tap/ring itself is dead
 
 # Full bit-level Triggers (type 0x00, 7 bytes) decode, ported from
 # github.com/dimik/dreame_mcu_protocol (Z10 Pro RE) and cross-checked against our own captures
@@ -264,6 +273,10 @@ class McuNode(Node):
         self.bias = [0.0, 0.0, 0.0]
         self.bias_set = False
         self.recent = []         # rolling recent gyro samples for the still-detector
+        self.last_frame_t = 0.0
+        self.diag_updater = Updater(self)
+        self.diag_updater.setHardwareID('mcu_node')
+        self.diag_updater.add(FunctionDiagnosticTask('MCU frame health', self._diag_mcu))
         # dedicated reader thread (an rclpy timer gets starved and drops frames) — drains the
         # ring in a tight loop and publishes; rclpy.spin() just keeps the node alive. Same
         # pattern as valetudo_bridge.py. Publishing from this thread is fine for these message
@@ -272,6 +285,15 @@ class McuNode(Node):
         self.get_logger().info(
             'mcu_node up; /imu/data publishes when the robot is ACTIVE '
             '(D10s sends no IMU when docked/idle); gyro bias auto-set when still')
+
+    def _diag_mcu(self, stat):
+        age = time.monotonic() - self.last_frame_t if self.last_frame_t else None
+        if age is not None and age < MCU_STALE_S:
+            stat.summary(DiagnosticStatus.OK, 'MCU frames flowing')
+        else:
+            stat.summary(DiagnosticStatus.ERROR, 'no MCU frames -- tap/ring likely dead')
+        stat.add('last_frame_age_s', f'{age:.1f}' if age is not None else 'never')
+        return stat
 
     def reader_loop(self):
         while not self.open_ring() and rclpy.ok():
@@ -387,6 +409,7 @@ class McuNode(Node):
 
     def dispatch(self, mtype, payload):
         now = self.get_clock().now().to_msg()
+        self.last_frame_t = time.monotonic()
         if mtype == 0x00 and len(payload) > max(self.cliff_idx, self.bump_idx):
             # Triggers — cliff/bump/dock
             craw = payload[self.cliff_idx]

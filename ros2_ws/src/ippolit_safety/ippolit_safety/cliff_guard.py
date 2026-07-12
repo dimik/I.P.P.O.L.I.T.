@@ -8,7 +8,8 @@ Two very different responses, on purpose:
     a zero-Twist hold published on `/cmd_vel_safety` (`twist_mux` priority 100 -- the primary
     stop, works even if `cmd_vel_bridge`'s REST calls are failing) PLUS the original direct REST
     `{"action":"disable"}` backstop (x3, WiFi can drop a PUT) + speak, kept as a last resort in
-    case something downstream of `/cmd_vel_safety` is itself wedged.
+    case something downstream of `/cmd_vel_safety` is itself wedged. Also triggers the A5 rolling
+    incident recorder's snapshot service so a wheel-drop always leaves an MCAP bag behind.
 
   * MiDaS floor-drop ahead = ADVISORY, NOT a freeze. The robot must be able to travel *along* an
     edge at a safe distance, not get blocked in front of it, so this layer only PUBLISHES the
@@ -39,6 +40,8 @@ import threading
 import time
 import urllib.request
 
+from diagnostic_msgs.msg import DiagnosticStatus
+from diagnostic_updater import FunctionDiagnosticTask, Updater
 from geometry_msgs.msg import Twist
 from ippolit_interfaces.msg import FloorDrop
 from rcl_interfaces.msg import FloatingPointRange, IntegerRange, ParameterDescriptor
@@ -46,6 +49,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import (
     qos_profile_sensor_data, QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy)
+from rosbag2_interfaces.srv import Snapshot
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, String
 
@@ -131,6 +135,8 @@ class CliffGuard(Node):
                              durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
         self.pub_ahead = self.create_publisher(Bool, '/cliff/ahead', latched)  # drop ahead
         self.pub_cmd_vel_safety = self.create_publisher(Twist, '/cmd_vel_safety', 10)
+        self.cli_snapshot = self.create_client(
+            Snapshot, '/rosbag_snapshot_recorder/snapshot')
         self.create_subscription(Bool, '/cliff', self.on_cliff, latched)
         self.create_subscription(Bool, '/bumper', self.on_bumper, latched)
         self.create_subscription(FloorDrop, '/vision/floor', self.on_floor, 10)
@@ -144,11 +150,24 @@ class CliffGuard(Node):
         self.lidar_far = False
         self.lidar_at = 0.0
         self.last_warn = 0.0
+        self.diag_updater = Updater(self)
+        self.diag_updater.setHardwareID('cliff_guard')
+        self.diag_updater.add(FunctionDiagnosticTask('wheel-drop e-stop state', self._diag))
         self.pub_ahead.publish(Bool(data=False))
         self.get_logger().info(
             f'cliff_guard up: wheel-drop -> HARD e-stop; MiDaS center-drop '
             f'(>={self.midas_stop}, or >={self.midas_fuse}+LiDAR-open) -> ADVISORY /cliff/ahead '
             f'(never freezes; drive loop avoids forward). @ {ROBOT_ADDR}')
+
+    def _diag(self, stat):
+        if self.wheel_tripped:
+            # WARN, not ERROR: the safety system is doing exactly its job here, not malfunctioning
+            stat.summary(DiagnosticStatus.WARN, 'WHEEL-DROP active -- manual control disabled')
+        else:
+            stat.summary(DiagnosticStatus.OK, 'clear')
+        stat.add('wheel_tripped', str(self.wheel_tripped))
+        stat.add('cliff_ahead_advisory', str(self.ahead))
+        return stat
 
     # --- HARD e-stop: a wheel is already off the ground ---
     def on_cliff(self, m):
@@ -157,9 +176,28 @@ class CliffGuard(Node):
             self.get_logger().error('WHEEL-DROP — hard e-stop (disable manual control)')
             threading.Thread(target=self.estop, daemon=True).start()
             self.pub_speak.publish(String(data='Cliff. Stopping.'))
+            self.trigger_snapshot()
         elif not m.data and self.wheel_tripped:
             self.wheel_tripped = False
             self.get_logger().warn('wheel-drop cleared')
+
+    def trigger_snapshot(self):
+        """A5: dump the rolling incident recorder's RAM ring to MCAP on a real wheel-drop."""
+        if not self.cli_snapshot.service_is_ready():
+            self.get_logger().warn('rosbag snapshot service not ready -- incident not captured')
+            return
+        self.cli_snapshot.call_async(Snapshot.Request()).add_done_callback(self._on_snapshot_done)
+
+    def _on_snapshot_done(self, fut):
+        try:
+            res = fut.result()
+        except Exception as e:
+            self.get_logger().warn(f'snapshot call failed: {e}')
+            return
+        if res.success:
+            self.get_logger().info('incident snapshot captured')
+        else:
+            self.get_logger().warn('snapshot service reported failure')
 
     def on_bumper(self, m):
         # audible confirmation the bumper fired (front collision). The rising edge = exactly one

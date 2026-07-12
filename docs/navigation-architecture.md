@@ -249,6 +249,22 @@ Each phase = PR-sized, behavior-preserving unless stated, ends with: verify → 
   the camera frame from TF.
 - **A5 — tests + observability.** The §2.5 test set green in CI; diagnostics + aggregator live; rolling
   MCAP recorder unit + snapshot service; cliff e-stop wired to auto-snapshot.
+  🔶 IN PROGRESS (2026-07-13). **Done + live-verified:** `diagnostic_updater` tasks on 4 nodes
+  (`lds_scan_node` ring/tap connection, `mcu_node` frame staleness, `valetudo_bridge` dual-SSE
+  reachability, `cliff_guard` wheel-drop state — WARN not ERROR while tripped, since that's the
+  safety system doing its job); `diagnostic_aggregator` (`analyzers` node, `Drivers`+`Safety`
+  buckets) confirmed live as `Aggregation: OK` with both buckets healthy; rolling MCAP snapshot
+  recorder (`ros2 bag record --snapshot-mode`, RAM ring, `rosbag2_interfaces/srv/Snapshot`) wired
+  into `viz.launch.xml`, with `cliff_guard` auto-triggering a snapshot on wheel-drop — verified via
+  a manual service call and via `cliff_guard`'s own trigger path. Found and fixed the safety-relevant
+  G23 regression along the way (see above and the gotchas list). 47/47 `colcon test` green.
+  **Not done:** `audio_bridge` has no `diagnostic_updater` task yet; no additional pytest unit tests
+  for `q6a_objmap`'s merge/dedup logic or `q6a_map_persist`'s `min_resume_bytes` guard. **Not
+  user-verified** (needs the user physically present): pulling the LiDAR ring cable to confirm its
+  diagnostic flips to ERROR within 5 s, and opening a triggered snapshot bag in an actual Foxglove
+  client (no Foxglove client available in this environment — `foxglove-layout.json` itself is also
+  still unverified per F2). The two ✅ acceptance lines below are therefore the phase's *target*
+  criteria, not yet independently confirmed by the user.
   ✅ Foxglove diagnostics panel shows all-OK tree; pulling the LiDAR ring cable flips its diagnostic to
   ERROR within 5 s; a triggered snapshot bag opens in Foxglove.
 
@@ -271,12 +287,18 @@ A2 (param-driven nav tuning) and ideally A3/A4.
   Twist→(velocity,angle) mapping+clamps; both nodes start clean under `ippolit-core` and confirmed
   to stay completely inert — zero REST calls — with nothing yet publishing `/cmd_vel_teleop`/
   `/cmd_vel_nav`). **Deliberately NOT done** (needs the user physically present — deferred
-  alongside F0 this session, see G22): the actual `linear_scale`/`angular_to_deg_scale` calibration
+  alongside F0 this session): the actual `linear_scale`/`angular_to_deg_scale` calibration
   against `/odom_laser`, and this phase's own acceptance criteria below (all require live driving).
   `q6a_drive`'s reimplementation as a `/cmd_vel_teleop` publisher is also deferred (lower priority;
   only meaningful once the mapping is calibrated).
+  ⚠️ **Correction (found in A5, see G23):** `cliff_guard`'s `/cmd_vel_safety` publish, listed above as
+  built, was actually a **silent no-op from the moment it was built** — `twist_mux`'s default
+  `use_stamped: true` type-mismatched it against `cliff_guard`'s plain `Twist` messages, so this
+  phase's own "lifted-wheel test zeroes /cmd_vel" acceptance line below was never actually true
+  during F1; it was only the REST-disable backstop (not the Twist path) doing the job. Fixed and
+  re-verified in A5 — see G23 and the CHANGELOG's A5 entry for the full incident.
   ✅ Teleop Twist drives; killing publisher stops <0.5 s; lifted-wheel test zeroes /cmd_vel regardless of
-  other publishers.
+  other publishers (re-verified true after the G23 fix, not just at original F1 write-up time).
 - **F2 — visualization**: foxglove_bridge in `ippolit-viz` group; repo-committed layout
   (`docs/foxglove-layout.json`): map+masks, 3-D (markers/pose/scan/TF), FloorDrop plots, camera MJPEG
   panel (robot :8090), teleop→`/cmd_vel_teleop`, diagnostics.
@@ -482,6 +504,28 @@ conclusively useless for early warning (co-fire with wheel-drop).
   can crash a vendor node in a way that's non-obvious from the YAML alone — always start a newly
   wired third-party node once and grep its journal, don't assume the config "looks right" is
   proof it runs.
+- **G23** (found in A5, testing the rosbag snapshot recorder) — **SAFETY-RELEVANT**: this version of
+  `twist_mux` defaults its `use_stamped` parameter to `true` when it isn't explicitly declared, so it
+  subscribes/republishes `geometry_msgs/TwistStamped` everywhere — silently type-mismatching
+  `cliff_guard`'s and `cmd_vel_bridge`'s plain `geometry_msgs/Twist` publishers/subscribers. A ROS 2
+  type mismatch on a topic produces **no error, no crash, no log line** — the two ends simply never
+  see each other's messages. Net effect: **`cliff_guard`'s `/cmd_vel_safety` zero-Twist wheel-drop
+  stop had been completely non-functional since F1 was built**, despite F1's CHANGELOG entry claiming
+  it worked (that claim was based on the node starting cleanly and REST-disable still acting as a
+  backstop, not on the Twist path itself being verified end-to-end). Found only by inspecting
+  `ros2 topic type /cmd_vel_safety` while wiring up A5's bag recorder and noticing **two** message
+  types registered on one topic name — an INFO log line from an earlier F1 test session
+  (`"use_stamped" is not declared as parameter, defaulting to "true"`) had been logged and seen at
+  the time but its significance wasn't recognized until this later discrepancy forced a closer look.
+  Fix: declare `use_stamped: false` explicitly in `twist_mux.yaml`. Verified fix end-to-end: rebuilt,
+  redeployed, restarted `ippolit-core`, confirmed `ros2 topic type` shows a single
+  `geometry_msgs/msg/Twist` on `/cmd_vel`, `/cmd_vel_safety`, `/cmd_vel_teleop`; published a test
+  zero-Twist to `/cmd_vel_teleop` and confirmed it reached `/cmd_vel` via `twist_mux` and was received
+  by `cmd_vel_bridge`. Lesson (extends G21/G22's family): **a vendor node's parameter defaults can
+  silently change the wire *type*, not just a value** — after wiring any third-party node that
+  bridges/republishes a message, always cross-check `ros2 topic type` on both sides of the bridge, not
+  just that the node started and topics exist. See the CHANGELOG's A5 entry ("Correction first") for
+  the full incident writeup.
 
 **Deferred-physical-test pattern (established during F0/F1, 2026-07-13):** when a phase's next
 step requires physically driving the robot or aiming its camera and the user isn't set up to

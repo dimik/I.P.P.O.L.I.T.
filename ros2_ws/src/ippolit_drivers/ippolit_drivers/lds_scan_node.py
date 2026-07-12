@@ -14,13 +14,21 @@ the ROS CCW convention (handedness -1), and LDS angle 0 ~ robot forward. So
 ANGLE_OFFSET_DEG is a parameter — eyeball the scan against walls in RViz once and tune (~0-5deg).
 
 Run:  source /opt/ros/jazzy/setup.bash && python3 lds_scan_node.py
+
+Publishes /diagnostics (A5) reporting the ring/tap CONNECTION state (OK once mapped/connected,
+ERROR if the tap/ring_forward link is down -- e.g. "pulling the ring cable"). Deliberately does
+NOT gate on scan rate/frequency: 0 Hz while the turret is parked (idle/docked) is normal, not a
+fault, so a naive FrequencyStatus check would false-positive constantly.
 """
 import math
 import mmap
 import os
 import socket
 import struct
+import time
 
+from diagnostic_msgs.msg import DiagnosticStatus
+from diagnostic_updater import FunctionDiagnosticTask, Updater
 from ippolit_drivers import lds_decode
 import rclpy
 from rclpy.node import Node
@@ -69,8 +77,23 @@ class LdsScanNode(Node):
         self.have = False
         self.empty = 0
         self.cur_period = FAST_PERIOD
+        self.last_scan_t = 0.0
         self.timer = self.create_timer(FAST_PERIOD, self.poll)  # adaptive: 50Hz active / 2Hz idle
+        self.diag_updater = Updater(self)
+        self.diag_updater.setHardwareID('lds_scan_node')
+        self.diag_updater.add(FunctionDiagnosticTask('lds ring/tap connection', self._diag_ring))
         self.get_logger().info('lds_scan_node up; waiting for ring data (turret must be spinning)')
+
+    def _diag_ring(self, stat):
+        connected = (self.sock is not None) if self.src is not None else (self.mm is not None)
+        if connected:
+            stat.summary(DiagnosticStatus.OK, 'ring/tap connected')
+        else:
+            stat.summary(DiagnosticStatus.ERROR, 'ring/tap NOT connected -- no /scan possible')
+        stat.add('connected', str(connected))
+        age = f'{time.monotonic() - self.last_scan_t:.1f}' if self.last_scan_t else 'never'
+        stat.add('last_scan_age_s', age)
+        return stat
 
     def _set_period(self, p):
         if p != self.cur_period:
@@ -219,6 +242,7 @@ class LdsScanNode(Node):
         msg.range_max = float(self.rmax)
         msg.ranges = [float(r) for r in self.bins]
         self.pub.publish(msg)
+        self.last_scan_t = time.monotonic()
 
 
 def main():

@@ -7,6 +7,61 @@ current active roadmap)**.
 
 ---
 
+## 2026-07-13 — Phase A5: diagnostics + aggregator + rolling MCAP recorder; CORRECTION to F1's claim (G23)
+
+**Correction first:** F1's changelog entry claimed cliff_guard's `/cmd_vel_safety` zero-Twist hold
+was a working second stop layer alongside the REST-disable backstop. **It was not.** While
+building this phase's rosbag recorder and inspecting `ros2 topic type` output, found that
+`ros-jazzy-twist-mux` (this version) defaults `use_stamped` to `true` when the parameter isn't
+declared — meaning `twist_mux` was silently expecting/publishing `geometry_msgs/TwistStamped`
+everywhere, while `cliff_guard` and `cmd_vel_bridge` both use plain `geometry_msgs/Twist`. ROS
+2/DDS simply does not match publishers and subscribers of different types on the same topic name
+— no error, no crash, just zero data flow. So `/cmd_vel_safety` and `cmd_vel_bridge`'s `/cmd_vel`
+subscription have been dead since F1 was written. Recorded as **G23**. Fixed by explicitly setting
+`use_stamped: false` in `twist_mux.yaml`. Verified live this time: `ros2 topic type` shows a
+single `geometry_msgs/msg/Twist` on every `/cmd_vel*` topic, and a zero-Twist published to
+`/cmd_vel_teleop` is confirmed reaching `/cmd_vel` through `twist_mux` and being received by
+`cmd_vel_bridge` (which correctly stayed disabled, zero REST calls, since the value was zero).
+**Lesson: an INFO-level startup log line ("defaulting to X") is worth reading, not skimming past
+— this one was visible during F1's own verification and wasn't caught until a downstream tool
+(the bag recorder) surfaced the consequence.**
+
+With that fixed, built out the rest of A5 (`docs/navigation-architecture.md` §2.7):
+- **`diagnostic_updater`** in the four nodes it matters most for right now: `lds_scan_node`
+  (reports the shm ring/tap CONNECTION state, deliberately not scan rate/frequency — 0 Hz while
+  the turret is parked is normal, not a fault, so a naive `FrequencyStatus` would false-positive
+  constantly), `mcu_node` (ANY MCU frame within the last few seconds, since Status20ms flows
+  continuously even when idle/docked, unlike the IMU stream), `valetudo_bridge` (both SSE streams
+  connected — REST reachability, not event frequency, for the same idle-robot reason), and
+  `cliff_guard` (the wheel-drop e-stop state itself — WARN, not ERROR, while tripped, since the
+  safety system is doing exactly its job, not malfunctioning).
+- **`diagnostic_aggregator`** (`ippolit_bringup/config/diagnostic_aggregator.yaml`) bucketing
+  these into `Drivers`/`Safety` groups, published on `/diagnostics_agg`.
+  `audio_bridge`'s diagnostic is not yet built (remaining work, noted below).
+- **Rolling incident recorder**: `ros2 bag record --snapshot-mode` (rosbag2's own built-in
+  RAM-ring snapshot mode -- no separate package needed) recording `/scan /pose /cmd_vel*
+  /cliff* /wheel_floating /vision/floor /diagnostics`, wired via `<executable>` in
+  `viz.launch.xml` (`ros2 bag record` is a CLI wrapper, not a `ros2 run`-able node). Deliberately
+  no fixed `-o` path -- rosbag2 refuses to write into an existing bag directory, so a second
+  restart with a fixed path would fail; left unset so it defaults to a fresh timestamped folder
+  in `cwd` (`/home/radxa/ros/bags`) every run. `cliff_guard` now calls
+  `/rosbag_snapshot_recorder/snapshot` automatically on a real wheel-drop trip, in addition to
+  its two stop layers.
+
+**Verified live:** all 47 tests pass; both affected systemd groups restarted; `/diagnostics_agg`
+shows `Aggregation: OK` with `Drivers`/`Safety` both `OK` and the right per-node detail underneath;
+manually called the production snapshot service and confirmed a real ~279KB MCAP bag was written
+and playable-format (two-file split, matching mcap's own segment convention). Cannot verify the
+doc's exact physical acceptance tests myself (pulling the LiDAR ring cable; opening a bag in the
+Foxglove GUI) -- the underlying mechanisms are proven live, but those two specific checks need the
+user.
+
+**Explicitly NOT done, flagged not hidden:** `audio_bridge`'s diagnostic_updater (per §2.7's "every
+driver"); additional pytest unit tests for `q6a_objmap`'s merge/dedup and
+`q6a_map_persist`'s `min_resume_bytes` guard logic (only F1's Twist-mapping tests exist so far).
+
+---
+
 ## 2026-07-13 — Phase A3 COMPLETE: typed interfaces retire JSON-on-String topics
 
 Ported all four JSON-on-String topics per the architecture doc's §2.2 table to typed messages:

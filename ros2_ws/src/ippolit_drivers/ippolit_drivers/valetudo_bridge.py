@@ -22,6 +22,10 @@ Publishes:
 Coords: Valetudo is mm, +y DOWN; ROS (REP-103) is m, +y UP -> x=x_mm/1000, y=-y_mm/1000, yaw=-deg.
 
 Run:  source /opt/ros/jazzy/setup.bash && python3 valetudo_bridge.py [--host http://127.0.0.1]
+
+Publishes /diagnostics (A5): OK while BOTH SSE streams (map + attributes) are connected -- REST
+reachability is what actually matters here, not event frequency (a docked/idle robot can go a
+long time between real map/attribute changes without anything being wrong).
 """
 import argparse
 from array import array
@@ -32,6 +36,8 @@ import threading
 import time
 import urllib.request
 
+from diagnostic_msgs.msg import DiagnosticStatus
+from diagnostic_updater import FunctionDiagnosticTask, Updater
 from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import OccupancyGrid, Odometry
 import rclpy
@@ -57,6 +63,11 @@ class ValetudoBridge(Node):
         self.pose = None   # (x, y, qz, qw), updated by SSE/seed, republished by the heartbeat
         # cached battery %, updated by attrs SSE/seed, republished by the heartbeat
         self.batt_level = None
+        self.map_sse_connected = False
+        self.attrs_sse_connected = False
+        self.diag_updater = Updater(self)
+        self.diag_updater.setHardwareID('valetudo_bridge')
+        self.diag_updater.add(FunctionDiagnosticTask('Valetudo REST/SSE reachability', self._diag))
         # heartbeat: republish cached /odom + TF at 2 Hz so they stay fresh while idle (no HTTP —
         # the data comes from the SSE/seed; this just keeps TF from going stale for nav consumers)
         self.create_timer(0.5, self.pub_pose)
@@ -76,12 +87,13 @@ class ValetudoBridge(Node):
         # then push-driven: one SSE stream for the map, one for state attributes (no polling)
         threading.Thread(
             target=self.sse_loop,
-            args=('/api/v2/robot/state/map/sse', 'MapUpdated', self.handle_map),
+            args=('/api/v2/robot/state/map/sse', 'MapUpdated', self.handle_map,
+                  'map_sse_connected'),
             daemon=True).start()
         threading.Thread(
             target=self.sse_loop,
             args=('/api/v2/robot/state/attributes/sse', 'StateAttributesUpdated',
-                  self.handle_attrs),
+                  self.handle_attrs, 'attrs_sse_connected'),
             daemon=True).start()
         self.get_logger().info(f'valetudo_bridge up (REST seed + SSE) on {self.host}')
 
@@ -90,11 +102,21 @@ class ValetudoBridge(Node):
         with urllib.request.urlopen(self.host + path, timeout=4) as r:
             return json.load(r)
 
-    def sse_loop(self, path, want_event, handler):
+    def _diag(self, stat):
+        if self.map_sse_connected and self.attrs_sse_connected:
+            stat.summary(DiagnosticStatus.OK, 'both SSE streams connected')
+        else:
+            stat.summary(DiagnosticStatus.ERROR, 'a Valetudo SSE stream is down -- unreachable?')
+        stat.add('map_sse_connected', str(self.map_sse_connected))
+        stat.add('attrs_sse_connected', str(self.attrs_sse_connected))
+        return stat
+
+    def sse_loop(self, path, want_event, handler, connected_attr):
         """Long-lived SSE: accumulate event/data lines, dispatch on blank, reconnect on drop."""
         while rclpy.ok():
             try:
                 with urllib.request.urlopen(self.host + path, timeout=None) as resp:
+                    setattr(self, connected_attr, True)
                     event, data = None, []
                     for raw in resp:
                         if not rclpy.ok():
@@ -112,6 +134,7 @@ class ValetudoBridge(Node):
                                     self.get_logger().warn(f'{path} parse: {e}')
                             event, data = None, []
             except Exception as e:
+                setattr(self, connected_attr, False)
                 if rclpy.ok():
                     self.get_logger().warn(f'{path} dropped ({e}); reconnecting')
                     time.sleep(2.0)

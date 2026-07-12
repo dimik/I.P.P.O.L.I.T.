@@ -1,5 +1,11 @@
 twist_mux:
   ros__parameters:
+    # G23: twist_mux (this ros-jazzy-twist-mux version) defaults use_stamped to true if not
+    # declared, meaning it expects/publishes geometry_msgs/TwistStamped everywhere - silently
+    # type-mismatching cliff_guard's and cmd_vel_bridge's plain geometry_msgs/Twist (zero data
+    # flow, no error, no crash - only found by inspecting `ros2 topic type` and noticing two
+    # types on one topic name). Force it off to match this project's plain-Twist design.
+    use_stamped: false
     topics:
       safety:
         topic: /cmd_vel_safety

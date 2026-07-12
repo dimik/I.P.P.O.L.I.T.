@@ -1,10 +1,26 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- viz.launch.xml — F2: foxglove_bridge websocket (ippolit-viz systemd group, restart
-     blast-radius group 4 of 4 - a viz-side crash/reconnect never touches the safety/actuation
-     or perception chains). D5: ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST keeps DDS stable, but
-     that's independent of this node's own websocket - address=0.0.0.0 (the package default,
-     left unset here) still lets an off-board Foxglove client connect over the LAN; only DDS
-     discovery itself stays host-local. Default port 8765 (also the package default). -->
+<!-- viz.launch.xml — F2 (foxglove_bridge) + A5 (diagnostics aggregation + rolling incident
+     recorder) (ippolit-viz systemd group, restart blast-radius group 4 of 4 - a viz-side
+     crash/reconnect never touches the safety/actuation or perception chains). D5:
+     ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST keeps DDS stable, but that's independent of this
+     node's own websocket - address=0.0.0.0 (the package default, left unset here) still lets an
+     off-board Foxglove client connect over the LAN; only DDS discovery itself stays host-local.
+     Default port 8765 (also the package default). -->
 <launch>
   <node pkg="foxglove_bridge" exec="foxglove_bridge" name="foxglove_bridge"/>
+  <node pkg="diagnostic_aggregator" exec="aggregator_node" name="analyzers">
+    <param from="$(find-pkg-share ippolit_bringup)/config/diagnostic_aggregator.yaml"/>
+  </node>
+  <!-- Rolling incident recorder (A5): RAM-ring snapshot mode, dumped to MCAP only when
+       /rosbag_snapshot_recorder/snapshot is called (cliff_guard calls it automatically on a
+       wheel-drop trip; can also be called manually). ros2 bag record is a CLI wrapper, not a
+       plain ros2 run node, so this uses <executable> rather than <node>. No -o given
+       deliberately: it defaults to a fresh timestamped folder per run, in cwd below - a fixed
+       -o path would fail to restart a second time (rosbag2 refuses to write into an existing
+       bag directory). -->
+  <executable cmd="ros2 bag record --snapshot-mode -s mcap
+                    --max-cache-size 50000000
+                    -e &quot;^(/scan|/pose|/cmd_vel.*|/cliff.*|/wheel_floating|/vision/floor|/diagnostics)$&quot;
+                    --node-name rosbag_snapshot_recorder"
+              cwd="/home/radxa/ros/bags" name="rosbag_snapshot_recorder" output="both"/>
 </launch>
