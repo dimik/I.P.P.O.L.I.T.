@@ -7,6 +7,61 @@ current active roadmap)**.
 
 ---
 
+## 2026-07-12 — Phase A1 finishes the four foundational drivers: mcu_node, lds_scan_node, valetudo_bridge migrated + cut over; G20 (real lint debt, not another false alarm)
+
+Completed A1's `ippolit_drivers` package: `mcu_node.py`, `lds_scan_node.py` (+ its `lds_decode.py`
+helper), and `valetudo_bridge.py` all moved in unchanged in logic, wired into `drivers.launch.xml`
+(the `ippolit-core` systemd group), and cut over in production. `valetudo_bridge` is the first node
+in this migration to use plain `argparse` (`--host`) instead of declared ROS parameters, which meant
+passing it via the `<node>` element's `args=` attribute rather than a `<param>` child — a new launch
+pattern, not previously needed by the other three drivers.
+
+**mcu_node + lds_scan_node** followed the now-familiar old+new overlap verification pattern (both
+briefly ran alongside their pre-migration standalone-script equivalents under distinct test node
+names, confirmed healthy, then the old systemd units were stopped+disabled and a single clean
+instance confirmed). The safety-critical `angle_offset_deg=43.0` LiDAR bearing calibration
+(2026-07-12's sign-and-offset fix, see `lds_scan_node.py`'s own header) was carried over exactly and
+is called out with an explicit "do not lose this" comment in `drivers.launch.xml`.
+
+**valetudo_bridge** cutover: launched standalone first with remapped topics
+(`/map_test2` etc.) against the real robot, confirmed `/map` (176x63 grid, correct resolution/origin),
+`/battery` (correct percentage), and `map->base_link` TF all matched the pre-migration bridge's
+output, then restarted `ippolit-core.service` (which now includes `valetudo_bridge` in
+`drivers.launch.xml` for the first time), verified the brief old+new node-name overlap, and
+stopped+disabled the legacy standalone `valetudo-bridge.service`. Single `/valetudo_bridge` instance
+confirmed afterward.
+
+**G20 — `colcon test --python-testing pytest` surfaced 148+14 REAL flake8/pep257 violations, not
+another XML-comment false alarm.** Having hit G16 (literal `--` in XML comments) three times, the
+plan was to make `colcon test` (which includes `ament_xmllint`) part of every deploy from here on.
+First run after adding `valetudo_bridge` reported "4 failures" across `ippolit_drivers` and
+`ippolit_perception` — this time genuine accumulated lint debt in every driver file copied so far
+(`audio_bridge.py`, `lds_decode.py`, `lds_scan_node.py`, `mcu_node.py`, the new `valetudo_bridge.py`,
+and `q6a_announce.py`), never previously checked because `colcon test` hadn't been run against the
+full set before. Categories hit: `ament_flake8`'s ROS-standard plugin set (line length 99,
+`flake8-import-order` — all non-stdlib imports must sort as ONE alphabetical block, not
+grouped-by-origin; `flake8-quotes` single-quote preference; `flake8-comprehensions`; ambiguous
+single-letter names; multi-statement one-liners), and `ament_pep257`'s **D213** convention (a
+multi-line docstring's summary must start on the *second* line, i.e. `"""` alone on its own line —
+the opposite of this project's established "summary immediately after `"""`" style used everywhere
+else in the repo, e.g. `docs/*.md` prose). Fixed by reflowing every affected file (no logic changes)
+and moving all 7 flagged module/function/method docstrings to the D213 form. Hit the same
+comment-continuation-indentation trap as G16bis twice more while reflowing wrapped comments (a
+comment-only continuation line must match the indentation of the **following** code line, not just
+look visually aligned) — caught both via a local heuristic script before redeploying. All 38 tests
+across all 10 packages pass clean now (`colcon test-result --all` → 0 failures). **Going forward, ROS
+Python source in this repo should be written flake8/pep257-compliant from the start** (99-char lines,
+single quotes, D213 docstrings, one statement per line) rather than copied verbatim from the
+pre-ROS `scripts/robot|companion/` originals and fixed after the fact.
+
+`ippolit_drivers` (all 4 foundational nodes) and the perception package are now both migrated and
+production-cut-over. Next: `ippolit_safety`/`cliff_guard.py` (the wheel-drop e-stop + MiDaS advisory
+layer — safety-critical), then `ippolit_localization` (`q6a_laser_odom.py`, `q6a_map_persist.py`) and
+the rest of `ippolit_perception` (`q6a_vision.py`, `q6a_objmap.py`), per
+`docs/navigation-architecture.md`'s phase order.
+
+---
+
 ## 2026-07-12 — A1 continues: q6a_announce migrated, real-vs-synthetic testing gotcha (G19)
 
 Second node migration: `q6a_announce.py` moved into `ippolit_perception` (better fit than the earlier

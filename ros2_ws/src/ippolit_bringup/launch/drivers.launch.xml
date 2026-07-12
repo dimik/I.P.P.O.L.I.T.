@@ -11,4 +11,22 @@
     <param name="volume" value="90"/>
     <param name="default_voice" value="amy"/>
   </node>
+  <node pkg="ippolit_drivers" exec="mcu_node" name="mcu_node">
+    <!-- source=192.168.1.213:9902 matches the ACTUAL deployed value (ROBOT_ADDR from
+         /etc/default/ippolit-robot overrode the old unit's 192.168.10.1 USB-link fallback) -->
+    <param name="source" value="192.168.1.213:9902"/>
+  </node>
+  <node pkg="ippolit_drivers" exec="lds_scan_node" name="lds_scan_node">
+    <!-- source=192.168.1.213:9901 same ROBOT_ADDR substitution as mcu_node above.
+         angle_offset_deg=43.0 is the SAFETY-CRITICAL bearing calibration from 2026-07-12 (offset
+         value + sign both fixed live that day, see lds_scan_node.py's own header) must be
+         preserved exactly; do not lose this value in any future edit of this file. -->
+    <param name="source" value="192.168.1.213:9901"/>
+    <param name="angle_offset_deg" value="43.0"/>
+  </node>
+  <node pkg="ippolit_drivers" exec="valetudo_bridge" name="valetudo_bridge" args="--host http://192.168.1.213">
+    <!-- valetudo_bridge.py uses plain argparse (the "host" flag), not a ROS declared parameter,
+         so it is passed via the args attribute rather than a param element. ROBOT_ADDR
+         substitution matches all the other drivers above. -->
+  </node>
 </launch>

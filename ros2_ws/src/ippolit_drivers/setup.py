@@ -20,6 +20,9 @@ setup(
     entry_points={
         'console_scripts': [
             'audio_bridge = ippolit_drivers.audio_bridge:main',
+            'mcu_node = ippolit_drivers.mcu_node:main',
+            'lds_scan_node = ippolit_drivers.lds_scan_node:main',
+            'valetudo_bridge = ippolit_drivers.valetudo_bridge:main',
         ],
     },
 )

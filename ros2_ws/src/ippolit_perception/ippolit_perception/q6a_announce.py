@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
-"""q6a_announce.py — speak recognized objects (companion).
+"""
+q6a_announce.py — speak recognized objects (companion).
 
-Watches YOLO detections and has the robot say what it sees ("I see a chair") through its own Piper
-voice. Subscribes /vision/detections (from q6a-vision) and publishes /robot/speak (std_msgs/String),
-which audio-bridge pipes to the robot's speak.py over the USB/WiFi link.
+Watches YOLO detections and has the robot say what it sees ("I see a chair") through its own
+Piper voice. Subscribes /vision/detections (from q6a-vision) and publishes /robot/speak
+(std_msgs/String), which audio-bridge pipes to the robot's speak.py over the USB/WiFi link.
 
 Debounced so it narrates rather than spams:
   - MIN_CONF   : only speak confident detections
-  - MIN_HITS   : a label must persist across a few frames first (kills single-frame false positives)
+  - MIN_HITS   : a label must persist across a few frames first (kills single-frame false
+                 positives)
   - COOLDOWN   : don't repeat the same label within this many seconds
-  - MIN_GAP    : global spacing between any two utterances (Piper + the serialized bridge are ~1-2 s/utt)
+  - MIN_GAP    : global spacing between any two utterances (Piper + the serialized bridge are
+                 ~1-2 s/utt)
 
-Run: source /opt/ros/jazzy/setup.bash && ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST python3 q6a_announce.py
+Run: source /opt/ros/jazzy/setup.bash && ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST \
+    python3 q6a_announce.py
 """
 import json
 import os
@@ -22,24 +26,31 @@ from rclpy.node import Node
 from std_msgs.msg import String
 
 MIN_CONF = float(os.environ.get('Q6A_ANNOUNCE_MIN_CONF', '0.6'))   # real objects >=0.62
-MIN_HITS = int(os.environ.get('Q6A_ANNOUNCE_MIN_HITS', '5'))       # frames a label must persist before speaking
-# Class allowlist: the model hallucinates implausible classes on textured floor ("cat", "laptop") that peak
-# even >0.6, so a confidence gate can't fully kill them. This robot maps a room, so only speak/keep plausible
-# indoor furniture/appliances/people; everything else is ignored regardless of confidence. Tune via env.
-ALLOW = set(s.strip().lower() for s in os.environ.get('Q6A_ANNOUNCE_ALLOW',
-    'person,chair,couch,bed,dining table,tv,refrigerator,oven,microwave,sink,toilet,'
-    'potted plant,book,clock,vase,bench,suitcase').split(',') if s.strip())
-COOLDOWN = float(os.environ.get('Q6A_ANNOUNCE_COOLDOWN', '25'))    # per-label repeat suppression (s)
-MIN_GAP = float(os.environ.get('Q6A_ANNOUNCE_MIN_GAP', '3.0'))     # global spacing between utterances (s)
+MIN_HITS = int(os.environ.get('Q6A_ANNOUNCE_MIN_HITS', '5'))       # frames before speaking
+# Class allowlist: the model hallucinates implausible classes on textured floor ("cat", "laptop")
+# that peak even >0.6, so a confidence gate can't fully kill them. This robot maps a room, so
+# only speak/keep plausible indoor furniture/appliances/people; everything else is ignored
+# regardless of confidence. Tune via env.
+ALLOW = {
+    s.strip().lower() for s in os.environ.get(
+        'Q6A_ANNOUNCE_ALLOW',
+        'person,chair,couch,bed,dining table,tv,refrigerator,oven,microwave,sink,toilet,'
+        'potted plant,book,clock,vase,bench,suitcase').split(',')
+    if s.strip()
+}
+COOLDOWN = float(os.environ.get('Q6A_ANNOUNCE_COOLDOWN', '25'))    # per-label repeat suppression
+MIN_GAP = float(os.environ.get('Q6A_ANNOUNCE_MIN_GAP', '3.0'))     # global spacing (s)
 PHRASE = os.environ.get('Q6A_ANNOUNCE_PHRASE', 'I see a {label}')  # {label} substituted
-# say "an" before vowel-initial labels for the default phrase; harmless if the phrase is customized
+# say "an" before vowel-initial labels for the default phrase; harmless if the phrase is
+# customized
 _VOWEL = ('a', 'e', 'i', 'o', 'u')
 
 
 class Announcer(Node):
     def __init__(self):
         super().__init__('q6a_announce')
-        self.hits = {}            # label -> persistence counter (grows when seen, decays when not)
+        # label -> persistence counter (grows when seen, decays when not)
+        self.hits = {}
         self.last_said = {}       # label -> monotonic time last announced
         self.last_utter = 0.0     # monotonic time of the last utterance (any label)
         self.pub = self.create_publisher(String, '/robot/speak', 10)
@@ -69,7 +80,7 @@ class Announcer(Node):
                  if h >= MIN_HITS and (now - self.last_said.get(lab, -1e9)) >= COOLDOWN]
         if not ready:
             return
-        lab = max(ready, key=lambda l: self.hits[l])
+        lab = max(ready, key=lambda candidate: self.hits[candidate])
         self.speak(lab)
         self.last_said[lab] = now
         self.last_utter = now

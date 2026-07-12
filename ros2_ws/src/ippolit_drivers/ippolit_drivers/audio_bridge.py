@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""audio_bridge.py (companion) — ROS /robot/speak -> robot TTS over the USB link.
+"""
+audio_bridge.py (companion) — ROS /robot/speak -> robot TTS over the USB link.
 
-Subscribes /robot/speak (std_msgs/String) on the Q6A and pipes each utterance to the robot's ROS-free
-speak.py (piper/espeak + ffmpeg -> localhost mediad) over ssh. Relocated off the robot chroot ROS
-(2026-07-08): the ROS subscription lives on the companion; synth stays on the robot (reuses its
-/opt/piper + /opt/ffmpeg + mediad, which binds 127.0.0.1 only, so it can't be hit from the Q6A directly).
+Subscribes /robot/speak (std_msgs/String) on the Q6A and pipes each utterance to the robot's
+ROS-free speak.py (piper/espeak + ffmpeg -> localhost mediad) over ssh. Relocated off the robot
+chroot ROS (2026-07-08): the ROS subscription lives on the companion; synth stays on the robot
+(reuses its /opt/piper + /opt/ffmpeg + mediad, which binds 127.0.0.1 only, so it can't be hit
+from the Q6A directly).
 
 Run: source /opt/ros/jazzy/setup.bash && python3 audio_bridge.py --ros-args -p robot_ssh:=robot-usb
 """
@@ -12,8 +14,8 @@ import subprocess
 import threading
 
 import rclpy
-from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
+from rclpy.node import Node
 from std_msgs.msg import String
 
 
@@ -28,7 +30,8 @@ class AudioBridge(Node):
         self.dv = self.get_parameter('default_voice').value
         self._lock = threading.Lock()             # serialize utterances (one speak.py at a time)
         self.create_subscription(String, '/robot/speak', self.on_speak, 10)
-        self.get_logger().info(f'audio_bridge (companion) up; /robot/speak -> {self.robot}:/opt/speak.py')
+        self.get_logger().info(
+            f'audio_bridge (companion) up; /robot/speak -> {self.robot}:/opt/speak.py')
 
     def on_speak(self, m):
         text = m.data.strip()
@@ -46,7 +49,8 @@ class AudioBridge(Node):
                     input=text.encode('utf-8'), timeout=75,
                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
                 if r.returncode != 0:
-                    self.get_logger().warn(f'speak rc={r.returncode}: {r.stderr.decode(errors="replace")[:140]}')
+                    err = r.stderr.decode(errors='replace')[:140]
+                    self.get_logger().warn(f'speak rc={r.returncode}: {err}')
                 else:
                     self.get_logger().info(f'spoke: {text[:60]!r}')
             except Exception as e:
