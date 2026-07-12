@@ -17,6 +17,7 @@
   <exec_depend>ippolit_perception</exec_depend>
   <exec_depend>ippolit_navigation</exec_depend>
   <exec_depend>ippolit_teleop</exec_depend>
+  <exec_depend>twist_mux</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

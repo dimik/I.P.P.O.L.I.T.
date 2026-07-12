@@ -1,0 +1,12 @@
+cmd_vel_bridge:
+  ros__parameters:
+    # SAFETY: validated envelope, see cmd_vel_bridge.py's docstring / q6a_creep_test.py point 1.
+    max_safe_vel: 0.4
+    # UNCALIBRATED PLACEHOLDERS (G8): verify against /odom_laser during the next physical test
+    # session (paired with F0's real map-resume drive) before trusting this bridge to drive
+    # anything meaningfully. See docs/navigation-architecture.md's F0/F1 phase notes.
+    linear_scale: 1.0
+    angular_to_deg_scale: 1.0
+    max_angle_deg: 45.0
+    watchdog_timeout_s: 0.4
+    idle_disable_s: 30.0

@@ -7,6 +7,57 @@ current active roadmap)**.
 
 ---
 
+## 2026-07-13 — Phase F1 (core actuation layer): cmd_vel_bridge + twist_mux built, software-verified; physical calibration deferred
+
+Built the D2 "single actuation node" the architecture doc calls for: `cmd_vel_bridge`
+(`ippolit_control`) is now the *only* node that calls Valetudo's
+`HighResolutionManualControlCapability` REST endpoint to actually drive, subscribing `/cmd_vel`
+(the output of a new `twist_mux` instance merging `/cmd_vel_safety` priority 100 >
+`/cmd_vel_teleop` 50 > `/cmd_vel_nav` 10, the last not wired to anything until F4). `cliff_guard`
+now ALSO publishes a zero `Twist` on `/cmd_vel_safety` at 10 Hz while wheel-tripped (on top of,
+not instead of, its existing direct REST-disable backstop) — two independent stop mechanisms so
+one failing (e.g. `cmd_vel_bridge`'s REST calls wedged) doesn't remove the other.
+
+`cmd_vel_bridge` implements every piece of the F1 spec: the G1 explicit-zero watchdog (Valetudo
+holds the last velocity — ceasing to publish is not a stop, so it actively forces zero after
+`watchdog_timeout_s` with no fresh `/cmd_vel`), the ~6.6 Hz persistent sender rate (matching the
+pre-ROS `q6a_drive.py`'s empirically-tuned value), lazy enable-on-first-real-command +
+idle-auto-disable ownership of the REST capability (never proactively enables at startup, so an
+idle system with nothing publishing `/cmd_vel` never arms manual control or spins up the turret),
+`max_safe_vel` clamped and range-validated at 0.4 (the same validated envelope as
+`q6a_creep_test.py`), and reverse refused (negative `linear.x` clamps to 0) since the sign/scale
+isn't calibrated yet.
+
+**The Twist -> Valetudo (velocity, angle) mapping itself is an explicit, documented
+PLACEHOLDER** (`linear_scale`/`angular_to_deg_scale`, both defaulted to 1.0) — this genuinely
+needs verification against `/odom_laser` (G8) with the real robot driving, which the user
+deferred alongside F0's physical map-resume test this session (not set up to supervise a
+physical drive right now). Per the doc's testing plan, the mapping+clamp logic itself was
+factored into a pure `twist_to_valetudo()` function with no rclpy dependency and covered by 9
+new pytest unit tests (forward scale+clamp, reverse rejection, angular deg conversion+clamp
+both directions, zero-Twist passthrough) — this is what COULD be verified without physically
+moving the robot, and was.
+
+Verified live (software only, zero physical motion): `colcon test` 47/47 green (up from 38);
+`ros2 param get` matches deployed YAML; both `twist_mux` and `cmd_vel_bridge` start cleanly under
+`ippolit-core` and stay completely inert (no REST calls at all, confirmed via journal grep) since
+nothing publishes `/cmd_vel_teleop`/`/cmd_vel_nav` yet and `cliff_guard` isn't tripped;
+`cliff_guard`'s existing `/cliff/ahead` behavior unaffected by its edit. Hit one new gotcha: an
+empty `locks: {}` in `twist_mux.yaml` crashes the node at startup
+(`parameter_value_from failed for parameter 'locks': No parameter value set`) — twist_mux needs
+the `locks` key omitted entirely when there are none to configure, not present-but-empty.
+
+**Explicitly NOT done this session** (needs the user physically present, paired with F0's
+deferred physical test): the actual linear/angular scale calibration against `/odom_laser`;
+live driving verification (teleop Twist actually drives; killing the publisher stops <0.5s;
+lifted-wheel test zeroes `/cmd_vel` regardless of other publishers — the doc's stated F1
+acceptance criteria); and `q6a_drive.py`'s reimplementation as a `/cmd_vel_teleop` publisher
+(lower priority — it's a supervised manual tool, and reimplementing it is only meaningful once
+the mapping above is calibrated). `docs/navigation-architecture.md`'s F1 entry is marked
+🔶 IN PROGRESS, not done, reflecting this.
+
+---
+
 ## 2026-07-12 — Phase A2 COMPLETE: declared ROS parameters replace env-var configuration
 
 Converted every remaining `os.environ.get(...)` tunable across all six nodes that had them

@@ -4,9 +4,11 @@ cliff_guard.py — SAFETY: drop-off awareness near the 2nd-floor stairwell.
 
 Two very different responses, on purpose:
 
-  * WHEEL-DROP (`/cliff`, MCU Triggers byte[1]) = HARD e-stop. If a wheel has already left the
-    ground the robot is going over NOW -> disable HighResolutionManualControl immediately (x3,
-    WiFi can drop a PUT) + speak. This is the last-resort backstop.
+  * WHEEL-DROP (`/cliff`, MCU Triggers byte[1]) = HARD e-stop. TWO independent layers (F1, D2):
+    a zero-Twist hold published on `/cmd_vel_safety` (`twist_mux` priority 100 -- the primary
+    stop, works even if `cmd_vel_bridge`'s REST calls are failing) PLUS the original direct REST
+    `{"action":"disable"}` backstop (x3, WiFi can drop a PUT) + speak, kept as a last resort in
+    case something downstream of `/cmd_vel_safety` is itself wedged.
 
   * MiDaS floor-drop ahead = ADVISORY, NOT a freeze. The robot must be able to travel *along* an
     edge at a safe distance, not get blocked in front of it, so this layer only PUBLISHES the
@@ -36,6 +38,7 @@ import threading
 import time
 import urllib.request
 
+from geometry_msgs.msg import Twist
 from rcl_interfaces.msg import FloatingPointRange, IntegerRange, ParameterDescriptor
 import rclpy
 from rclpy.node import Node
@@ -43,6 +46,8 @@ from rclpy.qos import (
     qos_profile_sensor_data, QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy)
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, String
+
+CMD_VEL_SAFETY_HZ = 10.0   # faster than twist_mux's 0.5s per-topic timeout, so priority holds
 
 ROBOT_ADDR = os.environ.get('ROBOT_ADDR', '192.168.10.1')
 CAP = f'http://{ROBOT_ADDR}/api/v2/robot/capabilities/HighResolutionManualControlCapability'
@@ -123,10 +128,12 @@ class CliffGuard(Node):
         latched = QoSProfile(depth=1, reliability=QoSReliabilityPolicy.RELIABLE,
                              durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
         self.pub_ahead = self.create_publisher(Bool, '/cliff/ahead', latched)  # drop ahead
+        self.pub_cmd_vel_safety = self.create_publisher(Twist, '/cmd_vel_safety', 10)
         self.create_subscription(Bool, '/cliff', self.on_cliff, latched)
         self.create_subscription(Bool, '/bumper', self.on_bumper, latched)
         self.create_subscription(String, '/vision/floor', self.on_floor, 10)
         self.create_subscription(LaserScan, '/scan', self.on_scan, qos_profile_sensor_data)
+        self.create_timer(1.0 / CMD_VEL_SAFETY_HZ, self.publish_cmd_vel_safety)
         self.bumped = False
         self.wheel_tripped = False
         self.ahead = False
@@ -213,6 +220,18 @@ class CliffGuard(Node):
             self.ahead = False
             self.pub_ahead.publish(Bool(data=False))
             self.get_logger().info('forward path clear — /cliff/ahead=0')
+
+    def publish_cmd_vel_safety(self):
+        """
+        Hold a zero Twist on /cmd_vel_safety while wheel-tripped.
+
+        F1/D2: twist_mux gives this topic priority 100 (above teleop/nav), so this alone stops
+        the robot regardless of what any other node is publishing -- independent of the estop()
+        REST backstop below, which could itself be failing (network, AVA state) at the exact
+        moment it's needed.
+        """
+        if self.wheel_tripped:
+            self.pub_cmd_vel_safety.publish(Twist())
 
     def estop(self):
         body = json.dumps({'action': 'disable'}).encode()

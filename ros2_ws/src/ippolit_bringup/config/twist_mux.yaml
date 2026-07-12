@@ -1,0 +1,20 @@
+twist_mux:
+  ros__parameters:
+    topics:
+      safety:
+        topic: /cmd_vel_safety
+        timeout: 0.5
+        priority: 100
+      teleop:
+        topic: /cmd_vel_teleop
+        timeout: 0.5
+        priority: 50
+      nav:
+        # Not wired up until F4 (Nav2 bringup) - harmless to declare now, twist_mux just never
+        # sees anything published on this topic until then.
+        topic: /cmd_vel_nav
+        timeout: 0.5
+        priority: 10
+    # No locks configured (empty "locks: {}" crashes twist_mux at startup with
+    # "parameter_value_from failed for parameter 'locks': No parameter value set" - it needs
+    # the key omitted entirely, not present-but-empty).

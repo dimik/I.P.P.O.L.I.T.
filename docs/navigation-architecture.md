@@ -256,6 +256,15 @@ A2 (param-driven nav tuning) and ideally A3/A4.
   Twist mapping calibrated against `/odom_laser` (G8), `twist_mux` config, cliff_guard ported to
   `/cmd_vel_safety` (keeps REST-disable backstop), `q6a_drive` behavior re-implemented as a cmd_vel
   publisher. Supervised-only tools (`edge_follow`, `creep_test`) migrate last.
+  🔶 IN PROGRESS (2026-07-13). `cmd_vel_bridge` + `twist_mux` + `cliff_guard`'s `/cmd_vel_safety`
+  publish all built and software-verified (47/47 tests incl. 9 new pytest cases for the
+  Twist→(velocity,angle) mapping+clamps; both nodes start clean under `ippolit-core` and confirmed
+  to stay completely inert — zero REST calls — with nothing yet publishing `/cmd_vel_teleop`/
+  `/cmd_vel_nav`). **Deliberately NOT done** (needs the user physically present — deferred
+  alongside F0 this session, see G22): the actual `linear_scale`/`angular_to_deg_scale` calibration
+  against `/odom_laser`, and this phase's own acceptance criteria below (all require live driving).
+  `q6a_drive`'s reimplementation as a `/cmd_vel_teleop` publisher is also deferred (lower priority;
+  only meaningful once the mapping is calibrated).
   ✅ Teleop Twist drives; killing publisher stops <0.5 s; lifted-wheel test zeroes /cmd_vel regardless of
   other publishers.
 - **F2 — visualization**: foxglove_bridge in `ippolit-viz` group; repo-committed layout
@@ -312,7 +321,7 @@ envelope (1.0 fails), MiDaS edge calibration table (65→5 cm), thermal enclosur
 worker. Battery telemetry via `/battery` (Valetudo charging flag broken on this model). IR floor sensors
 conclusively useless for early warning (co-fire with wheel-drop).
 
-## 9. Gotchas (G1–G21) — G1-G12 unchanged from rev 1, G13-G21 found live during A0/A1; MUST READ
+## 9. Gotchas (G1–G22) — G1-G12 unchanged from rev 1, G13-G22 found live during A0/A1/F1; MUST READ
 
 - **G1** Valetudo holds the last velocity — stopping requires actively sending zero; a silent watchdog is
   not a stop.
@@ -443,3 +452,22 @@ conclusively useless for early warning (co-fire with wheel-drop).
   Fix: append instead of replace, `value="$(env LD_LIBRARY_PATH ''):<qnn-path>"`. Check any future
   `<env>` use in a launch file for the same replace-vs-append trap, especially for any variable
   ROS/rclpy itself depends on (`LD_LIBRARY_PATH`, `PYTHONPATH`, `AMENT_PREFIX_PATH`, etc.).
+- **G22** (found in F1, wiring `twist_mux`) an empty `locks: {}` in a `twist_mux` params YAML
+  **crashes the node at startup** (`terminate called after throwing an instance of
+  'rclcpp::exceptions::InvalidParameterValueException'` / `parameter_value_from failed for
+  parameter 'locks': No parameter value set`) — its C++ parameter parsing apparently can't infer a
+  type from a present-but-empty YAML mapping. Fix: omit the `locks` key entirely when there are no
+  locks to configure, rather than declaring it empty. Same family of lesson as G16/G21: a
+  seemingly-inert placeholder value (an empty comment-free block, an unset-but-declared env var)
+  can crash a vendor node in a way that's non-obvious from the YAML alone — always start a newly
+  wired third-party node once and grep its journal, don't assume the config "looks right" is
+  proof it runs.
+
+**Deferred-physical-test pattern (established during F0/F1, 2026-07-13):** when a phase's next
+step requires physically driving the robot or aiming its camera and the user isn't set up to
+supervise that right now, split the phase: implement and verify everything that's software-only
+(build, lint, unit tests, live node startup with zero physical side effects — e.g. `cmd_vel_bridge`
+starting but never calling REST `enable` because nothing publishes `/cmd_vel` yet), mark the phase
+🔶 IN PROGRESS with an explicit list of what still needs the user present, and move on to the next
+phase per the suggested order rather than blocking. Do not fake-verify the physical parts (no
+"probably fine" live driving tests without the user watching) — say plainly what's unverified.

@@ -1,9 +1,21 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- safety_control.launch.xml — safety-critical nodes (ippolit-core systemd group). -->
+<!-- safety_control.launch.xml — safety-critical nodes + the actuation layer (ippolit-core
+     systemd group). twist_mux merges /cmd_vel_safety (100, cliff_guard) > /cmd_vel_teleop (50)
+     > /cmd_vel_nav (10, not wired until F4) onto /cmd_vel, cmd_vel_bridge's only input. D2:
+     ONE node owns the Valetudo manual-control REST interface. -->
 <launch>
   <node pkg="ippolit_safety" exec="cliff_guard" name="cliff_guard">
     <!-- ROBOT_ADDR env var read as a fallback default inside cliff_guard.py itself; no ROS
          param override needed here since the estop PUT target rarely changes per-deployment. -->
     <param from="$(find-pkg-share ippolit_bringup)/config/cliff_guard.yaml"/>
+  </node>
+  <node pkg="twist_mux" exec="twist_mux" name="twist_mux">
+    <param from="$(find-pkg-share ippolit_bringup)/config/twist_mux.yaml"/>
+    <remap from="/cmd_vel_out" to="/cmd_vel"/>
+  </node>
+  <node pkg="ippolit_control" exec="cmd_vel_bridge" name="cmd_vel_bridge">
+    <!-- ROBOT_ADDR env var read as a fallback default inside cmd_vel_bridge.py itself, same
+         pattern as cliff_guard above. -->
+    <param from="$(find-pkg-share ippolit_bringup)/config/cmd_vel_bridge.yaml"/>
   </node>
 </launch>
