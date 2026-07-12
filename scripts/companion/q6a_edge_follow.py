@@ -18,9 +18,10 @@ mapped to the Valetudo angle via STEER_SIGN. No integral term: the scan re-estim
 corrected continuously; a *constant* offset from setpoint (rather than oscillation) would indicate a wrong
 BODY_R/steer sign, not a missing I term — watch for that on the first run.
 
-SETPOINT: the LDS sits at ~chassis center, so measured d = body_radius + desired gap. D10s Pro = 350 mm
-diameter -> BODY_R = 0.175 m (spec). setpoint = BODY_R + gap (gap default 0.08 m => setpoint 0.255 m).
-For a round chassis a fore/aft turret offset changes the lateral half-width by <5 mm, so this holds.
+SETPOINT: measured d = BODY_R + desired gap. BODY_R is a CALIBRATED empirical offset (0.219 m, from a
+2026-07-12 live measurement pairing d against a tape-measured real gap) — NOT the 350mm-diameter spec value
+(0.175 m), which undershot the real gap by ~4.4cm (would have put the robot ~3.6cm from the wall instead
+of the intended 8cm). setpoint = BODY_R + gap (gap default 0.08 m => setpoint 0.299 m).
 
 CORNERS (standard reactive wall-following): front sector below FRONT_STOP -> concave corner -> rotate away
 in place. Too few inliers in the side sector -> wall lost / convex corner -> curve toward the follow side to
@@ -54,7 +55,13 @@ from std_msgs.msg import Bool
 
 ROBOT_ADDR = os.environ.get('ROBOT_ADDR', '192.168.1.213')
 CAP = f'http://{ROBOT_ADDR}/api/v2/robot/capabilities/HighResolutionManualControlCapability'
-BODY_R = float(os.environ.get('Q6A_BODY_R', '0.175'))            # D10s Pro radius (350 mm dia, spec)
+BODY_R = float(os.environ.get('Q6A_BODY_R', '0.219'))             # CALIBRATED 2026-07-12 (see below), NOT
+#   the 350mm-diameter spec value (0.175m) -- a live 15s follow run measured d=0.299m at that exact moment
+#   while a tape measure on the real robot read an 0.08m gap: implied offset = 0.299-0.08 = 0.219m, ~4.4cm
+#   more than spec. Source of the gap is unresolved (could be body radius under-spec'd, LiDAR not exactly
+#   centered, or a yaw-related corner effect -- psi was nonzero during the run) -- treat this as an
+#   empirical correction, not a true "body radius". Single-point calibration; re-verify with a second
+#   measurement at a different distance before trusting for unsupervised operation.
 SIDE_HALF = math.radians(float(os.environ.get('Q6A_EF_SIDE_HALF_DEG', '40')))  # follow sector half-width
 FRONT_HALF = math.radians(float(os.environ.get('Q6A_EF_FRONT_HALF_DEG', '22')))
 FRONT_STOP = float(os.environ.get('Q6A_EF_FRONT_STOP', '0.35'))  # m; front closer than this = concave corner

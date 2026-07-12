@@ -44,6 +44,29 @@ the Q6A's `robot-usb`/`robot-wifi` aliases, whose key works).
 
 ---
 
+## 2026-07-12 — SAFETY FIX: edge-follow clearance model was off by ~4.4cm (calibrated against real measurement)
+
+First successful closed-loop validation of the LiDAR edge-follow controller (STEER_SIGN=-1, KP=55, KD=0.30,
+clamp=14deg from 2026-07-11): a 15s supervised run converged cleanly and smoothly, d: 0.367->0.307m, no
+oscillation/overshoot/wall-loss, exactly as designed.
+
+**But a tape measurement caught a real safety gap.** At the moment d=0.299m, a precise tape measure on the
+robot read an 0.08m gap to the railing — not the 0.124m our BODY_R=0.175m (350mm-diameter spec) implied.
+Implied correction: BODY_R_effective = 0.299 - 0.08 = 0.219m, ~4.4cm more than spec. Had the earlier run
+been allowed to reach the OLD setpoint (d=0.255m), the real-world gap would have been only ~3.6cm, not the
+intended 8cm — a real risk near a stairwell railing. Source of the 4.4cm gap is unresolved (under-spec'd
+body radius, LiDAR not exactly centered, or a yaw-related corner effect — psi was nonzero throughout) —
+documented as an empirical correction, not a decomposed root cause.
+
+**Fixed:** `BODY_R` in `q6a_edge_follow.py` updated 0.175 -> 0.219m. Verified immediately: at the exact
+spot ground-truthed at 8cm, the corrected model now reads `e~=0` (was `e=+0.048` before the fix) — the
+setpoint math now means what it claims to mean. Single-point calibration — re-verify with a second
+measurement at a different distance before trusting for unsupervised operation.
+
+Files: `scripts/companion/q6a_edge_follow.py`.
+
+---
+
 ## 2026-07-11 — MCU firmware RE attempt for battery telemetry: ATTEMPTED, INCONCLUSIVE
 
 User asked to attempt finding richer battery telemetry inside the MCU firmware itself (~/dreame-re/mcu.bin,
