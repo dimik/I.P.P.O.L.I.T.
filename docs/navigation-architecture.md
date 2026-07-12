@@ -270,6 +270,16 @@ A2 (param-driven nav tuning) and ideally A3/A4.
 - **F2 — visualization**: foxglove_bridge in `ippolit-viz` group; repo-committed layout
   (`docs/foxglove-layout.json`): map+masks, 3-D (markers/pose/scan/TF), FloorDrop plots, camera MJPEG
   panel (robot :8090), teleop→`/cmd_vel_teleop`, diagnostics.
+  🔶 IN PROGRESS (2026-07-13). `foxglove_bridge` deployed+enabled in `ippolit-viz`, verified live:
+  websocket listening on `0.0.0.0:8765`, advertising 60+ topics. `docs/foxglove-layout.json`
+  authored (3D panel doing map+TF+scan+markers+pose in one, Raw Messages panels for
+  `/vision/floor` + `/object_map` + a `/diagnostics` placeholder, a working Teleop panel to
+  `/cmd_vel_teleop`) but **NOT verified against a real Foxglove client** (none available in this
+  environment — open it and treat any needed fixes as the real acceptance test). Two items are
+  real, not-yet-buildable gaps rather than oversights: true FloorDrop **plotting** needs A3's
+  typed messages (JSON-on-String isn't plottable), and a **camera panel** needs a new
+  MJPEG→`sensor_msgs/Image` bridge node that doesn't exist yet (`q6a_vision` only serves plain
+  HTTP MJPEG, no ROS image topic).
 - **F3 — map the room**: teleop coverage drive at ≤0.3 (turret gate G6!), loop closure confirmed in logs
   (first real validation), save/resume verified with the full-room graph; author stairwell masks
   (keepout: hole+15 cm rim lethal; speed: ~0.8 m zone at 40 %) with documented pixel↔world math; hole

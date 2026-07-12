@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- viz.launch.xml — stub, scaffolded in A0. Filled in during A1 (wrap existing nodes) /
-     later feature phases per docs/navigation-architecture.md. Intentionally empty for now:
-     colcon build/test only needs this file to be valid+installable, not functional. -->
+<!-- viz.launch.xml — F2: foxglove_bridge websocket (ippolit-viz systemd group, restart
+     blast-radius group 4 of 4 - a viz-side crash/reconnect never touches the safety/actuation
+     or perception chains). D5: ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST keeps DDS stable, but
+     that's independent of this node's own websocket - address=0.0.0.0 (the package default,
+     left unset here) still lets an off-board Foxglove client connect over the LAN; only DDS
+     discovery itself stays host-local. Default port 8765 (also the package default). -->
 <launch>
+  <node pkg="foxglove_bridge" exec="foxglove_bridge" name="foxglove_bridge"/>
 </launch>

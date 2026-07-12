@@ -1,0 +1,135 @@
+{
+  "configById": {
+    "3D!ippolit_main": {
+      "layers": {
+        "845139cb-26bc-40b3-8161-8bf6373c9421": {
+          "instanceId": "845139cb-26bc-40b3-8161-8bf6373c9421",
+          "layerId": "foxglove.Grid",
+          "label": "Grid",
+          "visible": true
+        }
+      },
+      "cameraState": {
+        "perspective": false,
+        "distance": 8,
+        "phi": 0,
+        "thetaOffset": 0,
+        "targetOffset": [0, 0, 0],
+        "target": [0, 0, 0],
+        "targetOrientation": [0, 0, 0, 1],
+        "fovy": 45,
+        "near": 0.01,
+        "far": 5000
+      },
+      "followMode": "follow-pose",
+      "followTf": "base_link",
+      "scene": {
+        "enableStats": false
+      },
+      "transforms": {},
+      "topics": {
+        "/map": {
+          "visible": true
+        },
+        "/scan": {
+          "visible": true,
+          "colorField": "intensity",
+          "colorMode": "flat",
+          "color": "#00ff2a"
+        },
+        "/object_markers": {
+          "visible": true
+        },
+        "/odom": {
+          "visible": true
+        },
+        "/odom_laser": {
+          "visible": false
+        },
+        "/tf": {
+          "visible": true
+        }
+      },
+      "publish": {
+        "type": "point",
+        "poseTopic": "/move_base_simple/goal",
+        "pointTopic": "/clicked_point",
+        "poseEstimateTopic": "/initialpose",
+        "poseEstimateXDeviation": 0.5,
+        "poseEstimateYDeviation": 0.5,
+        "poseEstimateThetaDeviation": 0.26
+      },
+      "imageMode": {}
+    },
+    "RawMessages!floor_drop": {
+      "topicPath": "/vision/floor",
+      "diffEnabled": false,
+      "diffMethod": "custom",
+      "diffTopicPath": "",
+      "showFullMessageForDiff": false,
+      "expansion": "auto",
+      "title": "FloorDrop (raw JSON -- see docs/foxglove-layout.json header note re: A3)"
+    },
+    "RawMessages!object_map": {
+      "topicPath": "/object_map",
+      "diffEnabled": false,
+      "diffMethod": "custom",
+      "diffTopicPath": "",
+      "showFullMessageForDiff": false,
+      "expansion": "auto",
+      "title": "Object map (raw JSON)"
+    },
+    "RawMessages!diagnostics": {
+      "topicPath": "/diagnostics",
+      "diffEnabled": false,
+      "diffMethod": "custom",
+      "diffTopicPath": "",
+      "showFullMessageForDiff": false,
+      "expansion": "auto",
+      "title": "Diagnostics (empty until A5 -- nothing publishes /diagnostics yet)"
+    },
+    "Teleop!drive": {
+      "topic": "/cmd_vel_teleop",
+      "publishRate": 6.6,
+      "upButton": {
+        "field": "linear-x",
+        "value": 0.2
+      },
+      "downButton": {
+        "field": "linear-x",
+        "value": -0.2
+      },
+      "leftButton": {
+        "field": "angular-z",
+        "value": 0.5
+      },
+      "rightButton": {
+        "field": "angular-z",
+        "value": -0.5
+      }
+    }
+  },
+  "globalVariables": {},
+  "userNodes": {},
+  "playbackConfig": {
+    "speed": 1
+  },
+  "layout": {
+    "first": "3D!ippolit_main",
+    "second": {
+      "first": {
+        "first": "RawMessages!floor_drop",
+        "second": "RawMessages!object_map",
+        "direction": "column"
+      },
+      "second": {
+        "first": "RawMessages!diagnostics",
+        "second": "Teleop!drive",
+        "direction": "column"
+      },
+      "direction": "row"
+    },
+    "direction": "row",
+    "splitPercentage": 60
+  }
+}

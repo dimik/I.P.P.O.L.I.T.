@@ -7,6 +7,48 @@ current active roadmap)**.
 
 ---
 
+## 2026-07-13 — Phase F2 (visualization): foxglove_bridge deployed and verified; layout JSON authored but unverified
+
+Installed `ros-jazzy-foxglove-bridge` on the Q6A, wired it into the new `ippolit-viz` systemd
+group (the 4th and last restart blast-radius group — a viz-side crash/reconnect never touches
+safety/actuation or perception), and deployed+enabled the unit for the first time this phase
+(previous phases only built A0's stub). `D5` unaffected: `ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST`
+keeps DDS itself host-local, but `foxglove_bridge`'s own websocket (port 8765, `address=0.0.0.0`,
+both package defaults) is a separate cross-host bridge an off-board Foxglove client can reach over
+the LAN regardless.
+
+**Verified live (real, ROS-side):** `foxglove_bridge` starts clean under `ippolit-viz`, advertises
+every topic currently on the graph (60+ channels seen in the log — `/map`, `/scan`, `/cliff*`,
+`/object_map`, `/vision/floor`, `/cmd_vel*`, etc.), and the websocket port is confirmed listening
+on `0.0.0.0:8765`. All 47 tests still pass; apt's post-install trigger unexpectedly restarted
+`ippolit-perception` as a side effect of installing the new package (a shared-library dependency
+overlap) — confirmed it recovered cleanly with all 3 nodes back up.
+
+**`docs/foxglove-layout.json` was authored from schema knowledge, NOT verified against a real
+Foxglove client** — no browser/Foxglove desktop app is available in this environment, so unlike
+everything above, "the layout loads and every panel renders correctly" is unconfirmed. Treat it
+as a strong first draft: open it in Foxglove, expect to need small fixes (panel config schemas do
+shift between Foxglove versions), and treat that as the actual acceptance test for this file.
+
+The layout covers what's achievable with TODAY's topics: one 3D panel doing double duty for
+"map+masks" and "3-D (markers/pose/scan/TF)" (Foxglove's 3D panel natively renders
+`nav_msgs/OccupancyGrid`, so there's no separate 2-D map panel type — RViz-style composition, one
+panel), Raw Messages panels for `/vision/floor` and `/object_map` (both are still JSON-on-String
+per A3's not-yet-done topic-typing, so they show as a JSON tree, not a proper numeric Plot panel
+-- revisit once A3 lands typed `FloorDrop`/`MappedObjectArray` messages), a placeholder Raw
+Messages panel for `/diagnostics` (nothing publishes it yet -- inert until A5), and a Teleop panel
+publishing to `/cmd_vel_teleop` (real and functional today, given F1's `twist_mux` already
+subscribes there).
+
+**Explicitly NOT done / real gaps, not oversights:** no camera panel. `q6a_vision` only exposes
+its feed as plain HTTP MJPEG (`:8090` raw, `:8093` annotated) — Foxglove's Image panel needs a
+`sensor_msgs/Image` or `CompressedImage` *topic*, and no node currently republishes the camera
+that way. Bridging MJPEG into a proper ROS image topic is a real, separate piece of work, not
+something implicit in "foxglove_bridge + a layout file" — flagged here rather than faked with an
+unsupported panel type.
+
+---
+
 ## 2026-07-13 — Phase F1 (core actuation layer): cmd_vel_bridge + twist_mux built, software-verified; physical calibration deferred
 
 Built the D2 "single actuation node" the architecture doc calls for: `cmd_vel_bridge`
