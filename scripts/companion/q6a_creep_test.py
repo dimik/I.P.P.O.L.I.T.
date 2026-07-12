@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""q6a_creep_test.py — SUPERVISED-ONLY diagnostic creep toward a MiDaS-detected drop.
+"""q6a_creep_test.py — SUPERVISED-ONLY, NO HARD STOPS AT ALL. MiDaS only slows the drive; nothing in
+software stops it. The human physically catching the robot is the ONLY backstop.
 
-⚠️ NOT FOR AUTONOMOUS/UNSUPERVISED USE. This intentionally does NOT hard-stop on the MiDaS floor-drop
-signal — instead it reduces velocity proportionally as the signal strengthens, continuing to creep forward
-at a reduced (but nonzero) speed, relying on wheel-drop (/cliff) as the ONLY remaining backstop. We have
-empirically confirmed (2026-07-12) that wheel-drop only fires once a wheel has ALREADY left the ground —
-a last-instant signal, not a safety margin. This script exists purely to gather finer-grained sensor data
-during a slow supervised approach to a real edge (e.g. does anything else give an earlier signal if the
-approach is much slower than q6a_drive.py's fixed-speed-then-hard-stop). A human MUST be present with a
-hand ready to physically catch/stop the robot, or ready to hit disable, at all times.
+⚠️⚠️ NOT FOR AUTONOMOUS/UNSUPERVISED USE, EVER. As of 2026-07-12 this has NO wheel-drop stop either
+(explicitly requested + confirmed twice: "remove wheel-drop too -- truly no stop gates"). The only things
+that end a run are the --seconds time bound and a stale-sensor abort (refuse to drive with no data at all
+-- kept because it's needed for the MiDaS ramp itself to mean anything, not a cliff-specific safeguard).
+MiDaS proportionally reduces velocity as the floor-drop signal strengthens, down to a floor speed, and
+NEVER stops the robot itself. If nothing catches it, it will drive over a real edge. A human MUST be
+physically at the robot, hand ready to catch/stop it, for the entire run, no exceptions.
 
 This is a SEPARATE script from q6a_drive.py on purpose — q6a_drive.py's default hard-stop-on-MiDaS-drop
-behavior is untouched and remains the production-safe behavior for any other use.
+AND wheel-drop-stop behavior are both untouched and remain the production-safe behavior for any other use.
 
 Usage: ROBOT_ADDR=<ip> python3 q6a_creep_test.py --seconds 15 --max-velocity 0.05 --min-velocity 0.015
 """
@@ -25,9 +25,9 @@ import urllib.request
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy, qos_profile_sensor_data
+from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan
-from std_msgs.msg import String, Bool
+from std_msgs.msg import String
 
 ROBOT_ADDR = os.environ.get('ROBOT_ADDR', '192.168.1.213')
 CAP = f'http://{ROBOT_ADDR}/api/v2/robot/capabilities/HighResolutionManualControlCapability'
@@ -52,19 +52,15 @@ class CreepTest(Node):
         self.max_vel, self.min_vel, self.secs = max_vel, min_vel, secs
         self.scan_t = 0.0
         self.center = None; self.center_sharp = 0.0; self.center_t = 0.0
-        self.cliff = False
         self.t0 = None; self.warm0 = None
         self.create_subscription(LaserScan, '/scan', lambda m: setattr(self, 'scan_t', time.monotonic()),
                                  qos_profile_sensor_data)
         self.create_subscription(String, '/vision/floor', self.on_floor, 10)
-        latched = QoSProfile(depth=1, reliability=QoSReliabilityPolicy.RELIABLE,
-                             durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
-        self.create_subscription(Bool, '/cliff', lambda m: setattr(self, 'cliff', bool(m.data)), latched)
         self.create_timer(1.0 / HZ, self.tick)
         self.get_logger().warn(
-            f'q6a_creep_test: SUPERVISED-ONLY, NOT for autonomous use. max_vel={max_vel} floor={min_vel} '
-            f'ramp=[{RAMP_START},{RAMP_END}] for {secs}s. Wheel-drop /cliff is the ONLY hard backstop -- '
-            f'human must be present with a hand ready at all times.')
+            f'q6a_creep_test: NO HARD STOPS AT ALL (wheel-drop removed 2026-07-12, explicit request). '
+            f'max_vel={max_vel} floor={min_vel} ramp=[{RAMP_START},{RAMP_END}] for {secs}s. MiDaS only '
+            f'slows the drive, never stops it. HUMAN PHYSICALLY CATCHING THE ROBOT IS THE ONLY BACKSTOP.')
 
     def on_floor(self, m):
         try:
@@ -104,10 +100,9 @@ class CreepTest(Node):
             return
         if now - self.t0 > self.secs:
             self.stop(f'done ({self.secs}s)')
-        if self.cliff:                                          # the ONLY hard stop in this script
-            self.stop('WHEEL-DROP (last-resort backstop fired)')
         if not have_scan or not have_floor:
             self.stop('stale sensors (refuse to drive blind even in creep mode)')
+        # NO wheel-drop check here (removed 2026-07-12, explicit request) -- MiDaS slows but never stops.
         # proportional speed reduction, NOT a stop -- floors at self.min_vel, never zero. Gated on sharpness
         # too (matches q6a_drive.py's MIN_SHARP=3.0): a smooth floor gradient can read a moderate center
         # value without being a real edge -- ignore the ramp entirely below that, same as the proven logic.

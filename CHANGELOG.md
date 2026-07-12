@@ -44,6 +44,27 @@ the Q6A's `robot-usb`/`robot-wifi` aliases, whose key works).
 
 ---
 
+## 2026-07-12 — q6a_creep_test.py: wheel-drop hard stop removed too, per explicit repeated confirmation
+
+Following the ambiguous "stopped at the edge" event (investigated but couldn't confirm AVA vs our software
+via logs -- exhaustive search of trace_sync.log/log_0/log_err/ava_cmd.log/dmesg found no persisted evidence
+either way), user asked to remove ALL stop gates, keeping only MiDaS-based speed reduction. Given this
+contradicted the earlier stated design ("hard stop on wheel drop only"), asked a direct clarifying question
+before touching safety code: does this include wheel-drop too? Confirmed explicitly and unambiguously:
+"Remove wheel-drop too -- truly no stop gates."
+
+**Implemented exactly that** in q6a_creep_test.py: removed the /cliff subscription and hard-stop check
+entirely. The only things that end a run now are the --seconds time bound and a stale-sensor abort (kept
+because it's needed for the MiDaS ramp to mean anything at all, not a cliff-specific safeguard). MiDaS
+proportionally reduces velocity as before but NEVER stops the robot. Docstring rewritten with unambiguous
+warnings: NOT for autonomous/unsupervised use, ever; a human physically catching the robot is the ONLY
+backstop for the entire run. q6a_drive.py's production hard-stop-on-MiDaS AND hard-stop-on-wheel-drop
+behavior are both untouched -- this change is scoped entirely to the separate supervised test script.
+
+Files: `scripts/companion/q6a_creep_test.py`.
+
+---
+
 ## 2026-07-12 — New SUPERVISED-ONLY creep-test script (does not hard-stop on MiDaS)
 
 User wants the MiDaS floor-drop signal to reduce speed rather than hard-stop, to observe sensor behavior
