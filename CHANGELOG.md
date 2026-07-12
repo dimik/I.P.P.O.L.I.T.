@@ -44,6 +44,25 @@ the Q6A's `robot-usb`/`robot-wifi` aliases, whose key works).
 
 ---
 
+## 2026-07-12 — q6a_creep_test.py simplified: MiDaS slowing removed entirely, wheel-drop is a real hard stop
+
+After the second "fighting AVA" incident (confirmed live even after fixing the pause-must-command-zero-
+velocity bug), user's direct assessment: no improvement, because the underlying problem is MiDaS going
+blind right at the boundary -- no ramp-parameter tuning fixes a genuine sensor blind spot. Decision:
+remove the MiDaS-based ramp entirely rather than keep chasing it.
+
+**Rewrote the script from scratch, much simpler:** constant commanded velocity (no ramp, no floor, no
+cooldown logic). Wheel-drop (/cliff, AVA's own signal) is now the ONLY stop condition besides the time
+bound and a stale-scan abort, and it IS a genuine hard stop again (raises SystemExit, ends the run) --
+not the pause-and-resume behavior from the previous MiDaS-ramp design, since there's no ramp logic left to
+resume into. This removes the whole class of "resumes full speed right at the edge" bug since the robot
+now only ever drives at one constant speed regardless of proximity, with wheel-drop cutting it off cleanly
+when it fires. /vision/floor subscription removed too (no longer used for anything).
+
+Files: `scripts/companion/q6a_creep_test.py` (full rewrite, much smaller/simpler).
+
+---
+
 ## 2026-07-12 — CRITICAL FIX: creep-test was fighting AVA's own wheel-drop recovery ("trying to suicide")
 
 Live incident with wheel-drop fully removed: the robot approached the edge, AVA's OWN independent wheel-drop

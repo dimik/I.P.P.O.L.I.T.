@@ -1,31 +1,32 @@
 #!/usr/bin/env python3
-"""q6a_creep_test.py — SUPERVISED-ONLY. MiDaS only slows the drive, never hard-stops. The human physically
-catching the robot is still the primary backstop -- BUT this now RESPECTS AVA's own independent wheel-drop
-detection + auto-recovery instead of fighting it.
+"""q6a_creep_test.py — SUPERVISED-ONLY constant-speed drive, wheel-drop is the ONLY stop condition.
 
-⚠️⚠️ NOT FOR AUTONOMOUS/UNSUPERVISED USE, EVER.
+⚠️ NOT FOR AUTONOMOUS/UNSUPERVISED USE, EVER. A human MUST be physically at the robot, hand ready to
+catch/stop it, at all times.
 
-**2026-07-12 incident (why the pause-on-cliff logic below exists):** with wheel-drop fully removed, a live
-test confirmed something we could never confirm from logs -- AVA HAS ITS OWN independent wheel-drop
-detection with automatic backward recovery, completely outside our software. But this script kept issuing
-forward move commands every tick regardless of AVA's state, so every time AVA backed away to protect
-itself, this script immediately pushed it toward the edge again -- an oscillating fight the user described
-as the robot "trying to suicide" (repeatedly approaching, AVA saving it, us undoing that save). That is a
-bug in THIS SCRIPT, not a safety feature -- fixed by pausing our own forward commands whenever /cliff is
-active (plus a cooldown after it clears) so we stop fighting AVA's recovery.
+**History (why MiDaS-based slowing was removed, 2026-07-12):** earlier versions of this script used the
+MiDaS floor-drop signal (/vision/floor center+sharp) to proportionally reduce velocity when approaching an
+edge. Live testing at the real edge confirmed this doesn't work as a safety aid: MiDaS goes BLIND right at
+the boundary (center reads ~0, "no drop", the instant the robot is actually close enough to matter) --
+so every cycle, once AVA's own wheel-drop detection recovered the robot, the ramp logic saw "clear floor"
+and immediately commanded full speed again, straight back at the edge. Confirmed twice live, including
+after fixing an actual bug (pausing must command vel=0, not just withhold commands) -- the behavior didn't
+improve, because the underlying problem is a sensor blind spot, not tunable ramp parameters. User's call:
+remove the MiDaS ramp entirely rather than keep chasing it ("it's useless because of the blind zone").
 
-This does NOT terminate the run and is NOT a substitute for supervision -- it only stops us from actively
-undoing AVA's own protective action. The --seconds time bound and a stale-sensor abort are the only things
-that end a run outright. A human MUST be physically at the robot, hand ready to catch/stop it, at all times.
+**What stops the robot now:** ONLY wheel-drop (/cliff, AVA's own signal we decode) -- and this time it is a
+genuine hard stop that ENDS the run (raises SystemExit), not a pause. Also stale sensors (refuse to drive
+blind) and the --seconds time bound. Nothing reduces speed on approach anymore -- it drives at a constant
+commanded velocity until one of those three conditions fires.
 
-This is a SEPARATE script from q6a_drive.py on purpose — q6a_drive.py's default hard-stop-on-MiDaS-drop
-AND wheel-drop-stop behavior are both untouched and remain the production-safe behavior for any other use.
+This is a SEPARATE script from q6a_drive.py on purpose — q6a_drive.py's own hard-stop-on-MiDaS-drop AND
+hard-stop-on-wheel-drop behavior are both untouched and remain the production-safe behavior for any other
+use; this script exists only for this specific supervised experiment.
 
-Usage: ROBOT_ADDR=<ip> python3 q6a_creep_test.py --seconds 15 --max-velocity 0.05 --min-velocity 0.015
+Usage: ROBOT_ADDR=<ip> python3 q6a_creep_test.py --velocity 0.3 --seconds 15
 """
 import argparse
 import json
-import math
 import os
 import sys
 import time
@@ -35,19 +36,10 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy, qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan
-from std_msgs.msg import String, Bool
+from std_msgs.msg import Bool
 
 ROBOT_ADDR = os.environ.get('ROBOT_ADDR', '192.168.1.213')
 CAP = f'http://{ROBOT_ADDR}/api/v2/robot/capabilities/HighResolutionManualControlCapability'
-# ramp window: velocity scales from max (at RAMP_START) down to the floor (at RAMP_END and beyond).
-# RAMP_START=0.42 matches q6a_drive.py's proven hard-stop threshold (STOP_CENTER) -- full speed right up
-# until that point, THEN ease off, rather than easing off from ~1m out on ordinary floor-gradient noise
-# (0.20 was too sensitive -- confirmed live 2026-07-12, it started slowing at ~1m from the edge).
-RAMP_START = float(os.environ.get('Q6A_CREEP_RAMP_START', '0.42'))   # center reading where slowdown begins
-RAMP_END = float(os.environ.get('Q6A_CREEP_RAMP_END', '0.58'))       # center reading where floor speed hits
-# how long /cliff must read clear before we resume pushing forward -- gives AVA's own backward recovery
-# room to finish before we'd otherwise immediately re-approach the edge again (see docstring incident).
-CLIFF_COOLDOWN_S = float(os.environ.get('Q6A_CREEP_CLIFF_COOLDOWN', '2.0'))
 HZ = 6.6
 
 
@@ -58,41 +50,22 @@ def put(body):
 
 
 class CreepTest(Node):
-    def __init__(self, max_vel, min_vel, secs):
+    def __init__(self, vel, secs):
         super().__init__('q6a_creep_test')
-        self.max_vel, self.min_vel, self.secs = max_vel, min_vel, secs
+        self.vel, self.secs = vel, secs
         self.scan_t = 0.0
-        self.center = None; self.center_sharp = 0.0; self.center_t = 0.0
+        self.cliff = False
         self.t0 = None; self.warm0 = None
-        self.cliff = False; self.cliff_clear_t = 0.0
         self.create_subscription(LaserScan, '/scan', lambda m: setattr(self, 'scan_t', time.monotonic()),
                                  qos_profile_sensor_data)
-        self.create_subscription(String, '/vision/floor', self.on_floor, 10)
         latched = QoSProfile(depth=1, reliability=QoSReliabilityPolicy.RELIABLE,
                              durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
-        self.create_subscription(Bool, '/cliff', self.on_cliff, latched)
+        self.create_subscription(Bool, '/cliff', lambda m: setattr(self, 'cliff', bool(m.data)), latched)
         self.create_timer(1.0 / HZ, self.tick)
         self.get_logger().warn(
-            f'q6a_creep_test: no hard stop on MiDaS (slows only, floor={min_vel}); DOES pause forward '
-            f'commands while AVA\'s own /cliff wheel-drop is active + {CLIFF_COOLDOWN_S}s after, to avoid '
-            f'fighting its recovery. max_vel={max_vel} ramp=[{RAMP_START},{RAMP_END}] for {secs}s. '
-            f'HUMAN PHYSICALLY CATCHING THE ROBOT IS STILL REQUIRED THE WHOLE TIME.')
-
-    def on_cliff(self, m):
-        was = self.cliff
-        self.cliff = bool(m.data)
-        if was and not self.cliff:
-            self.cliff_clear_t = time.monotonic()
-        if self.cliff != was:
-            self.get_logger().warn(f'/cliff (AVA wheel-drop) -> {self.cliff}')
-
-    def on_floor(self, m):
-        try:
-            c = json.loads(m.data)['sectors']['center']
-            self.center = float(c[0]); self.center_sharp = float(c[2]) if len(c) > 2 else 0.0
-            self.center_t = time.monotonic()
-        except Exception:
-            pass
+            f'q6a_creep_test: CONSTANT vel={vel} for {secs}s. NO MiDaS slowing (removed -- blind at the '
+            f'boundary, confirmed useless live). Wheel-drop /cliff is the ONLY stop, and it IS a hard stop '
+            f'now (ends the run). HUMAN PHYSICALLY CATCHING THE ROBOT IS STILL REQUIRED THE WHOLE TIME.')
 
     def move(self, vel, angle=0.0):
         try:
@@ -110,58 +83,34 @@ class CreepTest(Node):
     def tick(self):
         now = time.monotonic()
         have_scan = now - self.scan_t < 1.0
-        have_floor = self.center is not None and now - self.center_t < 1.5
         if self.t0 is None:
             if self.warm0 is None:
                 self.warm0 = now
                 try: put({'action': 'enable'})
                 except Exception as e: self.get_logger().warn(f'enable: {e}')
-                self.get_logger().info('armed; waiting for /scan + /vision/floor')
-            if have_scan and have_floor:
-                self.get_logger().info('sensors live — creeping'); self.t0 = now
+                self.get_logger().info('armed; waiting for /scan')
+            if have_scan:
+                self.get_logger().info('scan live — driving'); self.t0 = now
             elif now - self.warm0 > 8.0:
                 self.stop('no sensor data after arming')
             return
         if now - self.t0 > self.secs:
             self.stop(f'done ({self.secs}s)')
-        if not have_scan or not have_floor:
-            self.stop('stale sensors (refuse to drive blind even in creep mode)')
-        # PAUSE (not a hard stop) while AVA's own wheel-drop is active, or within the cooldown after it
-        # clears -- do NOT re-approach immediately and undo AVA's own recovery (see docstring incident).
-        # MUST actively command zero velocity here, not just skip sending a command -- Valetudo appears to
-        # hold the LAST commanded velocity persistently rather than auto-decelerating on its own, so
-        # merely withholding a fresh command let the robot keep coasting at full speed back into the edge
-        # every cycle (confirmed live 2026-07-12: /cliff oscillated true/false every ~1.3s for 12+s straight
-        # even with this "pause" in place, because it was never actually a stop).
-        in_cooldown = (not self.cliff) and (time.monotonic() - self.cliff_clear_t < CLIFF_COOLDOWN_S) \
-            and self.cliff_clear_t > 0
-        if self.cliff or in_cooldown:
-            self.move(0.0, 0.0)
-            self.get_logger().info(f'PAUSED (AVA /cliff={self.cliff}, cooldown={in_cooldown}) -- '
-                                   f'commanding STOP (vel=0), not pushing forward, letting AVA recover')
-            return
-        # proportional speed reduction, NOT a stop -- floors at self.min_vel, never zero. Gated on sharpness
-        # too (matches q6a_drive.py's MIN_SHARP=3.0): a smooth floor gradient can read a moderate center
-        # value without being a real edge -- ignore the ramp entirely below that, same as the proven logic.
-        if self.center_sharp < 3.0:
-            frac = 0.0
-        else:
-            frac = (self.center - RAMP_START) / (RAMP_END - RAMP_START)
-            frac = max(0.0, min(1.0, frac))
-        vel = self.max_vel - frac * (self.max_vel - self.min_vel)
-        self.move(vel, 0.0)
-        self.get_logger().info(f'center={self.center:.3f} sharp={self.center_sharp:.1f} frac={frac:.2f} '
-                               f'-> vel={vel:.3f}')
+        if not have_scan:
+            self.stop('stale scan (refuse to drive blind)')
+        if self.cliff:                                    # the ONLY stop condition besides time/stale-scan
+            self.stop('WHEEL-DROP (AVA /cliff) -- hard stop, run ends')
+        self.move(self.vel, 0.0)
+        self.get_logger().info(f'vel={self.vel:.3f} (constant, no MiDaS slowing)')
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--max-velocity', type=float, default=0.05)
-    ap.add_argument('--min-velocity', type=float, default=0.015)
+    ap.add_argument('--velocity', type=float, default=0.2)
     ap.add_argument('--seconds', type=float, default=15.0)
     a, ros = ap.parse_known_args()
     rclpy.init(args=[sys.argv[0]] + ros)
-    node = CreepTest(a.max_velocity, a.min_velocity, a.seconds)
+    node = CreepTest(a.velocity, a.seconds)
     try:
         rclpy.spin(node)
     except (KeyboardInterrupt, SystemExit):
