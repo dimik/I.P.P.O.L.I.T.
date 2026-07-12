@@ -44,6 +44,34 @@ the Q6A's `robot-usb`/`robot-wifi` aliases, whose key works).
 
 ---
 
+## 2026-07-12 — SAFETY FIX: LiDAR front-bearing was miscalibrated by ~43deg (never actually tuned)
+
+User asked "are you sure we have front lidar position calibrated properly?" during confusing corner-test
+setup (turn commands producing inconsistent rotation, wall appearing at unexpected bearings after
+repositioning). Investigated rather than assume:
+
+**Found the deployed `lds-scan-node.service` runs `angle_offset_deg` at its CODE DEFAULT (0.0)** — the
+"eyeball and tune ~0-5deg" calibration the node's own docstring assumed had happened was **never actually
+applied**. Ran a clean, unambiguous test: placed a single isolated paper bag directly at the robot's true
+front bumper (removes all ambiguity from nearby walls/corners) — `/scan` read it at **bearing=+43deg**, not
+0deg. A ~43deg error, far larger than the assumed few-degree slop.
+
+**Fixed:** added `-p angle_offset_deg:=-43.0` to `lds-scan-node.service`'s ExecStart, deployed, restarted.
+Re-ran the identical paper-bag test: now reads at **exactly bearing=0deg**. Clean before/after confirmation.
+
+**Implication for today's earlier edge-follow work:** the STEER_SIGN, BODY_R, and convergence-behavior
+calibrations done earlier this session remain valid (they're properties of the control loop / geometry, not
+tied to an absolute bearing label) — but every `--side left`/`--side right` test was run under this
+uncalibrated bearing convention, so which TRUE physical side was actually being followed may not match what
+was reported at the time. Going forward, `--side` should correctly correspond to the robot's real left/right.
+
+Single-point calibration (one paper-bag placement) — re-verify with a second isolated-object test at a
+different bearing if more precision is needed.
+
+Files: `scripts/companion/systemd/lds-scan-node.service`.
+
+---
+
 ## 2026-07-12 — Thermal enclosure installed: significant cooling improvement confirmed
 
 User installed a thermal enclosure on the Q6A. Measured steady-state (9 min uptime, full active autonomy

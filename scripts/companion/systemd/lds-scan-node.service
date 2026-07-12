@@ -12,7 +12,13 @@ TimeoutStopSec=8
 Type=simple
 User=radxa
 EnvironmentFile=-/etc/default/ippolit-robot
-ExecStart=/bin/bash -c "source /opt/ros/jazzy/setup.bash && exec python3 /home/radxa/ros/lds_scan_node.py --ros-args -p source:=$${ROBOT_ADDR:-192.168.10.1}:9901"
+ExecStart=/bin/bash -c "source /opt/ros/jazzy/setup.bash && exec python3 /home/radxa/ros/lds_scan_node.py --ros-args -p source:=$${ROBOT_ADDR:-192.168.10.1}:9901 -p angle_offset_deg:=-43.0"
+# angle_offset_deg=-43.0 CALIBRATED 2026-07-12: a single isolated object (paper bag) placed at the robot's
+# true front bumper read at bearing=+43deg with the previous default (0.0, i.e. NEVER actually calibrated
+# despite the node's own docstring assuming "~0-5deg"). This is a real, large miscalibration, not the small
+# eyeball-tune originally assumed -- likely explains a lot of confusing edge-follow-side/turn-test behavior
+# earlier the same session. Re-verify with a second isolated-object test if precision matters (single-point
+# calibration).
 Restart=on-failure
 RestartSec=3
 
