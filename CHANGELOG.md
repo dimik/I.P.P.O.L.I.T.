@@ -44,6 +44,30 @@ the Q6A's `robot-usb`/`robot-wifi` aliases, whose key works).
 
 ---
 
+## 2026-07-12 — CRITICAL SAFETY FINDING: AVA's wheel-drop recovery has a speed limit, not unconditional
+
+Ran the simplified constant-speed script (no MiDaS, wheel-drop as the only stop) at maximum velocity (1.0)
+per user request. Wheel-drop fired cleanly and the script hard-stopped correctly (matching the fix) --
+but the robot's MOMENTUM at that speed carried it PAST the point where AVA's own recovery could work at
+all. Wheels lost contact entirely and the robot was left hanging at the edge, unable to self-recover --
+needed a physical rescue by hand.
+
+**This is the key finding: AVA's own wheel-drop recovery, which worked reliably at every lower speed
+tested today (0.4 and below, repeatedly, including oscillation cycles), is NOT unconditionally reliable.**
+It has a speed-dependent limit -- sufficient momentum can overwhelm it before it can act, leaving the
+robot stuck (wheels off the ground) rather than safely backed away. This directly changes the risk picture
+for "rely on AVA's reflex alone" as a design: it is a real, working backstop at moderate speeds, but not a
+guarantee at all speeds.
+
+**Recommendation going forward:** any further supervised edge-testing with reduced/no stop-gates should
+stay at speeds where AVA's recovery has been proven to work (<=0.4, validated repeatedly today), not at
+maximum velocity. This was a one-off max-speed probe specifically requested to see the behavior at the
+extreme -- now answered, and answered as "don't do this again without more caution."
+
+No code changes from this entry -- purely a documented safety finding from live testing.
+
+---
+
 ## 2026-07-12 — q6a_creep_test.py simplified: MiDaS slowing removed entirely, wheel-drop is a real hard stop
 
 After the second "fighting AVA" incident (confirmed live even after fixing the pause-must-command-zero-
