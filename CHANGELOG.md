@@ -44,6 +44,33 @@ the Q6A's `robot-usb`/`robot-wifi` aliases, whose key works).
 
 ---
 
+## 2026-07-12 — CRITICAL FIX: creep-test was fighting AVA's own wheel-drop recovery ("trying to suicide")
+
+Live incident with wheel-drop fully removed: the robot approached the edge, AVA's OWN independent wheel-drop
+detection kicked in and backed it away automatically -- but q6a_creep_test.py kept issuing forward move
+commands every tick regardless of AVA's state, so it immediately pushed the robot toward the edge again the
+moment AVA backed off. This repeated: approach -> AVA saves it -> our script undoes the save -> approach
+again. User's own words: "it was looking like it was hitting the edge and drive back then hitting the edge
+again and drive back again trying to suicide."
+
+**This finally gives us the confirmation the 2026-07-12 log investigation couldn't find: AVA genuinely has
+its own independent wheel-drop detection + automatic backward recovery**, completely outside our software.
+But our script was actively undermining it by refusing to acknowledge AVA had taken protective action.
+
+**Fixed:** q6a_creep_test.py now subscribes to /cliff again and PAUSES its own forward commands (does not
+raise SystemExit, does not end the run) whenever AVA's wheel-drop is active, plus a 2s cooldown after it
+clears, before resuming the MiDaS-ramped approach. This stops us from fighting AVA's recovery without
+reintroducing a hard stop that ends the test outright -- matches the user's exact ask: "we should recognize
+when ava stopped it and do not try to move forward again."
+
+Also (separately, per feedback): raised speeds again (max 0.4, floor 0.15, up from 0.25/0.05) since both
+felt too slow; user wants a real capped reduction, not a near-crawl -- floor should make actual progress
+so AVA's own wheel-drop is what ultimately stops it, not our software running out of ground to cover.
+
+Files: `scripts/companion/q6a_creep_test.py`.
+
+---
+
 ## 2026-07-12 — q6a_creep_test.py: wheel-drop hard stop removed too, per explicit repeated confirmation
 
 Following the ambiguous "stopped at the edge" event (investigated but couldn't confirm AVA vs our software
