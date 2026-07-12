@@ -7,6 +7,25 @@ current active roadmap)**.
 
 ---
 
+## 2026-07-12 — A1 continues: q6a_announce migrated, real-vs-synthetic testing gotcha (G19)
+
+Second node migration: `q6a_announce.py` moved into `ippolit_perception` (better fit than the earlier
+guess of `ippolit_safety` — it narrates detected objects, unrelated to safety) unchanged in logic, wired
+into `perception.launch.xml` / `ippolit-perception.service`. Old standalone `q6a-announce.service` stopped
+and disabled after the new one was verified working.
+
+Verification initially looked broken again (repeated synthetic `/vision/detections` publishes never
+triggered an announcement) — but this time the cause was simpler and specific to this node: `q6a_vision`'s
+real detection stream runs continuously at ~8Hz, and `q6a_announce`'s persistence counter *decays* on
+every message that doesn't contain the target label. Sparse synthetic test injections were getting decayed
+back down by the real (chair-free) frames between injections. Fixed the test, not the node: stopped
+`q6a-vision` for the duration of an isolated test, confirmed "announce: I see a chair" fired and the full
+chain (`q6a_announce` -> `/robot/speak` -> `audio_bridge` -> spoken audio) worked end-to-end, then
+restarted `q6a-vision` normally. Recorded as G19 — a different class of testing pitfall than G18's "just
+wait longer": here the fix was isolating the test from a competing real data source, not patience.
+
+---
+
 ## 2026-07-12 — Phase A1 begins: audio_bridge migrated end-to-end, real production cutover, 3 more gotchas
 
 First node migration of A1 (task #23): `audio_bridge.py` moved into `ippolit_drivers` unchanged in logic,

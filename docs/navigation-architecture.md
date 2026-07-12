@@ -293,7 +293,7 @@ envelope (1.0 fails), MiDaS edge calibration table (65→5 cm), thermal enclosur
 worker. Battery telemetry via `/battery` (Valetudo charging flag broken on this model). IR floor sensors
 conclusively useless for early warning (co-fire with wheel-drop).
 
-## 9. Gotchas (G1–G18) — G1-G12 unchanged from rev 1, G13-G18 found live during A0/A1; MUST READ
+## 9. Gotchas (G1–G19) — G1-G12 unchanged from rev 1, G13-G19 found live during A0/A1; MUST READ
 
 - **G1** Valetudo holds the last velocity — stopping requires actively sending zero; a silent watchdog is
   not a stop.
@@ -371,3 +371,11 @@ conclusively useless for early warning (co-fire with wheel-drop).
   `ros2 <verb>` query) since it's a genuine inconsistency, just not the culprit here. Broader lesson: when
   a live verification seems to fail, check the SIMPLEST explanation (wrong timeout) before reaching for
   DDS-layer theories.
+- **G19** (found in A1, migrating `q6a_announce`) when a node's logic **decays state on the ABSENCE of a
+  condition** (here: `q6a_announce`'s per-label hit counter decrements on every message that doesn't
+  contain the label), a synthetic test message competes against whatever REAL publisher is also live on
+  that topic. `q6a_vision` publishes real detections at ~8Hz continuously; injecting occasional synthetic
+  "chair" messages at a much lower rate just got decayed back down between injections by the real
+  (chair-free) frames, silently preventing the test from ever crossing the persistence threshold. Fix:
+  `sudo systemctl stop <real-publisher>` for the duration of an isolated synthetic test, then restart it
+  — don't assume a competing real data source is idle just because the test doesn't reference it.

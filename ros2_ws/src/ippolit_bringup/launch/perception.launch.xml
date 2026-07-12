@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- perception.launch.xml — stub, scaffolded in A0. Filled in during A1 (wrap existing nodes) /
-     later feature phases per docs/navigation-architecture.md. Intentionally empty for now:
-     colcon build/test only needs this file to be valid+installable, not functional. -->
+<!-- perception.launch.xml - vision + object narration + object map (ippolit-perception systemd
+     group). Being filled in incrementally during A1 - see docs/navigation-architecture.md. -->
 <launch>
+  <node pkg="ippolit_perception" exec="q6a_announce" name="q6a_announce"/>
 </launch>
