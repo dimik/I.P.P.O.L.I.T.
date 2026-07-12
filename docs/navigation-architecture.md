@@ -204,6 +204,13 @@ Each phase = PR-sized, behavior-preserving unless stated, ends with: verify → 
   points, keep old topics/params (env vars still read as fallback). Deploy via new `deploy.sh`; replace
   the 12 units with the 4 group units running launch files. Old `/home/radxa/ros/*.py` copies deleted
   after verification.
+  🔶 IN PROGRESS (2026-07-12). `ippolit_drivers` **✅ DONE**: all 4 foundational nodes migrated and
+  cut over in production — `audio_bridge`, `mcu_node`, `lds_scan_node` (+ `lds_decode` helper),
+  `valetudo_bridge` (first argparse-based node, uses `<node args="...">` not `<param>`). `ippolit_perception`
+  partially done (`q6a_announce` migrated+cut over; `q6a_vision`/`q6a_objmap` still on old standalone
+  units). `ippolit_safety` (`cliff_guard`), `ippolit_localization` (`q6a_laser_odom`, `q6a_map_persist`)
+  not yet started. All 38 tests across 10 packages green (`colcon test-result --all`) — see G20 for the
+  real flake8/pep257 lint debt found and fixed along the way.
   ✅ Full stack up via `ros2 launch ippolit_bringup robot.launch.xml`; same topics/rates as before
   (compare `ros2 topic hz` for `/scan`, `/pose`, `/vision/detections`); reboot test passes; slam lifecycle
   transition handled by launch (bash poller retired).
@@ -293,7 +300,7 @@ envelope (1.0 fails), MiDaS edge calibration table (65→5 cm), thermal enclosur
 worker. Battery telemetry via `/battery` (Valetudo charging flag broken on this model). IR floor sensors
 conclusively useless for early warning (co-fire with wheel-drop).
 
-## 9. Gotchas (G1–G19) — G1-G12 unchanged from rev 1, G13-G19 found live during A0/A1; MUST READ
+## 9. Gotchas (G1–G20) — G1-G12 unchanged from rev 1, G13-G20 found live during A0/A1; MUST READ
 
 - **G1** Valetudo holds the last velocity — stopping requires actively sending zero; a silent watchdog is
   not a stop.
@@ -379,3 +386,22 @@ conclusively useless for early warning (co-fire with wheel-drop).
   (chair-free) frames, silently preventing the test from ever crossing the persistence threshold. Fix:
   `sudo systemctl stop <real-publisher>` for the duration of an isolated synthetic test, then restart it
   — don't assume a competing real data source is idle just because the test doesn't reference it.
+- **G20** (found in A1, migrating `mcu_node`/`lds_scan_node`/`valetudo_bridge`) `colcon test` can surface
+  **genuine, large-scale lint debt**, not just another G16-style XML false alarm — don't assume every
+  `colcon test` failure is a repeat of a known gotcha; read the actual error list first. The first run of
+  `colcon test --python-testing pytest` against the full `ippolit_drivers`/`ippolit_perception` set (never
+  previously run against more than one file at a time) reported 148+14 real `ament_flake8`/`ament_pep257`
+  violations across every driver copied so far, because the pre-ROS `scripts/robot|companion/` originals
+  were never written against ROS's stricter lint config. Categories: line length 99, `flake8-import-order`
+  (**all non-stdlib imports — rclpy, message packages, and even same-package self-imports like `from
+  ippolit_drivers import lds_decode` — sort as ONE alphabetical block, not grouped by origin with blank
+  lines**), `flake8-quotes` (single-quote preference), `flake8-comprehensions`, ambiguous single-letter
+  names, multi-statement one-liners, and — the least obvious — `ament_pep257`'s **D213** convention:
+  a multi-line docstring's summary must start on the *second* line (`"""` alone on its own line), the
+  opposite of this project's established "summary immediately after `"""`" style used everywhere else in
+  the repo (docs, other scripts). Also re-hit a subtler variant of the wrapping trap from G16: a
+  comment-only continuation line must match the indentation of the **following** code line exactly, not
+  just look visually aligned under the code above it, or `pycodestyle` flags E114/E116. Fix for all of
+  this is mechanical (reflow, no logic changes) but real — budget time for it on every future node
+  migration, and better: **write new ROS Python source flake8/pep257-compliant from the start** rather
+  than copying a pre-ROS script verbatim and fixing lint after the fact.
