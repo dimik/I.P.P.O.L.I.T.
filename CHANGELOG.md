@@ -7,6 +7,30 @@ current active roadmap)**.
 
 ---
 
+## 2026-07-12 — Phase A1: q6a_laser_odom + q6a_map_persist migrated into ippolit_localization, cut over
+
+Migrated the last two localization scripts: `q6a_laser_odom.py` (LiDAR scan-matching ICP odometry,
+publishes `/odom_laser` + `odom->base_link` TF) and `q6a_map_persist.py` (slam_toolbox pose-graph
+serialize/deserialize, the G4 near-empty-graph segfault guard). Both written flake8/pep257-compliant
+from the start per G20. `slam_toolbox` itself (the vendor `async_slam_toolbox_node`) deliberately
+stays on its own standalone `q6a-slam-toolbox.service` for now — its lifecycle configure/activate
+dance is a separate concern from this migration's scope (see G3); only updated that unit's `After=`
+line to point at `ippolit-core.service` instead of the now-retired `q6a-laser-odom.service`.
+
+Given `q6a_map_persist`'s known segfault risk (G4: `deserialize_map` on a near-empty pose graph
+crashes `slam_toolbox`), verification was extra careful: checked the current saved pose-graph size
+first (7769B, well under `MIN_RESUME_BYTES`'s 50KB threshold) so the guard would apply unchanged,
+then launched both new nodes standalone with remapped names against the live system, confirmed
+`q6a_map_persist_test` correctly refused to resume the small graph (identical log line to
+production) and a `serialize_map` call succeeded after one `SAVE_PERIOD_S` cycle, before cutting
+over. Old `q6a-laser-odom.service`/`q6a-map-persist.service` stopped+disabled;
+`q6a-slam-toolbox.service` confirmed still `active` (lifecycle state unaffected) after cutover.
+
+`ippolit_localization` is now migrated. Remaining A1 work: the rest of `ippolit_perception`
+(`q6a_vision.py`, `q6a_objmap.py`, still on old standalone units).
+
+---
+
 ## 2026-07-12 — Phase A1: cliff_guard migrated into ippolit_safety, cut over in production; written lint-clean from the start
 
 Migrated `cliff_guard.py` (SAFETY: wheel-drop hard e-stop + MiDaS advisory `/cliff/ahead`) into

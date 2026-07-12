@@ -208,11 +208,12 @@ Each phase = PR-sized, behavior-preserving unless stated, ends with: verify → 
   cut over in production — `audio_bridge`, `mcu_node`, `lds_scan_node` (+ `lds_decode` helper),
   `valetudo_bridge` (first argparse-based node, uses `<node args="...">` not `<param>`). `ippolit_safety`
   **✅ DONE**: `cliff_guard` (wheel-drop hard e-stop + MiDaS `/cliff/ahead` advisory) migrated and cut
-  over, written flake8/pep257-clean from the start per G20's lesson. `ippolit_perception` partially
-  done (`q6a_announce` migrated+cut over; `q6a_vision`/`q6a_objmap` still on old standalone units).
-  `ippolit_localization` (`q6a_laser_odom`, `q6a_map_persist`) not yet started. All 38 tests across
-  10 packages green (`colcon test-result --all`) — see G20 for the real flake8/pep257 lint debt found
-  and fixed along the way.
+  over, written flake8/pep257-clean from the start per G20's lesson. `ippolit_localization` **✅ DONE**:
+  `q6a_laser_odom` + `q6a_map_persist` migrated and cut over (`slam_toolbox` itself deliberately stays
+  on its own standalone `q6a-slam-toolbox.service` for now — see G3). `ippolit_perception` partially
+  done (`q6a_announce` migrated+cut over; `q6a_vision`/`q6a_objmap` still on old standalone units,
+  the only remaining A1 work). All 38 tests across 10 packages green (`colcon test-result --all`) —
+  see G20 for the real flake8/pep257 lint debt found and fixed along the way.
   ✅ Full stack up via `ros2 launch ippolit_bringup robot.launch.xml`; same topics/rates as before
   (compare `ros2 topic hz` for `/scan`, `/pose`, `/vision/detections`); reboot test passes; slam lifecycle
   transition handled by launch (bash poller retired).

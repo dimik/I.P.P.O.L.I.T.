@@ -1,6 +1,8 @@
 [Unit]
 Description=Companion slam_toolbox (async): /scan + odom->base_link -> map->odom TF + /map occupancy grid
-After=network-online.target q6a-laser-odom.service
+# q6a_laser_odom now lives in ippolit-core.service (ippolit_localization pkg) since 2026-07-12's
+# A1 migration -- After= updated accordingly (was q6a-laser-odom.service, since retired).
+After=network-online.target ippolit-core.service
 Wants=network-online.target
 
 [Service]

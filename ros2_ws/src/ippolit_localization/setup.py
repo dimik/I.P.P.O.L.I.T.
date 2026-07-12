@@ -19,6 +19,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
+            'q6a_laser_odom = ippolit_localization.q6a_laser_odom:main',
+            'q6a_map_persist = ippolit_localization.q6a_map_persist:main',
         ],
     },
 )
