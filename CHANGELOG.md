@@ -7,6 +7,34 @@ current active roadmap)**.
 
 ---
 
+## 2026-07-12 — Phase A1: cliff_guard migrated into ippolit_safety, cut over in production; written lint-clean from the start
+
+Migrated `cliff_guard.py` (SAFETY: wheel-drop hard e-stop + MiDaS advisory `/cliff/ahead`) into
+`ippolit_safety`, wired into the new `safety_control.launch.xml` (part of the `ippolit-core`
+systemd group, already included by `core.launch.xml`), and cut over in production. Since this is
+the safety-critical node, verification was extra careful: launched the new node standalone first
+with a remapped node name + remapped `/cliff/ahead` topic against the live system (real `/cliff`,
+`/bumper`, `/vision/floor`, `/scan` subscriptions — read-only, no collision risk), confirmed no
+exceptions over ~18s with real data flowing and the expected startup log/latched initial publish,
+before restarting `ippolit-core` and cutting over from the standalone `q6a-cliff-guard.service`.
+Single clean `/cliff_guard` instance and correct `/cliff/ahead` output confirmed afterward.
+
+Applied G20's lesson directly this time: wrote the migrated file flake8/pep257-compliant from the
+start (99-char lines, single quotes, D213 docstrings, no multi-statement one-liners, non-stdlib
+imports as one alphabetical block) instead of copying the pre-ROS script verbatim and fixing lint
+after the fact. Cost was near-zero — one remaining `colcon test` failure on the first deploy,
+`I101` import-name ordering (`rclpy.qos`'s multi-name import needs `qos_profile_sensor_data` first:
+flake8-import-order sorts names **case-insensitively**, so a lowercase name can sort before
+CamelCase names in the same import — worth remembering for any future multi-name import from
+`rclpy.qos` or similar mixed-case modules). Fixed, and all 38 tests across 10 packages passed
+clean on the very next deploy.
+
+`ippolit_safety` is now migrated. Next per `docs/navigation-architecture.md`'s A1 order:
+`ippolit_localization` (`q6a_laser_odom.py`, `q6a_map_persist.py`), then the rest of
+`ippolit_perception` (`q6a_vision.py`, `q6a_objmap.py`).
+
+---
+
 ## 2026-07-12 — Phase A1 finishes the four foundational drivers: mcu_node, lds_scan_node, valetudo_bridge migrated + cut over; G20 (real lint debt, not another false alarm)
 
 Completed A1's `ippolit_drivers` package: `mcu_node.py`, `lds_scan_node.py` (+ its `lds_decode.py`

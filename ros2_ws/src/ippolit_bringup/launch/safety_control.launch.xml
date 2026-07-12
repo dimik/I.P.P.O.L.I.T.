@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- safety_control.launch.xml — stub, scaffolded in A0. Filled in during A1 (wrap existing nodes) /
-     later feature phases per docs/navigation-architecture.md. Intentionally empty for now:
-     colcon build/test only needs this file to be valid+installable, not functional. -->
+<!-- safety_control.launch.xml — safety-critical nodes (ippolit-core systemd group). -->
 <launch>
+  <node pkg="ippolit_safety" exec="cliff_guard" name="cliff_guard">
+    <!-- ROBOT_ADDR env var read as a fallback default inside cliff_guard.py itself; no ROS
+         param override needed here since the estop PUT target rarely changes per-deployment. -->
+  </node>
 </launch>
