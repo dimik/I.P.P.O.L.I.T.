@@ -2,7 +2,40 @@
 
 Human-readable record of what changed and why. Newest first. Driving docs:
 `docs/q6a-pipeline-improvement-plan.md` (the plan), `docs/q6a-pipeline-review-findings.md` (the Fable-5 review
-it derives from).
+it derives from), **`docs/navigation-architecture.md` (the navigation/mapping/stairwell/viz plan — the
+current active roadmap)**.
+
+---
+
+## 2026-07-12 — Navigation architecture plan: docs/navigation-architecture.md
+
+Full review of the current state + a phased, step-by-step architecture doc for the next stage: room
+navigation (Nav2), full-room mapping with objects, proper stairwell handling, and live visualization —
+written to be executable incrementally by a simpler model.
+
+**Key architectural decisions recorded there:**
+- **Single actuation node** (`q6a_cmd_vel_bridge`, new): geometry_msgs/Twist on `/cmd_vel` → Valetudo
+  manual-control REST, with the MAX_SAFE_VEL=0.4 clamp, explicit-zero watchdog (Valetudo holds the last
+  velocity), and enable/disable ownership. The ONLY AVA touchpoint; everything upstream is standard ROS.
+- **twist_mux** for command arbitration (safety > teleop > nav) — eliminates by construction the
+  REST-race "fighting" class of bug that burned a day of live testing.
+- **Stairwell = Nav2 costmap filters**, per the user's "caution zone, not no-go" direction: a small
+  lethal KeepoutFilter over the physical hole + rim, a broader SpeedFilter caution zone around it, PLUS a
+  dynamic `q6a_cliff_scan` virtual-obstacle node (MiDaS drop → synthetic LaserScan → local costmap) and
+  the existing reactive layers (wheel_floating pause, wheel-drop e-stop, AVA recovery at ≤0.4). Four
+  independent layers; the map annotation is authored, not sensed, because a 2-D LiDAR sees the hole as
+  free space.
+- **Foxglove (foxglove_bridge websocket) over RViz** for visualization — the deliberate
+  ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST setting makes off-board RViz a non-starter without DDS surgery;
+  a single on-board websocket sidesteps it entirely and adds teleop/map/3D panels.
+- Phases 0-7 with per-step verification gates, plus a "gotchas" section (G1-G12) capturing every landmine
+  learned in the recent sessions (Valetudo velocity-hold, DDS discovery latency, lifecycle nodes, the
+  deserialize segfault, rclpy shutdown limits, the load-bearing fanoff gate, pkill self-match, wheel-odom
+  pivot slip, MiDaS blind zone, placement variance, REST schemas).
+
+**Verified while writing it**: nav2-bringup/costmap-2d/map-server are already installed on the Q6A;
+twist-mux and foxglove-bridge are not (install steps included); env file confirms CycloneDDS +
+localhost-only discovery.
 
 ---
 
