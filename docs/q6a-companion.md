@@ -31,9 +31,16 @@ Robot (Dreame D10s Pro) was OFFLINE this whole session — no live robot tests d
 - **The Genie daemon's `"poll": true` busy-spun ~2.5 CPU cores 24/7** (HTP polling), pinning idle to ~90 °C
   → this pre-heated the board into a **110 °C thermal shutdown** during a GPU test. Root cause was the
   daemon, NOT cooling. **Fixed with `"poll": false`** (idle 247%→~5% CPU, ~90 °C→~66 °C, same latency).
-- **True thermal envelope (daemon fixed):** idle ~66 °C; sustained NPU 1B load peaks ~80 °C (10 °C under
-  the 90 °C hot-trip, 30 °C under 110 °C critical). NPU is the coolest/most-efficient path.
+- **True thermal envelope (daemon fixed, PRE-enclosure):** idle ~66 °C; sustained NPU 1B load peaks ~80 °C
+  (10 °C under the 90 °C hot-trip, 30 °C under 110 °C critical). NPU is the coolest/most-efficient path.
 - Passive cooling only (no fan); sustained GPU/CPU 3B compute WILL thermal-shut-down — needs active cooling.
+- **Thermal enclosure installed 2026-07-12 — big improvement.** Steady-state reading with the FULL active
+  autonomy stack running simultaneously (q6a-vision YOLO+MiDaS ~55% CPU, slam_toolbox, laser-odom, objmap,
+  cliff-guard, announce, valetudo-bridge, mcu-node, lds-scan-node, audio-bridge — all 11 services active,
+  9 min uptime): CPU cores 55-58 °C, GPU/NPU 50-52 °C, overall range 47-58 °C. That's COOLER than the old
+  PRE-enclosure idle baseline (66 °C) while under active full-stack load — roughly 8-15 °C headroom gained
+  vs the old idle point, 20 °C+ vs the old active-load point. Substantially more thermal margin now before
+  the 90 °C hot-trip. LLM section above (retired, kept as reference) predates the enclosure.
 
 ## 4. ROS 2
 - **ROS 2 Jazzy installed** on the Q6A (`ros-base` + Nav2), via `scripts/companion/install_ros2.sh`

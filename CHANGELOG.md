@@ -44,6 +44,25 @@ the Q6A's `robot-usb`/`robot-wifi` aliases, whose key works).
 
 ---
 
+## 2026-07-12 — Thermal enclosure installed: significant cooling improvement confirmed
+
+User installed a thermal enclosure on the Q6A. Measured steady-state (9 min uptime, full active autonomy
+stack confirmed running: q6a-vision YOLO+MiDaS ~55% CPU, slam_toolbox, laser-odom, objmap, cliff-guard,
+announce, valetudo-bridge, mcu-node, lds-scan-node, audio-bridge -- all 11 companion services active)
+against the documented pre-enclosure baseline (idle ~66C, active GPU+NPU ~72-80C, hot-trip 90C):
+
+- CPU cores (cpu1-11, cpuss0/1): 55-58C
+- GPU/NPU (gpuss, nspss): 50-52C
+- Overall range: 47-58C
+
+**Running the full active stack now sits cooler than the old baseline's IDLE temperature** -- ~8-15C
+headroom gained vs the old idle point, 20C+ vs the old active-load point. Substantially more thermal
+margin before the 90C hot-trip / 110C critical shutdown.
+
+Files: `docs/q6a-companion.md` (thermal envelope section updated).
+
+---
+
 ## 2026-07-12 — SAFETY FIX: edge-follow clearance model was off by ~4.4cm (calibrated against real measurement)
 
 First successful closed-loop validation of the LiDAR edge-follow controller (STEER_SIGN=-1, KP=55, KD=0.30,
