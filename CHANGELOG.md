@@ -7,6 +7,34 @@ current active roadmap)**.
 
 ---
 
+## 2026-07-13 — F0 fully DONE: camera FOV/yaw calibrated with a tape measure (G26)
+
+F0(b), the last open item of F0, is done: camera bearing/FOV calibration against a known object.
+
+**First attempt failed sanity-check:** placed a chair "about 1m away" then "about 1m to the left"
+(paced, not measured) and solved the code's linear bearing model for those two points -- implied a
+**167° horizontal FOV**, obviously wrong for this lens. Recognized this as garbage-in rather than
+deploying it.
+
+**Redone properly:** chair at exactly 1.00m dead-ahead (tape-measured), then 1.00m forward + 0.30m
+left (tape-measured; true bearing = atan2(0.30,1.00) = 16.7°), 3 detection reads averaged at each
+position to smooth single-frame jitter. Solved cleanly: `cam_hfov_deg=116.7` (reassuringly close to
+the code's prior 110° spec-based guess -- confirms the FIX, not the underlying model, was the
+problem with the first attempt) and `cam_yaw_deg=1.8` (near enough to zero to treat as negligible
+camera misalignment). Deployed to `q6a_objmap.yaml`, rebuilt (9/9 `colcon test` green), restarted
+`ippolit-perception`, confirmed live in the startup log (`HFOV=117deg`).
+
+Recorded as **G26**, including the caveat that this calibration is only verified over a ±17° bearing
+range from center -- wider bearings (toward the edges of that 116.7° FOV) are extrapolated, not
+independently verified.
+
+With this, **F0 is fully done**: (a) real map-resume (done last entry, found+fixed G25's crash) and
+(b) camera calibration (this entry) are both closed. Remaining open item from that work: `/map` still
+has two competing publishers (`slam_toolbox` + `valetudo_bridge`) -- needs a fix before F4's Nav2
+bringup, tracked in G25.
+
+---
+
 ## 2026-07-13 — F0(a) map-resume test passes; found + fixed a real q6a_map_persist crash (G25)
 
 F0(a)'s acceptance test ("drive, build a real pose graph, restart slam+persist, confirm resume with

@@ -1,7 +1,13 @@
 q6a_objmap:
   ros__parameters:
-    cam_hfov_deg: 110.0
-    cam_yaw_deg: 0.0
+    # CALIBRATED (2026-07-13, F0(b), see G26): a chair tape-measured at 1.00m dead-ahead (bbox
+    # xc~346/672, near-zero offset) and 1.00m fwd + 0.30m left (bbox xc~250/672, true bearing
+    # atan2(0.30,1.00)=16.7deg) solved exactly for this linear offset*hfov+yaw model:
+    # hfov=116.7deg (close to the prior 110deg guess -- good sanity check), yaw=1.8deg (near
+    # enough to zero to ignore, camera is not meaningfully rotated vs base_link forward). Only
+    # calibrated over a +/-17deg range -- see G26 for the caveat on trusting wider bearings.
+    cam_hfov_deg: 116.7
+    cam_yaw_deg: 1.8
     bear_sign: -1.0
     img_width: 672
     merge_dist_m: 0.5

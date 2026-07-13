@@ -282,19 +282,24 @@ A2 (param-driven nav tuning) and ideally A3/A4.
   restart slam+persist, confirm resumed map and NO segfault (G4 — if a real graph also crashes, STOP and
   rework persistence before anything downstream). (b) Camera bearing/FOV calibration against a known
   object → values recorded for A4's URDF.
-  🔶 IN PROGRESS (2026-07-13). **(a) DONE, unexpectedly** — no dedicated coverage drive ever
-  happened; instead, the many small calibration test-drive segments from the first session (G24)
-  cumulatively built a real, substantial pose graph (4091450B — nowhere near the "trivial empty
-  graph" crash scenario G4 warned about) without anyone intending it as a mapping drive. A Q6A
-  power-cycle between sessions then restarted `slam_toolbox` fresh (its own standalone
-  `q6a-slam-toolbox.service`, independent of `ippolit-core`), which forced the very first genuine
-  cold resume attempt against that file. Result: found + fixed a real crash (G25 — `q6a_map_persist`
-  had been silently dead for ~9.5h after crashing on the first real `deserialize_map` response), then
-  re-verified live: resumed map is 420x428 cells @ 0.05m (~21m x 21m), `slam_toolbox` stayed in
-  `active` lifecycle state throughout, no segfault. **(b) still NOT done** — camera bearing/FOV
-  calibration against a known object needs a dedicated setup (object at a measured distance/angle)
-  that hasn't happened yet. Also surfaced a real, separate finding needing its own fix before F4:
-  `/map` has two publishers (`slam_toolbox` + `valetudo_bridge`) — see G25's last paragraph.
+  ✅ DONE (2026-07-13). **(a):** no dedicated coverage drive ever happened; instead, the many small
+  calibration test-drive segments from the first session (G24) cumulatively built a real, substantial
+  pose graph (4091450B — nowhere near the "trivial empty graph" crash scenario G4 warned about)
+  without anyone intending it as a mapping drive. A Q6A power-cycle between sessions then restarted
+  `slam_toolbox` fresh (its own standalone `q6a-slam-toolbox.service`, independent of `ippolit-core`),
+  which forced the very first genuine cold resume attempt against that file. Result: found + fixed a
+  real crash (G25 — `q6a_map_persist` had been silently dead for ~9.5h after crashing on the first
+  real `deserialize_map` response), then re-verified live: resumed map is 420x428 cells @ 0.05m
+  (~21m x 21m), `slam_toolbox` stayed in `active` lifecycle state throughout, no segfault.
+  **(b):** first attempt (paced/eyeballed chair placement) produced a physically implausible 167°
+  implied FOV — redone properly with a tape measure (chair at exactly 1.00m dead-ahead, then 1.00m
+  fwd + 0.30m left) and averaged detection reads at each position; solved cleanly to `cam_hfov_deg=
+  116.7` (close to the prior 110° spec guess) and `cam_yaw_deg=1.8` (negligible). Deployed to
+  `q6a_objmap.yaml`, rebuilt (9/9 `colcon test` green), restarted `ippolit-perception`, confirmed live
+  in the startup log (`HFOV=117deg`). See G26 for the full story and its caveat (only verified over a
+  ±17° bearing range — treat wider bearings as extrapolated). Also surfaced a real, separate finding
+  needing its own fix before F4: `/map` has two publishers (`slam_toolbox` + `valetudo_bridge`) — see
+  G25's last paragraph.
 - **F1 — actuation layer** (`ippolit_control`): `cmd_vel_bridge` per §2.3 (clamp, explicit-zero watchdog
   G1, persistent ~6.6 Hz sender G-rate, enable/disable ownership; reverse unsupported until calibrated),
   Twist mapping calibrated against `/odom_laser` (G8), `twist_mux` config, cliff_guard ported to
@@ -399,7 +404,7 @@ envelope (1.0 fails), MiDaS edge calibration table (65→5 cm), thermal enclosur
 worker. Battery telemetry via `/battery` (Valetudo charging flag broken on this model). IR floor sensors
 conclusively useless for early warning (co-fire with wheel-drop).
 
-## 9. Gotchas (G1–G25) — G1-G12 unchanged from rev 1, G13-G25 found live during A0/A1/F1/A5/F0; MUST READ
+## 9. Gotchas (G1–G26) — G1-G12 unchanged from rev 1, G13-G26 found live during A0/A1/F1/A5/F0; MUST READ
 
 - **G1** Valetudo holds the last velocity — stopping requires actively sending zero; a silent watchdog is
   not a stop.
@@ -621,6 +626,23 @@ conclusively useless for early warning (co-fire with wheel-drop).
   could silently flip between the two independent sources. Needs a remap (e.g. `slam_toolbox`'s own
   map onto a distinct topic, or retiring `valetudo_bridge`'s `/map` publisher now that `slam_toolbox`
   is the real map source) before F4's Nav2 bringup, which will consume `/map` directly.
+- **G26** (found live, F0(b)'s camera calibration, 2026-07-13) an eyeballed/paced two-point bearing
+  calibration produced a physically implausible result — placing a chair "about 1m away" then "about
+  1m to the left" and solving the code's linear `bearing = bear_sign*offset_frac*hfov + cam_yaw` model
+  for those two points implied a **167° horizontal FOV**, wildly unrealistic for this non-fisheye
+  lens. Root cause: imprecise placement (paced by eye, not measured) compounds badly at large bearing
+  angles in this linear model. Redone properly with a tape measure: chair at exactly 1.00m dead-ahead,
+  then 1.00m forward + 0.30m left (true bearing = atan2(0.30, 1.00) = 16.7°, using 3 consecutive
+  detection reads averaged at each position to smooth single-frame jitter) — this solved cleanly to
+  **HFOV=116.7°** (reassuringly close to the code's prior 110° spec-based guess — a good sanity check
+  that the fix, not the model, was the problem) and **cam_yaw=1.8°** (near enough to zero to treat as
+  negligible camera misalignment). Lesson: for any bearing/FOV calibration using this linear
+  pixel-offset model, use a tape measure and keep the calibration offset SMALL (here, ±17°) — large
+  paced-off angles amplify placement error nonlinearly and can produce a nonsensical fit that LOOKS
+  like real data (two clean numbers in, two clean numbers out) but is actually garbage-in-garbage-out.
+  **Caveat carried forward**: this calibration is only verified over a ±17° bearing range from
+  center; trust it there, treat wider bearings (near the edges of the 116.7° FOV) as extrapolated,
+  not verified — a similar small-angle-only caveat to G8's rotation-odometry gotcha.
 
 **Deferred-physical-test pattern (established during F0/F1, 2026-07-13):** when a phase's next
 step requires physically driving the robot or aiming its camera and the user isn't set up to

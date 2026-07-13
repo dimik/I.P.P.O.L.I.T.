@@ -13,9 +13,12 @@ persistent objects (same class within merge_dist_m are merged, position running-
 publish /object_map (ippolit_interfaces/MappedObjectArray, typed per A3) + /object_markers
 (RViz MarkerArray).
 
-CALIBRATION (do during the first drive): the camera H-FOV (cam_hfov_deg), any camera-yaw offset
-(cam_yaw_deg), and the bearing sign are estimates — tune against RViz (object markers vs the real
-room). Room-tagging (which Valetudo segment each object is in) is a TODO refinement.
+CALIBRATION (done 2026-07-13, F0(b), see G26): cam_hfov_deg/cam_yaw_deg were solved from two
+tape-measured chair positions (dead-ahead, and 0.30m left at the same 1.00m forward distance) —
+see q6a_objmap.yaml's comment for the numbers. Only calibrated over a +/-17deg bearing range;
+treat wider bearings as extrapolated, not verified (G26). bear_sign was already correct (matched
+the expected left/right convention without adjustment). Room-tagging (which Valetudo segment
+each object is in) is a TODO refinement.
 
 DISK PERSISTENCE (added 2026-07-12): until this, the object list lived only in memory -- a node
 restart or reboot lost everything, forcing a full re-drive to rebuild it. Now loads the objmap_file
@@ -80,14 +83,18 @@ class ObjMap(Node):
     def __init__(self):
         super().__init__('q6a_objmap')
         self.declare_parameter(
-            'cam_hfov_deg', 110.0,
+            'cam_hfov_deg', 116.7,
             ParameterDescriptor(
-                description='OV8856 horizontal FOV estimate (deg); tune against RViz.',
+                description=(
+                    'OV8856 horizontal FOV, calibrated (G26) from two tape-measured chair '
+                    'positions within a +/-17deg bearing range -- see q6a_objmap.yaml.'),
                 floating_point_range=[FloatingPointRange(from_value=30.0, to_value=170.0)]))
         self.declare_parameter(
-            'cam_yaw_deg', 0.0,
+            'cam_yaw_deg', 1.8,
             ParameterDescriptor(
-                description='Camera yaw offset vs base_link forward (deg).',
+                description=(
+                    'Camera yaw offset vs base_link forward (deg), calibrated (G26) alongside '
+                    'cam_hfov_deg -- see q6a_objmap.yaml.'),
                 floating_point_range=[FloatingPointRange(from_value=-180.0, to_value=180.0)]))
         self.declare_parameter(
             'bear_sign', -1.0,
