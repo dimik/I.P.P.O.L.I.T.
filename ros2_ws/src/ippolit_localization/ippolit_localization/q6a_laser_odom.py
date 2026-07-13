@@ -97,6 +97,14 @@ class LaserOdom(Node):
         self.declare_parameter(
             'base_frame', 'base_link', ParameterDescriptor(description='Robot base frame_id.'))
         self.declare_parameter(
+            'publish_tf', True,
+            ParameterDescriptor(
+                description=(
+                    'Broadcast the odom->base_link TF. Set FALSE when the robot_localization EKF '
+                    'owns that TF (wheel+IMU fusion) -- this node then only publishes /odom_laser '
+                    'as a scan-matched reference, and does NOT fight the EKF for base_link (a '
+                    'two-parents TF bug, cf. G27).')))
+        self.declare_parameter(
             'odom_topic', '/odom_laser',
             ParameterDescriptor(description='Topic to publish nav_msgs/Odometry on.'))
         self.declare_parameter(
@@ -137,6 +145,7 @@ class LaserOdom(Node):
 
         self.odom_frame = self.get_parameter('odom_frame').value
         self.base_frame = self.get_parameter('base_frame').value
+        self.publish_tf = self.get_parameter('publish_tf').value
         self.odom_topic = self.get_parameter('odom_topic').value
         self.icp_iters = self.get_parameter('icp_iters').value
         self.icp_max_corr = self.get_parameter('icp_max_corr').value
@@ -151,7 +160,7 @@ class LaserOdom(Node):
         self.x = self.y = self.th = 0.0  # pose in odom
         self.n = 0
         self.rej = 0
-        self.tfb = TransformBroadcaster(self)
+        self.tfb = TransformBroadcaster(self) if self.publish_tf else None
         self.pub = self.create_publisher(Odometry, self.odom_topic, 20)
         # base_link->laser is now owned by robot_state_publisher from the URDF (A4) — not here.
         self.create_subscription(LaserScan, '/scan', self.on_scan, qos_profile_sensor_data)
@@ -159,11 +168,13 @@ class LaserOdom(Node):
         # the scan stamp). slam_toolbox's tf2 message-filter looks up the transform at each
         # scan's timestamp; a 5 Hz scan-stamped TF races the scans and its filter queue fills
         # ("dropping ... queue is full"). A ~30 Hz always-fresh TF keeps the lookup satisfiable
-        # so slam actually processes scans.
-        self.create_timer(1.0 / 30.0, self.broadcast_tf)
+        # so slam actually processes scans. Skipped entirely when the EKF owns the TF (publish_tf).
+        if self.publish_tf:
+            self.create_timer(1.0 / 30.0, self.broadcast_tf)
+        tf_note = f'+ {self.odom_frame}->{self.base_frame} TF' if self.publish_tf \
+            else '(TF owned by EKF)'
         self.get_logger().info(
-            f'q6a_laser_odom up: /scan -> ICP -> {self.odom_topic} + '
-            f'{self.odom_frame}->{self.base_frame} TF '
+            f'q6a_laser_odom up: /scan -> ICP -> {self.odom_topic} {tf_note} '
             f'(needs the turret spinning, i.e. manual_control active)')
 
     def on_scan(self, msg):

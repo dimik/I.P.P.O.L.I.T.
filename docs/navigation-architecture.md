@@ -421,7 +421,7 @@ envelope (1.0 fails), MiDaS edge calibration table (65→5 cm), thermal enclosur
 worker. Battery telemetry via `/battery` (Valetudo charging flag broken on this model). IR floor sensors
 conclusively useless for early warning (co-fire with wheel-drop).
 
-## 9. Gotchas (G1–G27) — G1-G12 unchanged from rev 1, G13-G27 found live during A0/A1/F1/A5/F0; MUST READ
+## 9. Gotchas (G1–G29) — G1-G12 unchanged from rev 1, G13-G29 found live during A0/A1/F1/A5/F0; MUST READ
 
 - **G1** Valetudo holds the last velocity — stopping requires actively sending zero; a silent watchdog is
   not a stop.
@@ -659,6 +659,33 @@ conclusively useless for early warning (co-fire with wheel-drop).
   collision waiting to bite, and won't announce itself (no error, no crash; tf2 just silently picks
   a parent per-lookup). Grep every publisher of a shared topic/frame after standing up its
   replacement.
+- **G28** (found live, standing up the robot_localization EKF, 2026-07-13) `robot_localization`'s
+  `<sensor>_differential: true` mode OVER-REPORTED translation ~2x for our single wheel-odom source.
+  Differential mode differentiates a source's absolute pose into incremental motion — it exists to
+  reconcile MULTIPLE absolute-pose sources (e.g. wheel odom + GPS) without them fighting, NOT to
+  "avoid trusting absolute drift" on a lone odom source (which is what I mistakenly reached for). On
+  a lone source it mis-integrated: a commanded ~0.22 m drive read as 0.55 m on `/odometry/filtered`
+  while the raw `/odom/wheel` (and ground-truth expectation from G24) said ~0.22 m. Fix: fuse the
+  wheel odom as ABSOLUTE pose (`differential: false`) — the EKF's odom frame then simply aligns with
+  the wheel odom's frame and tracks it 1:1 (verified: EKF 0.219 m vs wheel 0.218 m). Lesson: for a
+  single odometry source feeding the odom-frame EKF, fuse it absolutely (or fuse its velocities);
+  reserve differential mode for genuinely redundant absolute-pose inputs. Always sanity-check the
+  EKF output displacement against the raw source and a physical expectation before trusting it.
+- **G29** (found live during the EKF drive-test, 2026-07-13) — **the robot does not drive
+  consistently under manual control**, far beyond the mild heading drift G24 noted. Identical
+  `/cmd_vel_teleop` forward commands (linear.x=0.15, ZERO angular, ~4-5 s) produced wildly different
+  real motions across consecutive runs: ~0.22 m straight; then ~0.31 m; then one run went ~0.22 m
+  forward, spontaneously turned ~75° CCW, and drove on; then ~0.14 m nearly straight (+0.5° yaw).
+  Crucially this is an ACTUATION problem, NOT an odometry one: the EKF faithfully tracked each actual
+  path (the 75°-turn run's straight-line displacement matched the geometric chord of the L-path;
+  the straight run read +0.5° yaw) — odometry is trustworthy, the robot's *motion* is not. Root cause
+  unknown (candidates: Valetudo manual-control's own heading/behavior logic reacting unpredictably to
+  our ~6.6 Hz command stream; the uncalibrated nonlinear cmd→motion mapping from G24; a weak/dragging
+  wheel; surface interaction; or AVA safety reflexes firing mid-drive). **Implication: open-loop
+  teleop dead-reckoning is not viable for a controlled mapping drive — F3/F4 need either closed-loop
+  heading control (a controller that corrects heading using the now-trustworthy EKF/IMU yaw) or root
+  cause of the erratic actuation found first.** This is the next real problem to solve for autonomy;
+  it does not undermine the odometry/mapping stack, which works.
 - **G26** (found live, F0(b)'s camera calibration, 2026-07-13) an eyeballed/paced two-point bearing
   calibration produced a physically implausible result — placing a chair "about 1m away" then "about
   1m to the left" and solving the code's linear `bearing = bear_sign*offset_frac*hfov + cam_yaw` model

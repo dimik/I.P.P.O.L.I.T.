@@ -126,6 +126,14 @@ MAGIC = 0x0031534444530001
 DEG2RAD = math.pi / 180.0
 G = 9.80665
 
+# Measurement covariances for the robot_localization EKF (A4-followup). Non-zero is mandatory --
+# RL cannot fuse a zero-covariance measurement. Values are deliberate relative weights, not a
+# rigorous noise characterization: the gyro yaw rate is trusted (small var), wheel translation is
+# fairly trusted, wheel yaw is loose (slip during pivots, G8). Tune against a drive comparison.
+_IMU_GYRO_VAR = 4.0e-4     # (rad/s)^2 on each gyro axis
+_ODOM_XY_VAR = 2.0e-3      # (m)^2 on wheel x/y position
+_ODOM_YAW_VAR = 5.0e-2     # (rad)^2 on wheel yaw (loose -- IMU carries rotation)
+
 
 def crc16(data):
     """Modbus-16 (reflected, poly 0xA001) — matches dreame_mcu_protocol CRC_GetModbus16."""
@@ -499,6 +507,12 @@ class McuNode(Node):
             m.angular_velocity.x = (gyro[0] - self.bias[0]) * DEG2RAD
             m.angular_velocity.y = (gyro[1] - self.bias[1]) * DEG2RAD
             m.angular_velocity.z = (gyro[2] - self.bias[2]) * DEG2RAD
+            # small yaw-rate covariance: the gyro is our TRUSTED rotation source (wheels lie during
+            # pivots, G8), so the EKF should weight this heavily. Non-zero is also required -- RL
+            # can't fuse a zero-covariance measurement (A4-followup EKF).
+            m.angular_velocity_covariance[0] = _IMU_GYRO_VAR
+            m.angular_velocity_covariance[4] = _IMU_GYRO_VAR
+            m.angular_velocity_covariance[8] = _IMU_GYRO_VAR
             m.linear_acceleration.x = acc[0] * G
             m.linear_acceleration.y = acc[1] * G
             m.linear_acceleration.z = acc[2] * G
@@ -514,6 +528,13 @@ class McuNode(Node):
             th = math.radians(yaw / 100.0)
             o.pose.pose.orientation.z = math.sin(th / 2.0)
             o.pose.pose.orientation.w = math.cos(th / 2.0)
+            # pose covariance for the EKF (A4-followup): non-zero is required for RL to fuse, and
+            # these are the deltas it uses in differential mode. x/y translation is well-tracked by
+            # wheel dead-reckoning; yaw is looser (wheel slip during pivots, G8 -- the IMU carries
+            # rotation). two_d_mode ignores z/roll/pitch so they're left at 0.
+            o.pose.covariance[0] = _ODOM_XY_VAR           # x
+            o.pose.covariance[7] = _ODOM_XY_VAR           # y
+            o.pose.covariance[35] = _ODOM_YAW_VAR         # yaw
             self.pub_odom.publish(o)
             self.pub_edge_dist.publish(Float32(data=edge / 1000.0))  # edgeDis mm->m; meaning TBD
             self.pub_status20_extra.publish(String(data=json.dumps(

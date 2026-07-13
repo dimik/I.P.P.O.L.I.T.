@@ -1,10 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- localization.launch.xml — laser-ICP odometry + slam_toolbox map persistence (ippolit-core
-     systemd group). slam_toolbox itself (the vendor package's async_slam_toolbox_node) is NOT
-     launched here; it stays on its own standalone q6a-slam-toolbox.service for now, since its
-     lifecycle configure/activate dance is a separate concern from this migration's scope (see
-     docs/navigation-architecture.md's G3 and the A1 phase notes). -->
+<!-- localization.launch.xml — EKF odometry (wheel+IMU fusion) + laser-ICP reference + slam_toolbox
+     map persistence (ippolit-core systemd group). slam_toolbox itself (the vendor package's
+     async_slam_toolbox_node) is NOT launched here; it stays on its own standalone
+     q6a-slam-toolbox.service for now, since its lifecycle configure/activate dance is a separate
+     concern from this migration's scope (see docs/navigation-architecture.md's G3, A1 notes).
+
+     Odometry ownership (A4-followup): the robot_localization EKF owns odom->base_link, fusing
+     /odom/wheel + /imu/data. q6a_laser_odom still runs (publishing /odom_laser as a scan-matched
+     reference) but with publish_tf=false, so it does NOT fight the EKF for base_link (that would
+     be the two-parents TF bug, G27). slam_toolbox provides map->odom on top. -->
 <launch>
+  <node pkg="robot_localization" exec="ekf_node" name="ekf_filter_node">
+    <param from="$(find-pkg-share ippolit_bringup)/config/ekf.yaml"/>
+  </node>
   <node pkg="ippolit_localization" exec="q6a_laser_odom" name="q6a_laser_odom">
     <param from="$(find-pkg-share ippolit_bringup)/config/q6a_laser_odom.yaml"/>
   </node>

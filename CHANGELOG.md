@@ -7,6 +7,52 @@ current active roadmap)**.
 
 ---
 
+## 2026-07-13 — EKF wheel+IMU odometry (robot_localization); exposed erratic driving (G28, G29)
+
+Stood up a `robot_localization` EKF fusing `/odom/wheel` + `/imu/data` into a smooth
+`odom->base_link`, replacing `q6a_laser_odom`'s scan-matching as the odom-frame source. Motivated by
+the earlier question "should we use AVA/Valetudo wheel odometry?": Valetudo exposes none (only a
+SLAM pose, frozen during manual_control), but AVA's MCU wheel odometry was already decoded and live
+on `/odom/wheel` at 50 Hz (unused), and `/imu/data` (gyro) at 90 Hz. The big win: wheel+IMU odom
+works WITHOUT the LiDAR, so it stays valid during manual_control when the fanoff gate parks the
+turret and scan-matching goes blind.
+
+Changes:
+- Added `imu_link` to the URDF (EKF needs the IMU frame in TF; identity offset is correct for 2D
+  yaw-rate fusion).
+- `mcu_node` now populates measurement covariances on `/odom/wheel` (pose) and `/imu/data`
+  (angular velocity) — mandatory for RL, which can't fuse zero-covariance messages.
+- New `ekf.yaml` (two_d_mode, world=odom, fuse wheel x/y/yaw + IMU yaw-rate) + `ekf_node` wired into
+  `localization.launch.xml`.
+- `q6a_laser_odom` gains a `publish_tf` param, set false: it still publishes `/odom_laser` as a
+  scan-matched reference but no longer broadcasts `odom->base_link` (the EKF owns it — avoids the
+  two-parents-for-base_link bug, G27).
+
+**Verified live:** EKF up, `/odometry/filtered` @ 30 Hz, sole `odom->base_link` publisher (laser_odom
+off `/tf`), both inputs subscribed, no measurement-rejection/transform warnings. After fixing G28
+(see below), EKF translation matches raw wheel odom exactly (0.219 m vs 0.218 m on a test drive).
+
+**G28 — differential-mode over-report:** first config used `odom0_differential: true` and
+over-reported translation ~2x (0.55 m for a ~0.22 m drive). Differential mode is for reconciling
+multiple absolute-pose sources, not a lone wheel source; fusing absolutely (`differential: false`)
+fixed it. Recorded as G28.
+
+**G29 — the robot drives erratically (the real finding):** during the drive-tests, identical
+zero-angular forward commands produced wildly inconsistent real motion run-to-run — 0.22 m straight,
+then 0.31 m, then one run went forward + spontaneously turned ~75° CCW, then 0.14 m nearly straight.
+This is an ACTUATION problem, not odometry: the EKF faithfully tracked each actual path (the
+75°-turn run's chord matched; the straight run read +0.5° yaw). So the odometry/mapping stack is
+trustworthy; the robot's *motion* under open-loop manual control is not. Recorded as G29. Implication:
+F3/F4 need closed-loop heading control (now feasible — EKF/IMU yaw is trustworthy) or the erratic
+actuation root-caused first. IMU vs wheel yaw agreed exactly on every turn, suggesting the Dreame
+MCU may already gyro-fuse its yaw internally — our IMU fusion is then confirmatory/robustness
+insurance rather than a big immediate gain, but harmless and the correct extensible architecture.
+
+Left deployed (EKF owns odom). Not yet validated: slam_toolbox building a map on top of the EKF odom
+during a real turret-on mapping drive (interfaces are correct; needs F3).
+
+---
+
 ## 2026-07-13 — Fix /map double-publisher: trim valetudo_bridge to status+battery (G27)
 
 Fixing the `/map` double-publisher flagged in the last A4 work turned up a bigger root cause:

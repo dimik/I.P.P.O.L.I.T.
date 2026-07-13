@@ -80,4 +80,16 @@
     <origin xyz="${camera_x} ${camera_y} ${camera_z}" rpy="0 0 ${camera_yaw}"/>
   </joint>
 
+  <!-- BMI055 IMU (on the MCU board). The EKF (robot_localization, wheel+IMU fusion) needs this
+       frame in TF. Exact mount offset is unmeasured, but for the 2D yaw-rate fusion we actually
+       use it doesn't matter: angular velocity is identical everywhere on a rigid body, so an
+       identity offset is correct for our purposes. Axes are assumed base_link-aligned (mcu_node
+       already treats the gyro z as yaw rate); revisit if RViz shows a rotation mismatch. -->
+  <link name="imu_link"/>
+  <joint name="imu_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="imu_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
 </robot>

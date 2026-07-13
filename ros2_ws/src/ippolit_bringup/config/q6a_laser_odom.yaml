@@ -3,6 +3,9 @@ q6a_laser_odom:
     odom_frame: odom
     base_frame: base_link
     # laser_frame removed (A4): base_link->laser is now owned by robot_state_publisher from the URDF
+    # publish_tf false (A4-followup): the robot_localization EKF owns odom->base_link now; this node
+    # only publishes /odom_laser as a scan-matched reference (avoids two-parents-for-base_link, G27).
+    publish_tf: false
     odom_topic: /odom_laser
     icp_iters: 14
     icp_max_corr: 0.35

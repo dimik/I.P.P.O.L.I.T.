@@ -1,0 +1,48 @@
+# robot_localization EKF (A4-followup, 2026-07-13): fuse wheel odometry + IMU yaw rate into a
+# single, smooth odom->base_link. Replaces q6a_laser_odom's scan-matching as the odom-frame source
+# (laser_odom keeps running for /odom_laser comparison but no longer publishes the TF -- avoids the
+# two-parents-for-base_link bug, cf. G27). slam_toolbox still owns map->odom on top of this.
+#
+# Why this beats scan-matching for the odom frame: wheel+IMU works continuously (no LiDAR needed),
+# so it produces valid odometry even during manual_control when the fanoff gate parks the turret
+# and /scan stops -- exactly when scan-matching goes blind. The gyro carries rotation (wheels slip
+# during pivots, G8); the wheel dead-reckoning carries translation.
+ekf_filter_node:
+  ros__parameters:
+    frequency: 30.0
+    two_d_mode: true            # planar robot: zero out z/roll/pitch + their velocities (stability)
+    publish_tf: true
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_link
+    world_frame: odom           # this is the ODOM-frame EKF; slam_toolbox provides map->odom
+
+    # wheel odometry (/odom/wheel): fuse x, y, yaw as ABSOLUTE pose (differential:false). This is
+    # the only odom-frame pose source, so the EKF's odom frame simply aligns with the wheel odom's
+    # frame -- EKF pose tracks wheel pose, no amplification. (DIFFERENTIAL mode was tried first and
+    # over-reported translation ~2x -- it's for reconciling MULTIPLE absolute-pose sources, not a
+    # single wheel source; see the changelog.) Wheel yaw is loose (its covariance in mcu_node) since
+    # the IMU carries rotation (wheels slip during pivots, G8), so the EKF trusts the gyro yaw rate.
+    odom0: /odom/wheel
+    odom0_config: [true,  true,  false,
+                   false, false, true,
+                   false, false, false,
+                   false, false, false,
+                   false, false, false]
+    odom0_differential: false
+    odom0_relative: false
+    odom0_queue_size: 10
+
+    # IMU (/imu/data): fuse ONLY the yaw rate (vyaw = angular_velocity.z). Orientation is unavailable
+    # on this IMU (orientation_covariance[0] = -1, REP-145) so it must NOT be fused; linear accel is
+    # left out (double-integrating accel is noisy and wheel odom already gives translation).
+    imu0: /imu/data
+    imu0_config: [false, false, false,
+                  false, false, false,
+                  false, false, false,
+                  false, false, true,
+                  false, false, false]
+    imu0_differential: false
+    imu0_relative: false
+    imu0_queue_size: 10
+    imu0_remove_gravitational_acceleration: true
