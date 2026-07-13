@@ -282,11 +282,19 @@ A2 (param-driven nav tuning) and ideally A3/A4.
   restart slam+persist, confirm resumed map and NO segfault (G4 — if a real graph also crashes, STOP and
   rework persistence before anything downstream). (b) Camera bearing/FOV calibration against a known
   object → values recorded for A4's URDF.
-  🔶 IN PROGRESS (2026-07-13). First live drive session happened (see F1 below for what it covered),
-  but ran out of session time on the calibration nonlinearity (G24) before reaching the actual
-  coverage drive needed to build a real ≫50KB pose graph. **Neither (a) nor (b) done yet** — next
-  physical session should go straight to a coverage drive (skip further calibration precision-chasing
-  per G24's note) and then the slam+persist restart/resume test.
+  🔶 IN PROGRESS (2026-07-13). **(a) DONE, unexpectedly** — no dedicated coverage drive ever
+  happened; instead, the many small calibration test-drive segments from the first session (G24)
+  cumulatively built a real, substantial pose graph (4091450B — nowhere near the "trivial empty
+  graph" crash scenario G4 warned about) without anyone intending it as a mapping drive. A Q6A
+  power-cycle between sessions then restarted `slam_toolbox` fresh (its own standalone
+  `q6a-slam-toolbox.service`, independent of `ippolit-core`), which forced the very first genuine
+  cold resume attempt against that file. Result: found + fixed a real crash (G25 — `q6a_map_persist`
+  had been silently dead for ~9.5h after crashing on the first real `deserialize_map` response), then
+  re-verified live: resumed map is 420x428 cells @ 0.05m (~21m x 21m), `slam_toolbox` stayed in
+  `active` lifecycle state throughout, no segfault. **(b) still NOT done** — camera bearing/FOV
+  calibration against a known object needs a dedicated setup (object at a measured distance/angle)
+  that hasn't happened yet. Also surfaced a real, separate finding needing its own fix before F4:
+  `/map` has two publishers (`slam_toolbox` + `valetudo_bridge`) — see G25's last paragraph.
 - **F1 — actuation layer** (`ippolit_control`): `cmd_vel_bridge` per §2.3 (clamp, explicit-zero watchdog
   G1, persistent ~6.6 Hz sender G-rate, enable/disable ownership; reverse unsupported until calibrated),
   Twist mapping calibrated against `/odom_laser` (G8), `twist_mux` config, cliff_guard ported to
@@ -391,7 +399,7 @@ envelope (1.0 fails), MiDaS edge calibration table (65→5 cm), thermal enclosur
 worker. Battery telemetry via `/battery` (Valetudo charging flag broken on this model). IR floor sensors
 conclusively useless for early warning (co-fire with wheel-drop).
 
-## 9. Gotchas (G1–G24) — G1-G12 unchanged from rev 1, G13-G24 found live during A0/A1/F1/A5; MUST READ
+## 9. Gotchas (G1–G25) — G1-G12 unchanged from rev 1, G13-G25 found live during A0/A1/F1/A5/F0; MUST READ
 
 - **G1** Valetudo holds the last velocity — stopping requires actively sending zero; a silent watchdog is
   not a stop.
@@ -585,6 +593,34 @@ conclusively useless for early warning (co-fire with wheel-drop).
      a precision fit** — good enough for cautious teleop, NOT sufficient for F4's Nav2 tuning without
      redoing this as a proper multi-point (ideally many-point) calibration sweep first, ideally on a
      single consistent floor surface with longer (5-10s+) segments to dilute ramp-up error.
+- **G25** (found live, F0's map-resume test, 2026-07-13) — **`q6a_map_persist` crashed the whole node
+  the first time a real `deserialize_map` call ever actually completed**, and had been silently dead
+  for ~9.5 hours before anyone noticed (a Q6A power-cycle restarted `slam_toolbox` — its own separate
+  `q6a-slam-toolbox.service` — which triggered the very first genuine resume attempt against a
+  substantial, real 4MB `.posegraph` file; `q6a_map_persist` itself, part of the `ippolit-core`
+  systemd group, had also just restarted moments earlier). Root cause: `on_resume_done` assumed
+  `DeserializePoseGraph.Response` has a `result` field, by analogy with `SerializePoseGraph`/
+  `SaveMap` (which do have one) — but `ros2 interface show slam_toolbox/srv/DeserializePoseGraph`
+  shows its response has **no fields at all**. `res.result` raised `AttributeError:
+  'DeserializePoseGraph_Response' object has no attribute 'result'`, which was never caught (only
+  the `fut.result()` call itself was wrapped in `try/except`), so the whole node process died
+  (exit code 1) the moment its retry timer got a real response instead of a "not ready yet" no-op —
+  meaning **zero periodic map/objmap saves happened for the whole time the node was down**, silently.
+  Fixed: since there's no result code to check, any response that doesn't raise counts as success.
+  Verified live: `q6a_map_persist` restarted, resumed the real 4MB pose graph, logged
+  "resumed saved map", and stayed alive; `slam_toolbox` itself never crashed (lifecycle state
+  `active`); the resumed map queried via `/slam_toolbox/dynamic_map` is 420x428 cells @ 0.05m
+  (~21m x 21m) — a real, substantial map, not a trivial one. **This is F0(a)'s actual acceptance
+  test, satisfied for real** (see the F0 phase-table entry). Lesson: don't assume a vendor service's
+  response shape by analogy with a sibling service in the same package — `ros2 interface show` each
+  one individually, especially ones whose success/failure signal is only exercised by a real,
+  late-arriving response (a "not ready, retry" no-op path can look like it's working for a long time
+  before the real payload ever reaches the handler). **Also found, not yet fixed**: `/map` currently
+  has TWO publishers (`slam_toolbox` and `valetudo_bridge`) — a real topic collision. Any subscriber
+  (Foxglove, Nav2 later) gets whichever one happens to publish more recently, so map display/behavior
+  could silently flip between the two independent sources. Needs a remap (e.g. `slam_toolbox`'s own
+  map onto a distinct topic, or retiring `valetudo_bridge`'s `/map` publisher now that `slam_toolbox`
+  is the real map source) before F4's Nav2 bringup, which will consume `/map` directly.
 
 **Deferred-physical-test pattern (established during F0/F1, 2026-07-13):** when a phase's next
 step requires physically driving the robot or aiming its camera and the user isn't set up to

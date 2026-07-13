@@ -163,16 +163,18 @@ class MapPersist(Node):
         fut.add_done_callback(self.on_resume_done)
 
     def on_resume_done(self, fut):
+        # G25: unlike SerializePoseGraph/SaveMap, DeserializePoseGraph.Response has NO fields at
+        # all (confirmed via `ros2 interface show`) -- there is no `.result` code to check. The
+        # original code assumed one by analogy with the other two services and crashed the whole
+        # node with an AttributeError the first time a real deserialize actually completed. A
+        # future rclpy/service-call exception is still the only failure signal available here.
         try:
-            res = fut.result()
+            fut.result()
         except Exception as e:
             self.get_logger().warn(f'deserialize_map call failed: {e} -- will retry')
             return
-        if res.result == 0:
-            self.resumed = True
-            self.get_logger().info(f'resumed saved map from {self.base}.posegraph')
-        else:
-            self.get_logger().warn(f'deserialize_map returned result={res.result} -- will retry')
+        self.resumed = True
+        self.get_logger().info(f'resumed saved map from {self.base}.posegraph')
 
     def save(self):
         if self.cli_serialize.service_is_ready():

@@ -7,6 +7,40 @@ current active roadmap)**.
 
 ---
 
+## 2026-07-13 — F0(a) map-resume test passes; found + fixed a real q6a_map_persist crash (G25)
+
+F0(a)'s acceptance test ("drive, build a real pose graph, restart slam+persist, confirm resume with
+no segfault") passed for real, though not the way planned: no dedicated coverage drive happened this
+session. Instead, the many short calibration test-drive segments from the earlier F0/F1 session
+(G24) cumulatively left a real, substantial 4091450-byte `.posegraph` on disk. A Q6A power-cycle
+between sessions then restarted `slam_toolbox` (its own standalone `q6a-slam-toolbox.service`,
+independent of `ippolit-core`) fresh -- the very first genuine cold resume attempt against that file.
+
+**Found + fixed a real crash (G25):** `q6a_map_persist` had been silently dead for ~9.5 hours. Root
+cause: `on_resume_done` assumed `DeserializePoseGraph.Response` has a `result` field, by analogy
+with `SerializePoseGraph`/`SaveMap` (which do have one) -- but its response has **no fields at all**
+(confirmed via `ros2 interface show`). `res.result` raised an uncaught `AttributeError` the moment a
+real response (not just a "not ready, retry" no-op) reached the handler, killing the whole node --
+meaning zero periodic map/objmap saves happened the entire time it was down, with nothing announcing
+the failure beyond a systemd journal entry nobody was watching. Fixed: since there's no result code
+to check, any response that doesn't raise counts as success.
+
+**Verified live after the fix:** restarted `ippolit-core`; `q6a_map_persist` resumed the real 4MB
+pose graph and logged "resumed saved map"; `slam_toolbox` itself never crashed throughout (lifecycle
+state `active` both before and after); queried the resumed map directly via
+`/slam_toolbox/dynamic_map` -- 420x428 cells @ 0.05m (~21m x 21m), a real substantial map, not a
+trivial one. 7/7 `colcon test` green after the fix.
+
+**Also found, not yet fixed:** `/map` currently has TWO publishers (`slam_toolbox` and
+`valetudo_bridge`) -- a real topic collision most likely invisible until F4's Nav2 bringup starts
+consuming `/map` directly and gets whichever source happened to publish most recently. Needs a
+remap or retiring one of the two publishers before then.
+
+**Still outstanding for F0:** (b) camera bearing/FOV calibration against a known object -- needs a
+dedicated physical setup that hasn't happened yet.
+
+---
+
 ## 2026-07-13 — First live F0/F1 drive session: found + fixed a real bug, rough calibration (G24)
 
 First physical teleop drive with the ROS stack. Goal was F1's Twist->Valetudo calibration plus
