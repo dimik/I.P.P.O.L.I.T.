@@ -421,7 +421,7 @@ envelope (1.0 fails), MiDaS edge calibration table (65→5 cm), thermal enclosur
 worker. Battery telemetry via `/battery` (Valetudo charging flag broken on this model). IR floor sensors
 conclusively useless for early warning (co-fire with wheel-drop).
 
-## 9. Gotchas (G1–G26) — G1-G12 unchanged from rev 1, G13-G26 found live during A0/A1/F1/A5/F0; MUST READ
+## 9. Gotchas (G1–G27) — G1-G12 unchanged from rev 1, G13-G27 found live during A0/A1/F1/A5/F0; MUST READ
 
 - **G1** Valetudo holds the last velocity — stopping requires actively sending zero; a silent watchdog is
   not a stop.
@@ -637,12 +637,28 @@ conclusively useless for early warning (co-fire with wheel-drop).
   response shape by analogy with a sibling service in the same package — `ros2 interface show` each
   one individually, especially ones whose success/failure signal is only exercised by a real,
   late-arriving response (a "not ready, retry" no-op path can look like it's working for a long time
-  before the real payload ever reaches the handler). **Also found, not yet fixed**: `/map` currently
-  has TWO publishers (`slam_toolbox` and `valetudo_bridge`) — a real topic collision. Any subscriber
-  (Foxglove, Nav2 later) gets whichever one happens to publish more recently, so map display/behavior
-  could silently flip between the two independent sources. Needs a remap (e.g. `slam_toolbox`'s own
-  map onto a distinct topic, or retiring `valetudo_bridge`'s `/map` publisher now that `slam_toolbox`
-  is the real map source) before F4's Nav2 bringup, which will consume `/map` directly.
+  before the real payload ever reaches the handler). **Also found (FIXED 2026-07-13, see G27)**:
+  `/map` had TWO publishers (`slam_toolbox` and `valetudo_bridge`) — resolved by trimming
+  `valetudo_bridge` to its documented status/battery-only role.
+- **G27** (found 2026-07-13 while fixing G25's `/map` double-publisher) `valetudo_bridge` was a
+  LEGACY full-stack node: it still published `/map`, `/odom`, AND a `map->base_link` TF derived from
+  Valetudo's own SLAM — all left over from before the companion grew its own `slam_toolbox` +
+  `q6a_laser_odom` + `robot_state_publisher` stack, and all now in conflict with it. The `/map`
+  collision was the visible symptom, but the `map->base_link` TF was the more dangerous one: it gave
+  `base_link` TWO parents (`map` from valetudo_bridge, `odom` from `q6a_laser_odom`), which corrupts
+  the TF tree tf2 assumes is a single-parent chain — a bug that would surface as flickering/ambiguous
+  localization exactly during F4 navigation, not at idle. `/odom` from valetudo was also useless in
+  practice: Valetudo's `robot_position` is FROZEN during `manual_control` (the whole reason
+  `q6a_laser_odom` exists), so it never updated during a manual mapping drive anyway. Fix: trimmed
+  `valetudo_bridge` to exactly the role the doc's §3 data-flow already assigned it — `/robot/status`
+  + `/battery` only — removing the `/map`/`/odom`/TF publishers and their now-dead map-SSE + pose
+  machinery. Verified live: `/map` publisher count 1 (slam_toolbox), valetudo_bridge absent from
+  `/tf` and `/odom`, `/battery` + `/robot/status` still flow, diagnostic OK. Lesson (a recurring
+  theme with G23/G25): when a subsystem is superseded by a new one, actively RETIRE its overlapping
+  outputs — a legacy node quietly still publishing a topic/TF the new stack also owns is a
+  collision waiting to bite, and won't announce itself (no error, no crash; tf2 just silently picks
+  a parent per-lookup). Grep every publisher of a shared topic/frame after standing up its
+  replacement.
 - **G26** (found live, F0(b)'s camera calibration, 2026-07-13) an eyeballed/paced two-point bearing
   calibration produced a physically implausible result — placing a chair "about 1m away" then "about
   1m to the left" and solving the code's linear `bearing = bear_sign*offset_frac*hfov + cam_yaw` model

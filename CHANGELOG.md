@@ -7,6 +7,42 @@ current active roadmap)**.
 
 ---
 
+## 2026-07-13 — Fix /map double-publisher: trim valetudo_bridge to status+battery (G27)
+
+Fixing the `/map` double-publisher flagged in the last A4 work turned up a bigger root cause:
+`valetudo_bridge` was still a LEGACY full-stack node, publishing `/map`, `/odom`, AND a
+`map->base_link` TF derived from Valetudo's own SLAM -- all left over from before the companion
+grew its own `slam_toolbox` + `q6a_laser_odom` + `robot_state_publisher` stack, and all now in
+conflict with it:
+- `/map` collided with slam_toolbox's (and could feed slam's own map_saver the wrong grid -- slam
+  subscribes to /map for `use_map_saver`).
+- The `map->base_link` TF was the more dangerous one: it gave `base_link` TWO parents (`map` from
+  valetudo, `odom` from laser_odom), corrupting the single-parent TF chain tf2 assumes -- a bug
+  that would surface as flickering localization during F4 nav, silently (no error/crash).
+- `/odom` from valetudo was useless anyway: Valetudo's `robot_position` is FROZEN during
+  `manual_control` (the whole reason q6a_laser_odom exists).
+
+Fix: trimmed `valetudo_bridge` to exactly the role the architecture doc's §2.3 data-flow already
+assigns it -- `/robot/status` + `/battery` only -- removing the `/map`/`/odom`/TF publishers and
+their now-dead map-SSE + pose machinery (map grid decode, TransformBroadcaster, Odometry). The node
+is now ~90 lines lighter and single-purpose. The Valetudo map is recoverable from git history if
+ever wanted as a reference topic.
+
+**Verified live:** `/map` publisher count 1 (slam_toolbox); valetudo_bridge absent from `/tf` and
+`/odom` (both now have 0 conflicting publishers from it); `/battery` still flowing (26%);
+`/robot/status` publisher present (event-driven, publishes on state change); valetudo diagnostic
+OK ("attributes SSE stream connected"); node came up clean, no errors. 2/2 colcon test green.
+Recorded as G27, with the general lesson (recurring with G23/G25): when a subsystem is superseded,
+actively retire its overlapping outputs -- a legacy node still publishing a shared topic/TF is a
+silent collision waiting to bite.
+
+Note: `q6a_objmap` still subscribes to `/odom` as an optional fallback pose source; that's now
+unpublished, so objmap relies on slam's `/pose` (the correct map-frame source). Harmless -- at idle
+objmap can't place objects anyway (parked turret → no scan range), and during active driving slam
+`/pose` is authoritative. Left as a legitimate optional hook, not dead-wired.
+
+---
+
 ## 2026-07-13 — Phase A4 DONE: URDF as the single source of robot geometry
 
 Measured the robot's real geometry once (tape measure) and encoded it in
