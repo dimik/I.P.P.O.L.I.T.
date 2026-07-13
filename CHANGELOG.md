@@ -7,6 +7,56 @@ current active roadmap)**.
 
 ---
 
+## 2026-07-13 — First live F0/F1 drive session: found + fixed a real bug, rough calibration (G24)
+
+First physical teleop drive with the ROS stack. Goal was F1's Twist->Valetudo calibration plus
+F0's map-resume test; got through the former (partially) and ran out of session time before the
+latter.
+
+**Bug found + fixed live:** `cmd_vel_bridge`'s lazy manual-control-enable checked `vel > 0.0`
+only, so a pure-rotation command (`linear.x=0`, nonzero `angular.z`) never enabled manual control
+and never sent any move command at all — silently a complete no-op on the real robot (confirmed:
+no REST call, no turret spin-up, no rotation). The same check also gated the idle-disable timer
+reset, so a sustained rotation-only session would have incorrectly started counting down to
+auto-disable from the first tick. Fixed by extracting a plain `is_commanding_motion(vel, angle)`
+function (`vel > 0.0 or angle != 0.0`) used for both. 4 new pytest regression cases (15/15 green).
+Verified live: rotation commands now log "manual control enabled" and physically rotate the robot.
+
+**LiDAR-gate gotcha, worked around:** Valetudo's `manual_control` status is in the on-robot
+`fanoff_flag.sh` daemon's `BLOCKED_STATES` (it parks the LiDAR turret during manual driving by
+design — that daemon predates the ROS stack and was built for quiet human-joystick driving with no
+LiDAR need). This silently starves `/scan` -> `/odom_laser` -> SLAM during any ROS teleop session
+unless overridden. Worked around per the daemon's own documented manual-override
+(`pkill fanoff_flag` + `: > /tmp/lidar_allow`); restored the daemon to normal automatic gating
+after the session. Flagged as worth a permanent fix (either the gate should know about ROS teleop,
+or `cmd_vel_bridge` should own the override itself instead of a manual per-session step).
+
+**Calibration attempted, found genuinely nonlinear (G24):** two initial linear-speed data points
+(vel_valetudo 0.10->0.055 m/s, 0.20->0.127 m/s real, via chained `/odom_laser` measurements)
+suggested a roughly consistent scale (~1.7). Deployed `linear_scale=1.7`/`angular_to_deg_scale=3.0`
+(the latter chosen so typical commanded turn rates saturate at the 45deg clamp, since the raw
+angle->turn-rate response measured strongly nonlinear -- weak below ~17deg sent, then ramping
+fast). A confirmation drive at the new calibration measured far slower than predicted; **the user
+directly watched the next test and confirmed it live** ("drove forward like 20cm" over 3s, ~0.067
+m/s) -- so this is a real hardware/nonlinearity effect, not an odometry measurement glitch.
+Root cause not isolated (candidates: genuine motor-response nonlinearity/deadband, a floor-surface
+change as the robot moved across the room, or ramp-up eating more of the shorter 3s test window)
+-- flagged honestly as unresolved. **Current values are working-but-rough, not a precision fit**;
+do not trust them for F4's Nav2 tuning without a proper multi-point recalibration first.
+
+**Decision (user's call): stopped here for today** rather than chase calibration precision
+further or push into the coverage/map-resume drive with an imprecise mapping. F0's map-resume test
+(a) and camera FOV calibration (b) remain outstanding for the next physical session -- next time,
+go straight to the coverage drive per the doc's updated F0 note (map-building doesn't need
+precise velocity calibration, only that the robot moves and the LiDAR keeps working).
+
+Companion (Q6A) and robot were left in a safe idle state; the Q6A was powered off cleanly at the
+user's request to end the session. Valetudo/AVA has no software poweroff capability (checked --
+not present in the capabilities list), so the robot still needs a physical intervention or dock to
+fully power down if desired later.
+
+---
+
 ## 2026-07-13 — Phase A5 follow-up: closed the three remaining gaps (audio diag + objmap/map_persist tests)
 
 Closed all three items the A5 entry below explicitly flagged as "not done":

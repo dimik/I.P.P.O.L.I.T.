@@ -2,11 +2,18 @@ cmd_vel_bridge:
   ros__parameters:
     # SAFETY: validated envelope, see cmd_vel_bridge.py's docstring / q6a_creep_test.py point 1.
     max_safe_vel: 0.4
-    # UNCALIBRATED PLACEHOLDERS (G8): verify against /odom_laser during the next physical test
-    # session (paired with F0's real map-resume drive) before trusting this bridge to drive
-    # anything meaningfully. See docs/navigation-architecture.md's F0/F1 phase notes.
-    linear_scale: 1.0
-    angular_to_deg_scale: 1.0
+    # ROUGH CALIBRATION (2026-07-13, see G24): derived from live /odom_laser measurements, not a
+    # precision fit. linear_scale ~1.7 from two chained forward segments (0.20->0.127 m/s real,
+    # 0.10->0.055 m/s real -- individually implying 1.58/1.83, averaged). angular_to_deg_scale=3.0
+    # is a deliberate compromise, NOT a linear fit: the angle->turn-rate response measured strongly
+    # nonlinear (weak/near-dead below ~17deg sent, then ramping fast toward the 45deg clamp, which
+    # itself only reaches ~0.15 rad/s real and also produces real translation even at commanded
+    # vel=0). Scale=3.0 makes most reasonable teleop/nav turn commands (>=~0.26 rad/s) saturate at
+    # that ~45deg/0.15rad/s ceiling rather than landing in the weak near-dead zone -- proportional
+    # control below that threshold is NOT reliable. Revisit with a proper nonlinear/piecewise
+    # calibration before trusting fine-grained turn-rate control (e.g. before F4's Nav2 tuning).
+    linear_scale: 1.7
+    angular_to_deg_scale: 3.0
     max_angle_deg: 45.0
     watchdog_timeout_s: 0.4
     idle_disable_s: 30.0

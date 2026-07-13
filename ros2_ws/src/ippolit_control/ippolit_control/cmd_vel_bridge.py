@@ -25,11 +25,12 @@ After `idle_disable_s` of continuous zero/no-command, this node calls disable it
 doesn't sit in manual-control mode (turret spinning) forgotten; it re-enables lazily on the next
 real command.
 
-Twist -> Valetudo mapping is a PLACEHOLDER pending calibration (G8): `linear_scale` and
-`angular_to_deg_scale` are not yet verified against `/odom_laser` on the real robot (deferred
-alongside F0's physical map-resume test — see docs/navigation-architecture.md). Reverse is
-unsupported until calibrated: negative `linear.x` clamps to 0 rather than driving backward with
-an unverified mapping.
+Twist -> Valetudo mapping is ROUGHLY calibrated against live `/odom_laser` measurements
+(2026-07-13, see G24): `linear_scale`/`angular_to_deg_scale` are not a precision fit, and the
+angle->turn-rate response is genuinely nonlinear (weak below ~17deg sent, ramping fast toward the
+45deg clamp) — see `cmd_vel_bridge.yaml`'s comment for the numbers and G24 for the full finding.
+Reverse is still unsupported: negative `linear.x` clamps to 0 rather than driving backward with an
+uncalibrated-for-reverse mapping.
 
 Parameters are declared in `CmdVelBridge.__init__` (see ippolit_bringup/config/cmd_vel_bridge.yaml
 for the deployed values). `ROBOT_ADDR` stays a machine-local env var per the A2 convention.
@@ -53,6 +54,17 @@ SEND_HZ = 6.6   # matches the pre-ROS q6a_drive.py's empirically-established RES
 
 def clamp(value, lo, hi):
     return max(lo, min(hi, value))
+
+
+def is_commanding_motion(vel, angle):
+    """
+    Return whether a (velocity, angle) pair should be treated as a real drive command.
+
+    G24 regression guard: a pure-rotation command has vel==0 with a nonzero angle, and must
+    still count as motion -- checking vel alone (the original bug) meant rotation-only Twist
+    messages never enabled manual control at all, so they silently did nothing on the real robot.
+    """
+    return vel > 0.0 or angle != 0.0
 
 
 def twist_to_valetudo(linear_x, angular_z, max_safe_vel, linear_scale,
@@ -89,16 +101,18 @@ class CmdVelBridge(Node):
             'linear_scale', 1.0,
             ParameterDescriptor(
                 description=(
-                    'UNCALIBRATED PLACEHOLDER: m/s -> Valetudo velocity units (0..1) scale. '
-                    'Needs verification against /odom_laser (G8) during a physical test '
-                    'session before this bridge drives anything meaningfully.')))
+                    'ROUGH CALIBRATION (G24): m/s -> Valetudo velocity units (0..1) scale, from '
+                    'live /odom_laser measurements. See cmd_vel_bridge.yaml for the deployed '
+                    'value + derivation notes; not a precision fit.')))
         self.declare_parameter(
             'angular_to_deg_scale', 1.0,
             ParameterDescriptor(
                 description=(
-                    'UNCALIBRATED PLACEHOLDER: rad/s -> Valetudo "angle" degrees field scale. '
-                    'Needs verification against /odom_laser (G8) during a physical test '
-                    'session.')))
+                    'ROUGH CALIBRATION (G24): rad/s -> Valetudo "angle" degrees field scale. The '
+                    'real angle->turn-rate response is nonlinear (weak at low angles, saturating '
+                    'near the max_angle_deg clamp) -- this scale is chosen to push typical turn '
+                    'commands toward the clamp rather than to linearly fit the whole range. See '
+                    'cmd_vel_bridge.yaml for the deployed value + derivation notes.')))
         self.declare_parameter(
             'max_angle_deg', 45.0,
             ParameterDescriptor(
@@ -139,7 +153,7 @@ class CmdVelBridge(Node):
         self.get_logger().info(
             f'cmd_vel_bridge up: /cmd_vel -> Valetudo REST @ {ROBOT_ADDR}, '
             f'max_safe_vel={self.max_safe_vel}, watchdog={self.watchdog_timeout_s}s '
-            f'(linear/angular scale UNCALIBRATED -- see G8)')
+            f'(linear/angular scale roughly calibrated -- see G24)')
 
     def on_cmd_vel(self, msg):
         vel, angle = twist_to_valetudo(
@@ -159,7 +173,7 @@ class CmdVelBridge(Node):
             # G1: actively hold zero rather than just stop sending (Valetudo latches the last cmd)
             vel, angle = 0.0, 0.0
 
-        if vel > 0.0:
+        if is_commanding_motion(vel, angle):
             self.zero_since_t = None
             if not self.enabled:
                 try:

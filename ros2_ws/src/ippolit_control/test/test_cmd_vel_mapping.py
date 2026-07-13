@@ -1,7 +1,7 @@
 """Unit tests for cmd_vel_bridge's pure Twist -> Valetudo mapping (no rclpy dependency)."""
 import math
 
-from ippolit_control.cmd_vel_bridge import clamp, twist_to_valetudo
+from ippolit_control.cmd_vel_bridge import clamp, is_commanding_motion, twist_to_valetudo
 
 
 def test_clamp_within_range():
@@ -59,3 +59,23 @@ def test_linear_scale_applied_before_clamp():
         linear_x=0.1, angular_z=0.0, max_safe_vel=0.4,
         linear_scale=2.0, angular_to_deg_scale=1.0, max_angle_deg=45.0)
     assert vel == 0.2
+
+
+def test_rotation_only_counts_as_motion():
+    # G24 regression: a pure-rotation command (vel==0, angle!=0) must enable manual control --
+    # the original bug checked vel alone and silently dropped rotation-only commands on the
+    # real robot (confirmed live: no REST enable call, no turret spin-up, no actual rotation).
+    assert is_commanding_motion(vel=0.0, angle=17.19) is True
+    assert is_commanding_motion(vel=0.0, angle=-45.0) is True
+
+
+def test_pure_forward_counts_as_motion():
+    assert is_commanding_motion(vel=0.2, angle=0.0) is True
+
+
+def test_both_axes_moving_counts_as_motion():
+    assert is_commanding_motion(vel=0.2, angle=10.0) is True
+
+
+def test_true_zero_is_not_motion():
+    assert is_commanding_motion(vel=0.0, angle=0.0) is False

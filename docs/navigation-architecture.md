@@ -282,6 +282,11 @@ A2 (param-driven nav tuning) and ideally A3/A4.
   restart slam+persist, confirm resumed map and NO segfault (G4 — if a real graph also crashes, STOP and
   rework persistence before anything downstream). (b) Camera bearing/FOV calibration against a known
   object → values recorded for A4's URDF.
+  🔶 IN PROGRESS (2026-07-13). First live drive session happened (see F1 below for what it covered),
+  but ran out of session time on the calibration nonlinearity (G24) before reaching the actual
+  coverage drive needed to build a real ≫50KB pose graph. **Neither (a) nor (b) done yet** — next
+  physical session should go straight to a coverage drive (skip further calibration precision-chasing
+  per G24's note) and then the slam+persist restart/resume test.
 - **F1 — actuation layer** (`ippolit_control`): `cmd_vel_bridge` per §2.3 (clamp, explicit-zero watchdog
   G1, persistent ~6.6 Hz sender G-rate, enable/disable ownership; reverse unsupported until calibrated),
   Twist mapping calibrated against `/odom_laser` (G8), `twist_mux` config, cliff_guard ported to
@@ -304,6 +309,24 @@ A2 (param-driven nav tuning) and ideally A3/A4.
   re-verified in A5 — see G23 and the CHANGELOG's A5 entry for the full incident.
   ✅ Teleop Twist drives; killing publisher stops <0.5 s; lifted-wheel test zeroes /cmd_vel regardless of
   other publishers (re-verified true after the G23 fix, not just at original F1 write-up time).
+  🔶 **Update (first live drive session, 2026-07-13, see G24):** did the deferred physical
+  calibration. Found + fixed a real bug live (rotation-only Twist commands never enabled manual
+  control at all — G24 #1). Also discovered the linear AND angular Twist->Valetudo mapping are both
+  genuinely nonlinear, not just an unknown scale factor (G24 #2) — a single scalar calibration is
+  necessarily rough. Deployed working (not precision) values: `linear_scale=1.7`,
+  `angular_to_deg_scale=3.0`. User-observed ground truth (eyes on the robot): a 0.15 cmd forward
+  drive covered "like 20cm" over 3s (~0.067 m/s), confirming the odometry-based measurement was
+  real, not a measurement artifact. Did NOT reach `q6a_drive`'s `/cmd_vel_teleop` reimplementation
+  or a proper multi-point nonlinear calibration sweep this session — see G24 for what a real fix
+  would need. LiDAR-turret gate gotcha found and worked around live: Valetudo's `manual_control`
+  status is in the fanoff shim's `BLOCKED_STATES`, so the on-robot `fanoff_flag.sh` daemon actively
+  parks the LiDAR turret during manual driving by design (originally built for quiet human-joystick
+  driving with no LiDAR need) — this silently starves `/scan` and therefore `/odom_laser` and SLAM
+  during any ROS teleop session unless overridden. Worked around per the daemon's own documented
+  manual-override path (`pkill fanoff_flag` + `: > /tmp/lidar_allow`), restored the daemon to normal
+  automatic gating after the session. Worth a permanent fix later: either add a ROS-teleop-aware
+  state to the gate, or have `cmd_vel_bridge` manage the override itself instead of a manual step
+  each session.
 - **F2 — visualization**: foxglove_bridge in `ippolit-viz` group; repo-committed layout
   (`docs/foxglove-layout.json`): map+masks, 3-D (markers/pose/scan/TF), FloorDrop plots, camera MJPEG
   panel (robot :8090), teleop→`/cmd_vel_teleop`, diagnostics.
@@ -368,7 +391,7 @@ envelope (1.0 fails), MiDaS edge calibration table (65→5 cm), thermal enclosur
 worker. Battery telemetry via `/battery` (Valetudo charging flag broken on this model). IR floor sensors
 conclusively useless for early warning (co-fire with wheel-drop).
 
-## 9. Gotchas (G1–G22) — G1-G12 unchanged from rev 1, G13-G22 found live during A0/A1/F1; MUST READ
+## 9. Gotchas (G1–G24) — G1-G12 unchanged from rev 1, G13-G24 found live during A0/A1/F1/A5; MUST READ
 
 - **G1** Valetudo holds the last velocity — stopping requires actively sending zero; a silent watchdog is
   not a stop.
@@ -531,6 +554,37 @@ conclusively useless for early warning (co-fire with wheel-drop).
   bridges/republishes a message, always cross-check `ros2 topic type` on both sides of the bridge, not
   just that the node started and topics exist. See the CHANGELOG's A5 entry ("Correction first") for
   the full incident writeup.
+- **G24** (found live, first physical F0/F1 drive session, 2026-07-13) two related findings from the
+  first real teleop drive:
+  1. **Bug**: `cmd_vel_bridge`'s lazy-enable condition checked `vel > 0.0` only. A pure-rotation
+     command (`linear.x=0`, nonzero `angular.z`) has `vel==0`, so it never called `{"action":"enable"}`
+     and never called `move` at all — a rotation-only Twist silently did nothing on the real robot
+     (no REST call, no turret spin-up, no rotation), with no error anywhere in the chain. Same idle
+     timer bug alongside it: `zero_since_t` was reset only by `vel>0`, so a sustained pure-rotation
+     session would have incorrectly started its 30s idle-disable countdown from tick one, disabling
+     manual control mid-rotation. Fixed by pulling the check into a plain `is_commanding_motion(vel,
+     angle)` function (`vel > 0.0 or angle != 0.0`) and using it for both the enable AND the idle-timer
+     reset. 4 new pytest regression cases. Verified live: rotation commands now log "manual control
+     enabled" and physically rotate the robot.
+  2. **Real hardware nonlinearity, not just an uncalibrated scale**: live `/odom_laser` measurements
+     showed BOTH the angle->turn-rate response AND the linear velocity->real-speed response are
+     genuinely nonlinear, not just an unknown linear scale factor. Angular: commanding a modest angle
+     (~17deg sent) produced almost no measured rotation (0.014 rad/s), while the `max_angle_deg` clamp
+     (45deg) produced much more (0.15 rad/s) — a ~2.6x change in angle produced an ~11x change in
+     turn rate, and that same "rotation-only" command also produced real translation (0.36m over 6s)
+     despite commanded `vel==0`: this API does not do a clean in-place pivot, it behaves more like a
+     wide curve even at zero linear velocity. Linear: two initial calibration points (vel_valetudo
+     0.10->0.055 m/s real, 0.20->0.127 m/s real) implied a roughly consistent scale (~1.7), but a
+     THIRD point at a similar magnitude (0.255, after deploying that scale) measured dramatically
+     slower (~0.067 m/s real, user-confirmed by eye: "drove forward like 20cm" over 3s) — inconsistent
+     with a single linear scale factor across the whole range. Root cause not isolated this session
+     (candidates: real motor-response nonlinearity/deadband, floor-surface change as the robot moved
+     across the room during testing, or accel-ramp eating a bigger fraction of the shorter 3s test
+     window vs the original 5s ones — not distinguished). **Consequence: `linear_scale` (1.7) and
+     `angular_to_deg_scale` (3.0) in `cmd_vel_bridge.yaml` are deliberately ROUGH working values, not
+     a precision fit** — good enough for cautious teleop, NOT sufficient for F4's Nav2 tuning without
+     redoing this as a proper multi-point (ideally many-point) calibration sweep first, ideally on a
+     single consistent floor surface with longer (5-10s+) segments to dilute ramp-up error.
 
 **Deferred-physical-test pattern (established during F0/F1, 2026-07-13):** when a phase's next
 step requires physically driving the robot or aiming its camera and the user isn't set up to
