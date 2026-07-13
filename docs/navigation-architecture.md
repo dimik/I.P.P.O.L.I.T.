@@ -691,17 +691,24 @@ conclusively useless for early warning (co-fire with wheel-drop).
   drive (~15° over three)**, which also curved its integrated x/y path. The gyro is the arbiter — a
   MEMS gyro physically cannot miss a real rotation (it correctly read +127° on a commanded pivot) —
   and it agreed with the wheels at ~0°; the user visually confirmed the drive was straight. So the
-  laser ICP was wrong, not the robot. Consequences: (1) the **wheel+IMU EKF (G28) is validated as the
-  correct odom source** — good call to switch to it; (2) `q6a_laser_odom` is now both redundant (EKF
-  owns `odom->base_link`) AND unreliable as even a *reference*, so it should be retired as an odom
-  source — its drift does NOT affect slam_toolbox (which does its own correlative scan matching + loop
-  closure for `map->odom`, not this ICP); (3) **`/odom_laser` was a BAD ground truth for the G24
-  linear calibration** — re-derive any speed calibration against wheel odom or a tape measure, never
-  laser ICP. Also confirmed here: **Valetudo's `robot_position` is completely frozen during
-  `manual_control`** (stayed at one value across all drives) — it is not a usable odom source while
-  driving, full stop. Diagnostic tooling kept: `scripts/companion/diag/odom_compare.py` (4-way logger)
-  and `gyro_yaw_check.py` (gyro-vs-wheel-vs-laser arbiter) — reuse them whenever an odom source is
-  suspect.
+  laser ICP was wrong, not the robot. **Cross-checked from the command side too** (a separate probe
+  logging `/cmd_vel` alongside the gyro during three forward drives): the commanded yaw rate was
+  EXACTLY 0°/s the whole time (max abs 0.0), the gyro integrated only +3.9° over all three, the wheel
+  +0.5°, and the user visually confirmed all three drives went straight with no curve. So the
+  cmd_vel→Valetudo mapping is clean — it does NOT inject rotation (an earlier "it drove, rotated,
+  drove" impression traced to MIXED test commands from the EKF phase — a forward, then a deliberate
+  rotation test, then forward — not a forward command spontaneously turning). Consequences: (1) the
+  **wheel+IMU EKF (G28) is validated as the correct odom source** — good call to switch to it; (2)
+  `q6a_laser_odom` is now both redundant (EKF owns `odom->base_link`) AND unreliable as even a
+  *reference*, so it should be retired as an odom source — its drift does NOT affect slam_toolbox
+  (which does its own correlative scan matching + loop closure for `map->odom`, not this ICP); (3)
+  **`/odom_laser` was a BAD ground truth for the G24 linear calibration** — re-derive any speed
+  calibration against wheel odom or a tape measure, never laser ICP. Also confirmed here: **Valetudo's
+  `robot_position` is completely frozen during `manual_control`** (stayed at one value across all
+  drives) — it is not a usable odom source while driving, full stop. Diagnostic tooling kept:
+  `scripts/companion/diag/odom_compare.py` (4-way logger), `gyro_yaw_check.py` (gyro-vs-wheel-vs-laser
+  arbiter), and `cmdprobe.py` (commanded-`/cmd_vel`-vs-gyro-vs-odom) — reuse them whenever an odom
+  source or the command path is suspect.
 - **G26** (found live, F0(b)'s camera calibration, 2026-07-13) an eyeballed/paced two-point bearing
   calibration produced a physically implausible result — placing a chair "about 1m away" then "about
   1m to the left" and solving the code's linear `bearing = bear_sign*offset_frac*hfov + cam_yaw` model

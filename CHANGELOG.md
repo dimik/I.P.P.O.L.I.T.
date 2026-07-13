@@ -36,12 +36,20 @@ Consequences:
   an earlier run (a probable one-off physical event, since the gyro can't miss a real rotation).
 - **Valetudo is confirmed useless as a live odom source** during manual_control (pose frozen).
 
-No production code changed this pass (investigation only). Kept the diagnostic tools under
-`scripts/companion/diag/` (`odom_compare.py`, `gyro_yaw_check.py`) for reuse. Recommended follow-up:
-retire `q6a_laser_odom` from the launch, and steady the forward-speed calibration (G24) — heading is
-now trustworthy, so a straight mapping drive (F3) is viable.
+**Command-path cross-check (addressing the "is the command mapping wrong?" question):** logged
+`/cmd_vel` alongside the gyro during three more forward drives — commanded yaw rate was EXACTLY 0°/s
+throughout (max abs 0.0), gyro integrated +3.9° total, wheel +0.5°, and the user visually confirmed
+all three drives went straight with no curve. So the cmd_vel→Valetudo mapping is clean; it does not
+inject rotation. An earlier "drove, rotated, drove" impression traced to MIXED test commands from the
+EKF phase (a forward, then a deliberate rotation test, then forward), not a forward command turning.
 
-Note: robot battery down to ~17% during this session.
+No production code changed this pass (investigation only). Kept the diagnostic tools under
+`scripts/companion/diag/` (`odom_compare.py`, `gyro_yaw_check.py`, `cmdprobe.py`) for reuse.
+Recommended follow-up: retire `q6a_laser_odom` from the launch, and steady the forward-speed
+calibration (G24) — heading is now trustworthy and driving is straight, so a mapping drive (F3) is
+viable.
+
+Note: robot battery down to ~16% (not charging) during this session — dock before further drives.
 
 ---
 
