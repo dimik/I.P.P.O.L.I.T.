@@ -421,7 +421,7 @@ envelope (1.0 fails), MiDaS edge calibration table (65→5 cm), thermal enclosur
 worker. Battery telemetry via `/battery` (Valetudo charging flag broken on this model). IR floor sensors
 conclusively useless for early warning (co-fire with wheel-drop).
 
-## 9. Gotchas (G1–G29) — G1-G12 unchanged from rev 1, G13-G29 found live during A0/A1/F1/A5/F0; MUST READ
+## 9. Gotchas (G1–G30) — G1-G12 unchanged from rev 1, G13-G30 found live during A0/A1/F1/A5/F0; MUST READ
 
 - **G1** Valetudo holds the last velocity — stopping requires actively sending zero; a silent watchdog is
   not a stop.
@@ -671,21 +671,37 @@ conclusively useless for early warning (co-fire with wheel-drop).
   single odometry source feeding the odom-frame EKF, fuse it absolutely (or fuse its velocities);
   reserve differential mode for genuinely redundant absolute-pose inputs. Always sanity-check the
   EKF output displacement against the raw source and a physical expectation before trusting it.
-- **G29** (found live during the EKF drive-test, 2026-07-13) — **the robot does not drive
-  consistently under manual control**, far beyond the mild heading drift G24 noted. Identical
-  `/cmd_vel_teleop` forward commands (linear.x=0.15, ZERO angular, ~4-5 s) produced wildly different
-  real motions across consecutive runs: ~0.22 m straight; then ~0.31 m; then one run went ~0.22 m
-  forward, spontaneously turned ~75° CCW, and drove on; then ~0.14 m nearly straight (+0.5° yaw).
-  Crucially this is an ACTUATION problem, NOT an odometry one: the EKF faithfully tracked each actual
-  path (the 75°-turn run's straight-line displacement matched the geometric chord of the L-path;
-  the straight run read +0.5° yaw) — odometry is trustworthy, the robot's *motion* is not. Root cause
-  unknown (candidates: Valetudo manual-control's own heading/behavior logic reacting unpredictably to
-  our ~6.6 Hz command stream; the uncalibrated nonlinear cmd→motion mapping from G24; a weak/dragging
-  wheel; surface interaction; or AVA safety reflexes firing mid-drive). **Implication: open-loop
-  teleop dead-reckoning is not viable for a controlled mapping drive — F3/F4 need either closed-loop
-  heading control (a controller that corrects heading using the now-trustworthy EKF/IMU yaw) or root
-  cause of the erratic actuation found first.** This is the next real problem to solve for autonomy;
-  it does not undermine the odometry/mapping stack, which works.
+- **G29** (found during the EKF drive-test, REVISED after the G30 odom-comparison, 2026-07-13) —
+  initial impression was that the robot "drives erratically" (variable distance per command; one run
+  appeared to turn ~75°). The follow-up four-way odom comparison (G30) substantially corrected this:
+  with the gyro as ground truth, the robot actually drives **reasonably straight** — the strong
+  "curving/erratic-rotation" impression was largely the DRIFTY laser odometry (G30), which had also
+  been the reference I trusted in G24. What survives as real: (a) the *distance* per identical command
+  is genuinely variable (~0.14-0.38 m for the same 0.15×~5 s command) — the G24 cmd→motion
+  nonlinearity; (b) one ~75° turn on an earlier run remains unexplained (the gyro can't miss a real
+  rotation, so it was either a genuine one-off physical event — caught on something / a wheel stuck —
+  or misjudged against the drifty laser map). **Implication: heading is trustworthy from the EKF/IMU,
+  so a straight mapping drive is viable now; the remaining open item is calibrating/steadying the
+  variable forward SPEED (G24), not fighting phantom rotation.** Closed-loop heading control is still
+  worth adding for F4 robustness but is no longer urgent for F3.
+- **G30** (found live, the four-way odom comparison, 2026-07-13) — **`q6a_laser_odom`'s naive
+  point-to-point ICP has a systematic ROTATION-DRIFT bias.** Driving the robot straight forward and
+  logging all four pose sources at 5 Hz showed: wheel odom yaw ~flat (±0.5°), **raw gyro integrated
+  ~0°**, EKF ~flat (it fuses wheel+IMU), but **laser scan-match yaw drifting monotonically ~4°/6 s
+  drive (~15° over three)**, which also curved its integrated x/y path. The gyro is the arbiter — a
+  MEMS gyro physically cannot miss a real rotation (it correctly read +127° on a commanded pivot) —
+  and it agreed with the wheels at ~0°; the user visually confirmed the drive was straight. So the
+  laser ICP was wrong, not the robot. Consequences: (1) the **wheel+IMU EKF (G28) is validated as the
+  correct odom source** — good call to switch to it; (2) `q6a_laser_odom` is now both redundant (EKF
+  owns `odom->base_link`) AND unreliable as even a *reference*, so it should be retired as an odom
+  source — its drift does NOT affect slam_toolbox (which does its own correlative scan matching + loop
+  closure for `map->odom`, not this ICP); (3) **`/odom_laser` was a BAD ground truth for the G24
+  linear calibration** — re-derive any speed calibration against wheel odom or a tape measure, never
+  laser ICP. Also confirmed here: **Valetudo's `robot_position` is completely frozen during
+  `manual_control`** (stayed at one value across all drives) — it is not a usable odom source while
+  driving, full stop. Diagnostic tooling kept: `scripts/companion/diag/odom_compare.py` (4-way logger)
+  and `gyro_yaw_check.py` (gyro-vs-wheel-vs-laser arbiter) — reuse them whenever an odom source is
+  suspect.
 - **G26** (found live, F0(b)'s camera calibration, 2026-07-13) an eyeballed/paced two-point bearing
   calibration produced a physically implausible result — placing a chair "about 1m away" then "about
   1m to the left" and solving the code's linear `bearing = bear_sign*offset_frac*hfov + cam_yaw` model

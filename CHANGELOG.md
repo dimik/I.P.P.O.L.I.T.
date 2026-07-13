@@ -7,6 +7,44 @@ current active roadmap)**.
 
 ---
 
+## 2026-07-13 — Odom-source investigation: laser_odom ICP drifts in yaw; wheel+IMU EKF is correct (G30)
+
+Investigated the "erratic driving" (G29) by comparing all four pose sources during straight-forward
+drives, logging wheel/laser/EKF/Valetudo at 5 Hz plus integrating the raw gyro as an independent
+arbiter. Result — the discrepancy is entirely in YAW, and it's the LASER odometry that's wrong:
+
+| source | yaw over a straight 6 s drive |
+|---|---|
+| raw gyro (integrated) | ~0° (correct — direct sensor, read +127° on a real pivot) |
+| wheel odom | ~0° |
+| EKF (wheel+IMU) | ~0° |
+| **laser scan-match (q6a_laser_odom ICP)** | **−4°/drive drift (~15° over three)** |
+| Valetudo robot_position | frozen the entire time |
+
+The user visually confirmed the drive was straight. So `q6a_laser_odom`'s naive point-to-point ICP
+has a systematic **rotation-drift bias**, which curves its integrated path — and it was the reference
+I'd trusted in G24. Recorded as **G30**.
+
+Consequences:
+- The **wheel+IMU EKF (previous entry) is validated** as the correct odom source — switching to it
+  was the right call. `q6a_laser_odom` is now both redundant (EKF owns the TF) and unreliable even as
+  a reference; it should be retired as an odom source (its drift does NOT affect slam_toolbox, which
+  does its own correlative scan-matching + loop closure for map->odom).
+- **G29 revised**: the robot actually drives reasonably straight (gyro + eyes agree). The
+  "curving/erratic-rotation" impression was largely laser-odom drift. What's real: variable *distance*
+  per identical command (~0.14–0.38 m — the G24 speed nonlinearity), and one unexplained ~75° turn on
+  an earlier run (a probable one-off physical event, since the gyro can't miss a real rotation).
+- **Valetudo is confirmed useless as a live odom source** during manual_control (pose frozen).
+
+No production code changed this pass (investigation only). Kept the diagnostic tools under
+`scripts/companion/diag/` (`odom_compare.py`, `gyro_yaw_check.py`) for reuse. Recommended follow-up:
+retire `q6a_laser_odom` from the launch, and steady the forward-speed calibration (G24) — heading is
+now trustworthy, so a straight mapping drive (F3) is viable.
+
+Note: robot battery down to ~17% during this session.
+
+---
+
 ## 2026-07-13 — EKF wheel+IMU odometry (robot_localization); exposed erratic driving (G28, G29)
 
 Stood up a `robot_localization` EKF fusing `/odom/wheel` + `/imu/data` into a smooth
