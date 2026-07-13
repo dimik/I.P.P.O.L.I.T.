@@ -7,6 +7,27 @@ current active roadmap)**.
 
 ---
 
+## 2026-07-13 — Fix /battery charging flag (broken since the companion migration)
+
+Found while the robot was charging: `/battery` reported `power_supply_status: 0` (UNKNOWN) even
+though the robot was docked and charging. Root cause: `valetudo_bridge`'s charge detection read
+`/tmp/charge_state` from its LOCAL filesystem, but that file is written by an AVA poller on the
+ROBOT — and this node moved to the Q6A companion (2026-07-08), where the file doesn't exist. So the
+charging flag has silently read UNKNOWN ever since (battery *percentage* was unaffected — it comes
+from Valetudo's SSE, not the file). The MCU battery packet (0x2B) that could have been an alternate
+source doesn't exist on this hardware (`/mcu/battery` is empty), confirming that path is dead.
+
+Fix: derive charging from the Valetudo `StatusStateAttribute` the node already receives via SSE —
+`docked` => CHARGING (or FULL at >=100%), anything else => DISCHARGING. No file, no ssh, no
+robot-side change; companion-native. It's a proxy (a docked-but-faulted-charger edge case would
+misreport) but vastly better than always-UNKNOWN, and full-at-dock is handled.
+
+Verified live while charging: `/battery` now reports `power_supply_status: 1` (CHARGING) with the
+robot docked at 24%. 2/2 colcon test green. (Also corrects a stale assumption in the
+`project_robot_audio_battery` memory, which described the now-dead /tmp/charge_state approach.)
+
+---
+
 ## 2026-07-13 — Odom-source investigation: laser_odom ICP drifts in yaw; wheel+IMU EKF is correct (G30)
 
 Investigated the "erratic driving" (G29) by comparing all four pose sources during straight-forward
