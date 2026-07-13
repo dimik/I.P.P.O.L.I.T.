@@ -2,7 +2,7 @@ q6a_laser_odom:
   ros__parameters:
     odom_frame: odom
     base_frame: base_link
-    laser_frame: laser
+    # laser_frame removed (A4): base_link->laser is now owned by robot_state_publisher from the URDF
     odom_topic: /odom_laser
     icp_iters: 14
     icp_max_corr: 0.35

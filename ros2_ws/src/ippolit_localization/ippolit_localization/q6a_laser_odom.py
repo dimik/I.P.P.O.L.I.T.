@@ -10,8 +10,11 @@ and publishes it as the `odom -> base_link` TF + nav_msgs/Odometry on /odom_lase
 pose source the semantic object map needs during a manual mapping drive. slam_toolbox can layer
 on top (consuming this odom) for a globally-consistent map + loop closure.
 
-Frames: publishes odom->base_link (dynamic) and base_link->laser (static identity — the /scan
-is already base_link-aligned by lds_scan_node's bearing convention, and the turret sits ~center).
+Frames: publishes odom->base_link (dynamic) ONLY. base_link->laser is a static transform owned by
+robot_state_publisher from the URDF (A4) — this node used to publish it itself as an identity
+transform, but that duplicated geometry the URDF now owns (and two static publishers of one
+transform with different values is a real bug). The /scan is rotationally base_link-aligned by
+lds_scan_node's bearing convention; the URDF supplies the real turret height (0.095 m).
 
 Run: source /opt/ros/jazzy/setup.bash && ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST \
      python3 q6a_laser_odom.py   (stop valetudo-bridge first so it doesn't also own /odom + TF)
@@ -31,7 +34,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan
-from tf2_ros import StaticTransformBroadcaster, TransformBroadcaster
+from tf2_ros import TransformBroadcaster
 
 
 def scan_to_points(msg):
@@ -94,8 +97,6 @@ class LaserOdom(Node):
         self.declare_parameter(
             'base_frame', 'base_link', ParameterDescriptor(description='Robot base frame_id.'))
         self.declare_parameter(
-            'laser_frame', 'laser', ParameterDescriptor(description='LiDAR frame_id.'))
-        self.declare_parameter(
             'odom_topic', '/odom_laser',
             ParameterDescriptor(description='Topic to publish nav_msgs/Odometry on.'))
         self.declare_parameter(
@@ -136,7 +137,6 @@ class LaserOdom(Node):
 
         self.odom_frame = self.get_parameter('odom_frame').value
         self.base_frame = self.get_parameter('base_frame').value
-        self.laser_frame = self.get_parameter('laser_frame').value
         self.odom_topic = self.get_parameter('odom_topic').value
         self.icp_iters = self.get_parameter('icp_iters').value
         self.icp_max_corr = self.get_parameter('icp_max_corr').value
@@ -153,15 +153,7 @@ class LaserOdom(Node):
         self.rej = 0
         self.tfb = TransformBroadcaster(self)
         self.pub = self.create_publisher(Odometry, self.odom_topic, 20)
-        # static base_link -> laser (identity: scan already base_link-aligned, turret ~center)
-        stf = StaticTransformBroadcaster(self)
-        st = TransformStamped()
-        st.header.stamp = self.get_clock().now().to_msg()
-        st.header.frame_id = self.base_frame
-        st.child_frame_id = self.laser_frame
-        st.transform.rotation.w = 1.0
-        stf.sendTransform(st)
-        self._stf = stf                  # keep alive
+        # base_link->laser is now owned by robot_state_publisher from the URDF (A4) — not here.
         self.create_subscription(LaserScan, '/scan', self.on_scan, qos_profile_sensor_data)
         # Broadcast odom->base_link at a HIGH rate with the current clock (not just per-scan at
         # the scan stamp). slam_toolbox's tf2 message-filter looks up the transform at each

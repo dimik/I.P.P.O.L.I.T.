@@ -4,10 +4,13 @@ q6a_objmap:
     # xc~346/672, near-zero offset) and 1.00m fwd + 0.30m left (bbox xc~250/672, true bearing
     # atan2(0.30,1.00)=16.7deg) solved exactly for this linear offset*hfov+yaw model:
     # hfov=116.7deg (close to the prior 110deg guess -- good sanity check), yaw=1.8deg (near
-    # enough to zero to ignore, camera is not meaningfully rotated vs base_link forward). Only
-    # calibrated over a +/-17deg range -- see G26 for the caveat on trusting wider bearings.
+    # enough to zero to ignore). Only calibrated over a +/-17deg range -- see G26 for the caveat.
+    # HFOV is a sensor INTRINSIC, so it stays here. The camera yaw offset (1.8deg) is NOT here
+    # anymore (A4): it lives in the URDF as the camera_link pose and objmap reads it back via TF,
+    # so robot geometry has one source of truth. base_frame/camera_frame name the TF frames.
     cam_hfov_deg: 116.7
-    cam_yaw_deg: 1.8
+    base_frame: base_link
+    camera_frame: camera_link
     bear_sign: -1.0
     img_width: 672
     merge_dist_m: 0.5

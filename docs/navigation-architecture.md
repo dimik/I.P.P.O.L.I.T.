@@ -245,8 +245,25 @@ Each phase = PR-sized, behavior-preserving unless stated, ends with: verify → 
 - **A4 — URDF + robot_state_publisher.** Measure/encode geometry once (wheel base, BODY_R→radius, laser
   and camera poses — the camera yaw/HFOV calibration from F0 feeds this). All static TF publishes and
   duplicated geometry constants removed in favor of TF lookups / one xacro property file.
-  ✅ `ros2 run tf2_tools view_frames` shows the full tree sourced from URDF; objmap bearing math consumes
-  the camera frame from TF.
+  ✅ DONE (2026-07-13). Measured live with a tape measure: chassis dia 0.350 m (spec, confirmed) →
+  radius 0.175 m; LDS scan-slot 0.095 m above floor at chassis center; OV8856 camera 0.16 m forward,
+  0.06 m high, on the centerline; camera yaw 1.8° (from F0(b)/G26). All encoded in a single xacro
+  `<property>` block in `ippolit_description/urdf/ippolit.urdf.xacro` — the one source of geometry
+  truth. Removed the ad-hoc static `base_link→laser` TF that `q6a_laser_odom` used to publish itself
+  (it was an identity transform duplicating what the URDF now owns — two static publishers of one
+  transform is a real bug, cf. G25's `/map` note); `robot_state_publisher` is now the sole publisher
+  of `/tf_static` (verified: publisher count 1). `q6a_objmap` no longer has a `cam_yaw_deg` param — it
+  reads the camera yaw back from the URDF via a TF lookup (`base_link→camera_link`), cached, with a
+  0-yaw fallback while `robot_state_publisher` isn't up. Verified live: `view_frames` shows
+  `odom→base_link` (dynamic) + `base_link→{laser,camera_link}` (static, `default_authority`);
+  `tf2_echo` confirms laser at z=0.095 and camera at (0.16,0,0.06) yaw 1.8°; objmap logged
+  "camera yaw from TF (camera_link): 1.80 deg". 20/20 `colcon test` green (4 new `yaw_from_quaternion`
+  cases). Wheel base (a diff-drive kinematic constant) was NOT measured/encoded — we drive via
+  Valetudo REST, not direct wheel velocities, and `/odom_laser` is scan-matched not wheel-derived, so
+  no consumer needs it yet; deferred until something does (e.g. an F4 controller that wants it).
+  NB the full `map→odom→base_link` chain only closes while the LiDAR turret is spinning (slam needs
+  live scans for `map→odom`); at idle the fanoff gate parks the turret so the tree shows as two
+  unconnected halves — expected, not an A4 regression.
 - **A5 — tests + observability.** The §2.5 test set green in CI; diagnostics + aggregator live; rolling
   MCAP recorder unit + snapshot service; cliff e-stop wired to auto-snapshot.
   🔶 IN PROGRESS (2026-07-13). **Done + live-verified:** `diagnostic_updater` tasks on 4 nodes

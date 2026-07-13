@@ -7,6 +7,42 @@ current active roadmap)**.
 
 ---
 
+## 2026-07-13 — Phase A4 DONE: URDF as the single source of robot geometry
+
+Measured the robot's real geometry once (tape measure) and encoded it in
+`ippolit_description/urdf/ippolit.urdf.xacro` as the single source of truth, in one xacro
+`<property>` block:
+- chassis diameter 0.350 m (Dreame D10s Pro spec, confirmed) → radius 0.175 m
+- LDS turret scan-slot 0.095 m above floor, at the chassis center (x=y=0)
+- OV8856 camera 0.16 m forward of center, 0.06 m above floor, on the centerline
+- camera yaw offset 1.8° (from F0(b)/G26)
+
+**Removed duplicated geometry / static-TF publishers** (the core of A4):
+- `q6a_laser_odom` no longer publishes its own `base_link→laser` static TF (it was an identity
+  transform; the URDF now owns it, with the real 0.095 m height). Two static publishers of one
+  transform with different values is a real bug -- same family as G25's `/map` double-publisher.
+  `robot_state_publisher` is now the sole `/tf_static` publisher (verified: publisher count 1).
+  Dropped the now-orphaned `laser_frame` param from the node + its yaml.
+- `q6a_objmap` no longer has a `cam_yaw_deg` param -- it reads the camera yaw back from the URDF via
+  a `base_link→camera_link` TF lookup (cached, since it's static; 0-yaw fallback while
+  robot_state_publisher isn't up yet -- a negligible, self-correcting 1.8° error, not a crash).
+  `cam_hfov_deg` stays a param (it's a sensor intrinsic, not a frame pose). Added a pure
+  `yaw_from_quaternion` helper with 4 unit tests.
+
+**Verified live:** `ros2 run tf2_tools view_frames` shows `odom→base_link` (dynamic, ~32 Hz from
+laser_odom) + `base_link→{laser,camera_link}` (static, `default_authority` = robot_state_publisher);
+`tf2_echo` confirms laser at z=0.095 and camera at (0.16, 0, 0.06) with 1.8° yaw; objmap logged
+"camera yaw from TF (camera_link): 1.80 deg" -- i.e. its bearing math now consumes the camera frame
+from TF, exactly A4's acceptance criterion. 20/20 `colcon test` green across the touched packages.
+
+**Deliberately not done:** wheel base (a diff-drive kinematic constant) -- we drive via Valetudo
+REST, not direct wheel velocities, and `/odom_laser` is scan-matched not wheel-derived, so nothing
+consumes it yet; deferred until an F4 controller wants it. Also noted (not a regression): the full
+`map→odom→base_link` chain only closes while the LiDAR turret spins; at idle the fanoff gate parks
+the turret so the TF tree reads as two unconnected halves until we drive.
+
+---
+
 ## 2026-07-13 — F0 fully DONE: camera FOV/yaw calibrated with a tape measure (G26)
 
 F0(b), the last open item of F0, is done: camera bearing/FOV calibration against a known object.

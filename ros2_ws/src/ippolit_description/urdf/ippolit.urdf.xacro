@@ -1,15 +1,39 @@
 <?xml version="1.0"?>
 <!--
-  ippolit.urdf.xacro — placeholder robot description, scaffolded in A0.
+  ippolit.urdf.xacro — the single source of truth for the robot's physical geometry (A4).
 
-  Geometry below uses only values already known from live calibration (docs/navigation-architecture.md
-  §8 appendix): chassis diameter ~0.350m (spec) / BODY_R=0.219m (empirical clearance offset, NOT the same
-  thing — see q6a_creep_test.py's history comment for why they differ and are still unreconciled).
-  laser/camera poses are UNMEASURED placeholders (0,0,0) pending F0.2 (camera bearing/FOV calibration)
-  and the A4 step that's supposed to replace every ad-hoc static-TF publish in the codebase with this
-  file as the single source of geometry truth. Do not trust laser/camera offsets below for anything yet.
+  Every measured constant lives in the xacro <property> block below and NOWHERE else in the
+  codebase: nodes that need a frame relationship look it up via TF (published by
+  robot_state_publisher from this file), rather than hard-coding an offset. This replaced the
+  ad-hoc static base_link->laser TF that q6a_laser_odom used to publish itself (A4 removed it — two
+  publishers of the same static transform with different values is a real bug, cf. the /map
+  double-publisher, G25).
+
+  Frame convention (REP-103): base_link at the round chassis's geometric center, projected to the
+  FLOOR (z=0 = floor), x forward (direction of travel), y left, z up.
+
+  Measured live 2026-07-13 (A4), with a tape measure unless noted:
+    - chassis diameter 0.350 m (Dreame D10s Pro spec, confirmed) -> radius 0.175 m
+    - LDS turret scan-slot height 0.095 m above floor; turret sits at the chassis center (x=y=0)
+    - OV8856 camera: 0.16 m forward of center, 0.06 m above floor, on the centerline (y=0)
+    - camera yaw offset 1.8 deg, from F0(b)'s bearing/FOV calibration (G26) — the camera is very
+      slightly rotated vs base_link forward; this is the SAME 1.8 deg objmap used to apply as its
+      cam_yaw_deg param, now sourced here instead (objmap reads it back from TF — A4).
+  Camera HFOV (116.7 deg, G26) is a sensor INTRINSIC, not a frame pose, so it stays a q6a_objmap
+  parameter — it does not belong in the TF tree.
 -->
 <robot name="ippolit" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- ===== measured geometry (single source of truth) ===== -->
+  <xacro:property name="chassis_radius" value="0.175"/>
+  <xacro:property name="chassis_height" value="0.097"/>
+  <xacro:property name="laser_x" value="0.0"/>
+  <xacro:property name="laser_y" value="0.0"/>
+  <xacro:property name="laser_z" value="0.095"/>
+  <xacro:property name="camera_x" value="0.16"/>
+  <xacro:property name="camera_y" value="0.0"/>
+  <xacro:property name="camera_z" value="0.06"/>
+  <xacro:property name="camera_yaw" value="${radians(1.8)}"/>
 
   <material name="chassis_grey">
     <color rgba="0.6 0.6 0.6 1.0"/>
@@ -17,39 +41,43 @@
 
   <link name="base_link">
     <visual>
-      <origin xyz="0 0 0.04" rpy="0 0 0"/>
+      <origin xyz="0 0 ${chassis_height/2}" rpy="0 0 0"/>
       <geometry>
-        <cylinder radius="0.175" length="0.08"/>
+        <cylinder radius="${chassis_radius}" length="${chassis_height}"/>
       </geometry>
       <material name="chassis_grey"/>
     </visual>
     <collision>
-      <origin xyz="0 0 0.04" rpy="0 0 0"/>
+      <origin xyz="0 0 ${chassis_height/2}" rpy="0 0 0"/>
       <geometry>
-        <cylinder radius="0.175" length="0.08"/>
+        <cylinder radius="${chassis_radius}" length="${chassis_height}"/>
       </geometry>
     </collision>
     <inertial>
       <mass value="3.0"/>
-      <origin xyz="0 0 0.04"/>
+      <origin xyz="0 0 ${chassis_height/2}"/>
       <inertia ixx="0.02" ixy="0" ixz="0" iyy="0.02" iyz="0" izz="0.03"/>
     </inertial>
   </link>
 
-  <!-- LDS turret: TODO A4 — measure real x/y/z offset from base_link center; 0.0 height placeholder -->
+  <!-- LDS turret. Rotation is identity: lds_scan_node already rotates raw LDS bearings into the
+       base_link convention (ANGLE_OFFSET_DEG), so /scan in frame 'laser' is rotationally aligned
+       to base_link — only the height offset is real. -->
   <link name="laser"/>
   <joint name="laser_joint" type="fixed">
     <parent link="base_link"/>
     <child link="laser"/>
-    <origin xyz="0 0 0.09" rpy="0 0 0"/>
+    <origin xyz="${laser_x} ${laser_y} ${laser_z}" rpy="0 0 0"/>
   </joint>
 
-  <!-- OV8856 camera: TODO A4/F0.2 — HFOV/yaw calibration feeds this pose; currently a guess -->
+  <!-- OV8856 forward camera. camera_link x-axis = the optical/forward axis; the small yaw is the
+       F0(b)-calibrated misalignment vs base_link forward. q6a_objmap reads this frame's yaw from
+       TF for its bearing math (A4). -->
   <link name="camera_link"/>
   <joint name="camera_joint" type="fixed">
     <parent link="base_link"/>
     <child link="camera_link"/>
-    <origin xyz="0.15 0 0.05" rpy="0 0 0"/>
+    <origin xyz="${camera_x} ${camera_y} ${camera_z}" rpy="0 0 ${camera_yaw}"/>
   </joint>
 
 </robot>

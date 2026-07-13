@@ -13,12 +13,14 @@ persistent objects (same class within merge_dist_m are merged, position running-
 publish /object_map (ippolit_interfaces/MappedObjectArray, typed per A3) + /object_markers
 (RViz MarkerArray).
 
-CALIBRATION (done 2026-07-13, F0(b), see G26): cam_hfov_deg/cam_yaw_deg were solved from two
-tape-measured chair positions (dead-ahead, and 0.30m left at the same 1.00m forward distance) —
-see q6a_objmap.yaml's comment for the numbers. Only calibrated over a +/-17deg bearing range;
-treat wider bearings as extrapolated, not verified (G26). bear_sign was already correct (matched
-the expected left/right convention without adjustment). Room-tagging (which Valetudo segment
-each object is in) is a TODO refinement.
+CALIBRATION (done 2026-07-13, F0(b), see G26): cam_hfov_deg (a sensor intrinsic, still a param
+here) and the camera yaw offset were solved from two tape-measured chair positions (dead-ahead,
+and 0.30m left at the same 1.00m forward distance) — see q6a_objmap.yaml + the URDF for the
+numbers. Only calibrated over a +/-17deg bearing range; treat wider bearings as extrapolated, not
+verified (G26). bear_sign was already correct (matched the expected left/right convention without
+adjustment). The camera yaw offset is NOT a param here — it lives in the URDF as the camera_link
+pose and is read back via TF (A4), so the robot geometry has one source of truth. Room-tagging
+(which Valetudo segment each object is in) is a TODO refinement.
 
 DISK PERSISTENCE (added 2026-07-12): until this, the object list lived only in memory -- a node
 restart or reboot lost everything, forcing a full re-drive to rebuild it. Now loads the objmap_file
@@ -45,6 +47,9 @@ from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool
+from tf2_ros import TransformException
+from tf2_ros.buffer import Buffer
+from tf2_ros.transform_listener import TransformListener
 from vision_msgs.msg import Detection2DArray
 try:
     from visualization_msgs.msg import Marker, MarkerArray
@@ -56,6 +61,11 @@ _DEFAULT_ALLOW = [
     'chair', 'couch', 'bed', 'dining table', 'tv', 'refrigerator', 'oven', 'microwave',
     'sink', 'toilet', 'potted plant', 'bench', 'book', 'clock', 'vase', 'suitcase',
 ]
+
+
+def yaw_from_quaternion(x, y, z, w):
+    """Return the yaw (rad) of a quaternion — the Z-rotation, ignoring any roll/pitch."""
+    return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
 
 def merge_object(objects, cls, x, y, conf, merge_dist):
@@ -87,15 +97,20 @@ class ObjMap(Node):
             ParameterDescriptor(
                 description=(
                     'OV8856 horizontal FOV, calibrated (G26) from two tape-measured chair '
-                    'positions within a +/-17deg bearing range -- see q6a_objmap.yaml.'),
+                    'positions within a +/-17deg bearing range -- see q6a_objmap.yaml. This is a '
+                    'sensor INTRINSIC, so it stays a param; the camera POSE (incl. yaw offset) '
+                    'comes from the URDF via TF instead (A4).'),
                 floating_point_range=[FloatingPointRange(from_value=30.0, to_value=170.0)]))
         self.declare_parameter(
-            'cam_yaw_deg', 1.8,
+            'base_frame', 'base_link',
+            ParameterDescriptor(description='Robot base frame (bearing math reference).'))
+        self.declare_parameter(
+            'camera_frame', 'camera_link',
             ParameterDescriptor(
                 description=(
-                    'Camera yaw offset vs base_link forward (deg), calibrated (G26) alongside '
-                    'cam_hfov_deg -- see q6a_objmap.yaml.'),
-                floating_point_range=[FloatingPointRange(from_value=-180.0, to_value=180.0)]))
+                    'Camera frame in the URDF/TF tree. Its yaw relative to base_frame replaces '
+                    'the old cam_yaw_deg param (A4) -- the URDF is the single source of the '
+                    'camera pose.')))
         self.declare_parameter(
             'bear_sign', -1.0,
             ParameterDescriptor(description='Sign flip for image +x(right) -> bearing.'))
@@ -151,7 +166,8 @@ class ObjMap(Node):
                 floating_point_range=[FloatingPointRange(from_value=0.0, to_value=1.0)]))
 
         self.h_fov = math.radians(self.get_parameter('cam_hfov_deg').value)
-        self.cam_yaw = math.radians(self.get_parameter('cam_yaw_deg').value)
+        self.base_frame = self.get_parameter('base_frame').value
+        self.camera_frame = self.get_parameter('camera_frame').value
         self.bear_sign = self.get_parameter('bear_sign').value
         self.img_width = self.get_parameter('img_width').value
         self.merge_dist = self.get_parameter('merge_dist_m').value
@@ -168,6 +184,13 @@ class ObjMap(Node):
         self.scan = None
         self.objects = []           # [{cls, x, y, n, conf}]
         self.slam_pose = False      # once slam's map-frame /pose flows, it wins over /odom
+        # Camera yaw offset vs base_link now comes from the URDF via TF (A4), not a param. Looked
+        # up lazily + cached (it's a static transform, so it never changes once obtained); falls
+        # back to 0 while robot_state_publisher isn't up yet (a 1.8deg error -- negligible, and it
+        # self-corrects the moment TF resolves).
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+        self.cam_yaw = None
         n_loaded = self.load()
         self.create_subscription(Odometry, '/odom', self.on_odom, 10)
         if self.pose_topic:
@@ -239,6 +262,29 @@ class ObjMap(Node):
     def on_scan(self, m):
         self.scan = m
 
+    def get_cam_yaw(self):
+        """
+        Return the camera yaw offset vs base_frame (rad), from the URDF via TF; cached (A4).
+
+        Returns 0.0 (with a throttled warn) until robot_state_publisher's base_link->camera_link
+        transform is available -- a small, self-correcting error, not a crash.
+        """
+        if self.cam_yaw is not None:
+            return self.cam_yaw
+        try:
+            tf = self.tf_buffer.lookup_transform(
+                self.base_frame, self.camera_frame, rclpy.time.Time())
+        except TransformException as e:
+            self.get_logger().warn(
+                f'camera TF {self.base_frame}->{self.camera_frame} not ready ({e}); '
+                f'using 0 yaw for now', throttle_duration_sec=10.0)
+            return 0.0
+        q = tf.transform.rotation
+        self.cam_yaw = yaw_from_quaternion(q.x, q.y, q.z, q.w)
+        self.get_logger().info(
+            f'camera yaw from TF ({self.camera_frame}): {math.degrees(self.cam_yaw):.2f} deg')
+        return self.cam_yaw
+
     def scan_range(self, bearing):
         """Return LiDAR range (m) at a base_link bearing (rad); None if unavailable."""
         s = self.scan
@@ -256,6 +302,7 @@ class ObjMap(Node):
         if self.pose is None:
             return
         xr, yr, yaw = self.pose
+        cam_yaw = self.get_cam_yaw()                        # from URDF via TF (A4)
         for det in msg.detections:
             if not det.results:
                 continue
@@ -265,7 +312,7 @@ class ObjMap(Node):
                 continue                                   # skip low-conf + non-furniture
             xc = det.bbox.center.position.x                # already center-of-bbox, in pixels
             bearing = (self.bear_sign * ((xc / self.img_width) - 0.5) * self.h_fov
-                       + self.cam_yaw)                      # base_link bearing
+                       + cam_yaw)                           # base_link bearing
             rng = self.scan_range(bearing)                  # metric range (needs turret spinning)
             if rng is None:
                 continue                                    # no LiDAR range yet -> can't place
