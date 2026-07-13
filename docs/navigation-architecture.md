@@ -61,7 +61,7 @@ ros2_ws/src/
                           #   twist_mux config
   ippolit_safety/         # cliff_guard, cliff_scan (virtual-obstacle publisher), estop logic
   ippolit_perception/     # vision node (YOLO+ByteTrack+MiDaS), objmap node
-  ippolit_localization/   # laser_odom (custom ICP, kept — see D3), map_persist
+  ippolit_localization/   # map_persist (laser_odom ICP retired 2026-07-13 — see D3/G30; odom = EKF)
   ippolit_navigation/     # nav2 params, costmap filter masks, goto_object action client
   ippolit_teleop/         # (thin) foxglove teleop remaps, joystick later
   ippolit_bringup/        # launch/*.launch.xml, config/*.yaml (ALL node params), systemd templates,
@@ -172,10 +172,15 @@ between us and the NPU/camera stack for zero current benefit. Rollback = `git ch
   case-by-case.
 - **D2 — single actuation node** (`cmd_vel_bridge`) + `twist_mux`: eliminates the REST-race bug class by
   construction; keeps the whole AVA dependency behind one standard interface.
-- **D3 — keep the custom ICP laser odom for now.** Evaluated alternatives: `robot_localization` EKF
-  (wheel+IMU fusion) and community 2-D laser odometry (rf2o/kiss-icp). Ours is live-validated on this
-  exact sensor; wheel odom slips in pivots (measured), so an EKF fed by it needs careful covariance work.
-  Revisit only if laser odom becomes the accuracy bottleneck after Phase F3 mapping. Not a blocker.
+- **D3 — REVERSED 2026-07-13: retired the custom ICP laser odom in favor of the `robot_localization`
+  EKF (wheel+IMU).** The original decision kept the custom ICP for now (wheel odom slips in pivots, so
+  an EKF needed covariance work). During the F0/F1 drive work that EKF got built (G28), and the
+  four-way odom comparison (G30) then showed the custom ICP actually **drifts in yaw** (~4°/drive) —
+  gyro + wheel + the user's eyes all agreed the robot drove straight while the ICP falsely accumulated
+  rotation. So the ICP was the LESS accurate source, not the safer one. `q6a_laser_odom` is retired
+  (removed from the launch + entry point; source recoverable from git); the EKF owns `odom->base_link`
+  and slam_toolbox does its own correlative scan matching + loop closure for `map->odom`. The wheel-slip
+  concern that motivated keeping the ICP is handled by the EKF trusting the IMU gyro for rotation.
 - **D4 — native-on-device builds, no Docker yet** (see 2.6).
 - **D5 — Foxglove over RViz** for off-board viz: `ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST` is deliberate
   (DDS stability); foxglove_bridge exports over one websocket without touching DDS. RViz possible later

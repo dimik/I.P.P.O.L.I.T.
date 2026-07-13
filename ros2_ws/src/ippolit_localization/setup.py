@@ -14,12 +14,13 @@ setup(
     zip_safe=True,
     maintainer='Dmitry Poklonskiy',
     maintainer_email='dmitry.poklonskiy@kingmakers.com',
-    description='Laser-ICP odometry and slam_toolbox map persistence',
+    description='slam_toolbox map persistence (odometry is the robot_localization EKF)',
     license='Apache-2.0',
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'q6a_laser_odom = ippolit_localization.q6a_laser_odom:main',
+            # q6a_laser_odom retired 2026-07-13 (G30): its ICP drifted in yaw and it was superseded
+            # by the wheel+IMU EKF; slam_toolbox does its own scan matching. Recoverable from git.
             'q6a_map_persist = ippolit_localization.q6a_map_persist:main',
         ],
     },

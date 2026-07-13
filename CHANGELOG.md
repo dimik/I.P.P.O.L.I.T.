@@ -7,6 +7,25 @@ current active roadmap)**.
 
 ---
 
+## 2026-07-13 — Retire q6a_laser_odom (reverses D3)
+
+Retired the custom ICP laser odometry node, following the G30 finding that its point-to-point ICP
+drifts in yaw while the wheel+IMU EKF (G28) is accurate. Removed the node from
+`localization.launch.xml`, dropped its `setup.py` entry point and `q6a_laser_odom.yaml` config, and
+deleted the source (recoverable from git). Reverses decision D3 ("keep the custom ICP for now").
+
+Nothing depended on it: `/odom_laser` had zero subscribers once the EKF took over `odom->base_link`,
+and it hadn't published TF since the EKF landed. The LiDAR itself is untouched — `/scan` still has 4
+consumers (slam_toolbox for mapping + map->odom, q6a_objmap for range, cliff_guard, the incident
+recorder); only this one redundant/drifty consumer is gone.
+
+Verified live: clean rebuild + restart, `q6a_laser_odom` node/executable/topic all absent,
+`/odometry/filtered` still @ 30 Hz, EKF remains the sole `odom->base_link` publisher, aggregator OK,
+zero errors. 7/7 colcon test green. Localization is now: EKF (wheel+IMU) → odom->base_link;
+slam_toolbox → map->odom + /map + /pose; map_persist → save/resume.
+
+---
+
 ## 2026-07-13 — Fix /battery charging flag (broken since the companion migration)
 
 Found while the robot was charging: `/battery` reported `power_supply_status: 0` (UNKNOWN) even
