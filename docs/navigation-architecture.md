@@ -391,15 +391,22 @@ A2 (param-driven nav tuning) and ideally A3/A4.
   and **`/cmd_vel_nav` is `geometry_msgs/msg/Twist`** — the G23-class TwistStamped trap is avoided
   (Jazzy Nav2 defaults to plain Twist here). No goals sent → no motion. Chose slam_toolbox-for-
   localization over amcl since we're mapping online.
-  **STAGE 2 (pending, needs the turret spinning = supervised driving):** costmap population and
-  planning CANNOT be verified with the turret parked — slam publishes no fresh `map->odom` and `/scan`
-  goes stale, so the costmaps sit on "extrapolation into the past" and `map->base_link` won't resolve.
-  This is inherent to the LiDAR-gate design (turret only spins in active/manual_control modes; cleaning
-  that would spin it is blocked by work_mode 17). So stage 2 = drive to keep the turret spinning, then
-  confirm costmaps populate + `ComputePathToPose` plans (still no autonomous motion needed for the plan
-  check), then a first supervised `NavigateToPose` goal + RPP tuning. Also still deferred: velocity
-  calibration (G24) feeding a real `max_vel_x`, KeepoutFilter/SpeedFilter masks, `virtual_cliff_scan`
-  (F5), and a `collision_monitor`.
+  🔶 STAGE 2 DONE (2026-07-14, supervised — costmaps + planning, still NO autonomous motion): with
+  the turret kept spinning (a gentle in-place teleop rotation; user supervising), confirmed live that
+  `/scan` flows, `map->base_link` resolves (robot localized in the map), the **global costmap
+  populates** (790×428 — the full slam `/map` loaded into the static layer), the **local costmap
+  populates** (80×80 = 4×4 m rolling window from `/scan`), and — the key check — a **`ComputePathToPose`
+  action SUCCEEDED** (error_code 0, valid path returned) to a goal ~0.7 m ahead. So the full
+  planning pipeline (localization → costmaps → NavFn) works. Confirmed the earlier turret-parked
+  failure ("extrapolation into the past", `map->base_link` unresolved) was purely the stale-scan
+  artifact — it clears the moment the LiDAR spins. The plan check drove nothing (only the turret-alive
+  rotation moved the robot). NB the `ippolit-nav` systemd unit is NOT yet installed on the device
+  (launched manually for these tests); install it before Nav2 goes production.
+  **STAGE 3 (pending, needs supervised autonomous driving):** first `NavigateToPose` goal + RPP
+  controller tuning — this is the actual "robot drives itself to a goal" step and the F4 acceptance
+  below. Still deferred: velocity calibration (G24) feeding a real `max_vel_x` (RPP output m/s is only
+  roughly mapped to Valetudo velocity today), KeepoutFilter/SpeedFilter masks, `virtual_cliff_scan`
+  (F5), and a `collision_monitor` (add before autonomous driving for a hard obstacle-stop backstop).
   ✅ Repeatable A→B ±0.15 m, masks honored (watch costmap overlays). [stage-2 acceptance, not yet run]
 - **F5 — cliff-aware navigation**: `cliff_scan` virtual-obstacle node (FloorDrop → short-range synthetic
   LaserScan, latched ≥10 s, cleared only on >15° heading change per G9). Supervised test triple: goal

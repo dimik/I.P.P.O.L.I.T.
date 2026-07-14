@@ -7,6 +7,29 @@ current active roadmap)**.
 
 ---
 
+## 2026-07-14 — F4 stage 2: Nav2 costmaps + planning verified live (supervised, no autonomous motion)
+
+Verified the Nav2 stack end-to-end for planning, with the LiDAR turret kept spinning by a gentle
+in-place teleop rotation (user supervising). Confirmed live:
+- `/scan` flows, `map->base_link` resolves (robot localized in the map).
+- Global costmap populates: 790x428 @ 0.05m — the full slam_toolbox `/map` loaded into the static
+  layer.
+- Local costmap populates: 80x80 @ 0.05m (4x4 m rolling window from `/scan`).
+- **`ComputePathToPose` action SUCCEEDED** (error_code 0, valid path returned) to a goal ~0.7 m
+  ahead — the full localization → costmaps → NavFn planner pipeline works.
+
+The earlier turret-parked failure ("extrapolation into the past", `map->base_link` unresolved) was
+confirmed to be purely the stale-scan artifact; it clears the instant the LiDAR spins. No drive goals
+issued — the only motion was the turret-alive rotation. Cleaned up after: Nav2 stopped, fanoff gate
+daemon restored, robot idle.
+
+Two follow-ups noted: the `ippolit-nav` systemd unit isn't installed on the device yet (Nav2 was
+launched manually for these tests); and stage 3 = a first supervised `NavigateToPose` goal + RPP
+tuning (the actual autonomous-drive step), which also wants the G24 velocity calibration and a
+`collision_monitor` backstop first.
+
+---
+
 ## 2026-07-14 — F4 stage 1: Nav2 bringup scaffold (software, no motion)
 
 After confirming AVA's native autonomy is fully locked by work_mode 17 (start/goto/home all return
