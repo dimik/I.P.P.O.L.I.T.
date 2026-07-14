@@ -7,6 +7,35 @@ current active roadmap)**.
 
 ---
 
+## 2026-07-14 — F4 stage-3 prep: collision_monitor + ippolit-nav unit; Nav2-needs-turret finding (G31)
+
+Prepping the first autonomous drive:
+- Installed the `ippolit-nav` systemd unit on the device (disabled — startable on demand; Nav2 isn't
+  production-auto yet).
+- Added a **`collision_monitor`** safety backstop between the planner and the robot: RPP/behaviors now
+  publish `/cmd_vel_raw` → collision_monitor (watches `/scan` directly, independent of the costmaps;
+  circular stop zone r=0.28 m + slowdown r=0.45 m, base_link) → `/cmd_vel_nav` → twist_mux →
+  cmd_vel_bridge. Verified live it activates, loads both zones, and publishes `/polygon_stop` +
+  `/polygon_slowdown`; both `/cmd_vel_raw` and `/cmd_vel_nav` are plain `Twist` (re-checked the G23
+  trap on the new wiring). Its stop *behavior* gets exercised in the drive test (needs a goal +
+  obstacle).
+
+**G31 (important operational finding):** Nav2 will NOT activate unless the LiDAR turret is ALREADY
+spinning at launch. The global costmap needs `map->base_link` to activate → needs slam's `map->odom`
+→ needs fresh `/scan`. Turret parked at launch ⇒ `planner_server` fails to activate ("transform
+base_link→map did not become available") ⇒ lifecycle_manager aborts the whole bringup (no retry).
+Correct order: override the fanoff gate, spin the turret (teleop), THEN launch Nav2 — verified it then
+activates all nodes cleanly (controller/planner/behavior/bt_navigator/collision_monitor all active).
+Recorded as G31, with the durable-fix idea (make slam publish `map->odom` continuously so Nav2 can
+activate independent of live scans).
+
+**Stage 3 remaining (supervised autonomous drive):** first `NavigateToPose` + RPP tuning. Open
+coordination issue to solve there: keeping the turret spun through the teleop→RPP handoff (teleop prio
+50 > nav 10). Also still wants the G24 velocity calibration. Cleaned up after: Nav2 stopped, gate
+daemon restored, robot idle.
+
+---
+
 ## 2026-07-14 — F4 stage 2: Nav2 costmaps + planning verified live (supervised, no autonomous motion)
 
 Verified the Nav2 stack end-to-end for planning, with the LiDAR turret kept spinning by a gentle

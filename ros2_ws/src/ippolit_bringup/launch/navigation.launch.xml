@@ -4,15 +4,16 @@
      goes out on /cmd_vel_nav -> twist_mux (prio 10) -> cmd_vel_bridge -> Valetudo REST; Nav2 NEVER
      touches REST directly (D2, single-actuation-node rule). See config/nav2.yaml.
 
-     STAGE 1 (this): stack comes up + activates + plans, but sends NO goals -> NO motion until a
-     NavigateToPose goal is issued (supervised). controller_server + behavior_server publish `cmd_vel`
-     which we remap to /cmd_vel_nav. -->
+     Velocity path: controller_server + behavior_server publish `cmd_vel` -> remapped to
+     /cmd_vel_raw -> collision_monitor (watches /scan, zeroes on wall-in-stop-zone) -> /cmd_vel_nav
+     -> twist_mux (prio 10) -> cmd_vel_bridge -> Valetudo REST. Nav2 never touches REST (D2).
+     Sending NO goal => no motion. -->
 <launch>
   <let name="params" value="$(find-pkg-share ippolit_bringup)/config/nav2.yaml"/>
 
   <node pkg="nav2_controller" exec="controller_server" name="controller_server" output="both">
     <param from="$(var params)"/>
-    <remap from="cmd_vel" to="/cmd_vel_nav"/>
+    <remap from="cmd_vel" to="/cmd_vel_raw"/>
   </node>
 
   <node pkg="nav2_planner" exec="planner_server" name="planner_server" output="both">
@@ -21,10 +22,15 @@
 
   <node pkg="nav2_behaviors" exec="behavior_server" name="behavior_server" output="both">
     <param from="$(var params)"/>
-    <remap from="cmd_vel" to="/cmd_vel_nav"/>
+    <remap from="cmd_vel" to="/cmd_vel_raw"/>
   </node>
 
   <node pkg="nav2_bt_navigator" exec="bt_navigator" name="bt_navigator" output="both">
+    <param from="$(var params)"/>
+  </node>
+
+  <node pkg="nav2_collision_monitor" exec="collision_monitor" name="collision_monitor"
+        output="both">
     <param from="$(var params)"/>
   </node>
 

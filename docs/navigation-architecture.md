@@ -402,12 +402,26 @@ A2 (param-driven nav tuning) and ideally A3/A4.
   artifact — it clears the moment the LiDAR spins. The plan check drove nothing (only the turret-alive
   rotation moved the robot). NB the `ippolit-nav` systemd unit is NOT yet installed on the device
   (launched manually for these tests); install it before Nav2 goes production.
-  **STAGE 3 (pending, needs supervised autonomous driving):** first `NavigateToPose` goal + RPP
-  controller tuning — this is the actual "robot drives itself to a goal" step and the F4 acceptance
-  below. Still deferred: velocity calibration (G24) feeding a real `max_vel_x` (RPP output m/s is only
-  roughly mapped to Valetudo velocity today), KeepoutFilter/SpeedFilter masks, `virtual_cliff_scan`
-  (F5), and a `collision_monitor` (add before autonomous driving for a hard obstacle-stop backstop).
-  ✅ Repeatable A→B ±0.15 m, masks honored (watch costmap overlays). [stage-2 acceptance, not yet run]
+  🔶 STAGE 3 PREP DONE (2026-07-14): (1) installed the `ippolit-nav` systemd unit on the device
+  (disabled — startable on demand; Nav2 not production-auto yet). (2) added a **`collision_monitor`**
+  safety backstop: RPP/behaviors now publish `/cmd_vel_raw` → collision_monitor (watches `/scan`
+  directly, circular stop zone r=0.28 / slowdown r=0.45, base_link) → `/cmd_vel_nav`. Verified live it
+  activates + loads both zones + publishes `/polygon_stop`,`/polygon_slowdown`; `/cmd_vel_raw` and
+  `/cmd_vel_nav` are both plain `Twist` (G23 re-checked on the new wiring). Its stop *behavior* is
+  exercised in the drive test (needs a goal + obstacle).
+  **G31 found:** Nav2 will NOT activate unless the LiDAR turret is ALREADY spinning at launch — the
+  global costmap's activation requires `map->base_link`, which needs slam's `map->odom`, which slam
+  only publishes while it has fresh `/scan`. With the turret parked, `planner_server` fails to activate
+  ("transform base_link→map did not become available") and the lifecycle_manager **aborts the whole
+  bringup** (no auto-retry). Correct bringup order: spin the turret (teleop/active mode) FIRST, then
+  launch Nav2. Documented in §9.
+  **STAGE 3 REMAINING (needs supervised autonomous driving):** first `NavigateToPose` goal + RPP
+  tuning — the actual "robot drives itself to a goal" step + F4 acceptance below. Open coordination
+  problem to solve there: the turret must stay spinning through the teleop→RPP handoff (teleop prio 50
+  > nav 10, so a turret-keepalive teleop *blocks* RPP; stopping it must hand to RPP within the ~0.4 s
+  watchdog or the turret parks and Nav2 goes blind). Still deferred: G24 velocity calibration for a
+  real `max_vel_x`; KeepoutFilter/SpeedFilter masks; `virtual_cliff_scan` (F5).
+  ✅ Repeatable A→B ±0.15 m, masks honored (watch costmap overlays). [stage-3 acceptance, not yet run]
 - **F5 — cliff-aware navigation**: `cliff_scan` virtual-obstacle node (FloorDrop → short-range synthetic
   LaserScan, latched ≥10 s, cleared only on >15° heading change per G9). Supervised test triple: goal
   across speed zone (slows), goal inside keepout (refused), hand-placed aimed at hole off-mask (virtual
@@ -451,7 +465,7 @@ envelope (1.0 fails), MiDaS edge calibration table (65→5 cm), thermal enclosur
 worker. Battery telemetry via `/battery` (Valetudo charging flag broken on this model). IR floor sensors
 conclusively useless for early warning (co-fire with wheel-drop).
 
-## 9. Gotchas (G1–G30) — G1-G12 unchanged from rev 1, G13-G30 found live during A0/A1/F1/A5/F0; MUST READ
+## 9. Gotchas (G1–G31) — G1-G12 unchanged from rev 1, G13-G31 found live during A0/A1/F1/A5/F0/F4; MUST READ
 
 - **G1** Valetudo holds the last velocity — stopping requires actively sending zero; a silent watchdog is
   not a stop.
@@ -739,6 +753,23 @@ conclusively useless for early warning (co-fire with wheel-drop).
   `scripts/companion/diag/odom_compare.py` (4-way logger), `gyro_yaw_check.py` (gyro-vs-wheel-vs-laser
   arbiter), and `cmdprobe.py` (commanded-`/cmd_vel`-vs-gyro-vs-odom) — reuse them whenever an odom
   source or the command path is suspect.
+- **G31** (found live, F4 stage-2/3, 2026-07-14) — **Nav2 will not even ACTIVATE unless the LiDAR
+  turret is already spinning at launch.** The global costmap (in `planner_server`) requires the
+  `map->base_link` transform to activate; that needs slam_toolbox's `map->odom`, which slam only
+  publishes while it has fresh `/scan`. If the turret is parked at Nav2 launch, `planner_server`'s
+  costmap logs "transform base_link→map did not become available before timeout", `planner_server`
+  fails to activate, and the lifecycle_manager **aborts the entire bringup** (no auto-retry — the
+  other servers are left stuck `inactive [2]`). This compounds the LiDAR-gate design (the fanoff gate
+  parks the turret except in active modes, and AVA's own autonomous cleaning that would spin it is
+  work_mode-17-blocked). Correct bringup order for Nav2: (1) override the fanoff gate (kill the daemon
+  + `: > /tmp/lidar_allow`), (2) put the robot in an active mode to spin the turret (a teleop
+  keepalive rotation), (3) THEN launch Nav2 — it activates cleanly with `map->base_link` available.
+  This also means sustained autonomous nav depends on the turret staying spun up for the whole run
+  (it does while RPP keeps the robot moving = manual_control), and the teleop→RPP startup handoff is
+  delicate (teleop prio 50 > nav 10, so a keepalive teleop blocks RPP; releasing it must hand to RPP
+  within cmd_vel_bridge's ~0.4 s watchdog or the turret parks and Nav2 goes blind). A durable fix
+  worth considering: make slam_toolbox publish `map->odom` continuously (last-known) so Nav2 can
+  activate independent of live scans, and/or a dedicated "keep turret spinning" companion mode.
 - **G26** (found live, F0(b)'s camera calibration, 2026-07-13) an eyeballed/paced two-point bearing
   calibration produced a physically implausible result — placing a chair "about 1m away" then "about
   1m to the left" and solving the code's linear `bearing = bear_sign*offset_frac*hfov + cam_yaw` model

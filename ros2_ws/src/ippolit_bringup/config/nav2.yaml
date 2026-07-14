@@ -167,6 +167,47 @@ behavior_server:
     min_rotational_vel: 0.2
     rotational_acc_lim: 1.0
 
+# Safety backstop for autonomous motion (F4 stage 3 prep): sits BETWEEN the planner and the robot.
+# RPP/behaviors publish on /cmd_vel_raw; collision_monitor watches /scan directly (independent of
+# the costmaps/planner) and zeroes the command if a wall enters the stop zone, or scales it down in
+# the slowdown zone, then forwards to /cmd_vel_nav -> twist_mux -> cmd_vel_bridge. base_link (this
+# robot has no base_footprint frame). Circular zones sized off the 0.175 m footprint; conservative
+# for the first autonomous drives -- may over-stop near walls, tune later.
+collision_monitor:
+  ros__parameters:
+    base_frame_id: "base_link"
+    odom_frame_id: "odom"
+    cmd_vel_in_topic: "cmd_vel_raw"
+    cmd_vel_out_topic: "cmd_vel_nav"
+    state_topic: "collision_monitor_state"
+    transform_tolerance: 0.5
+    source_timeout: 1.5
+    base_shift_correction: True
+    stop_pub_timeout: 2.0
+    polygons: ["PolygonStop", "PolygonSlow"]
+    PolygonStop:
+      type: "circle"
+      radius: 0.28
+      action_type: "stop"
+      min_points: 4
+      visualize: True
+      polygon_pub_topic: "polygon_stop"
+      enabled: True
+    PolygonSlow:
+      type: "circle"
+      radius: 0.45
+      action_type: "slowdown"
+      min_points: 4
+      slowdown_ratio: 0.4
+      visualize: True
+      polygon_pub_topic: "polygon_slowdown"
+      enabled: True
+    observation_sources: ["scan"]
+    scan:
+      type: "scan"
+      topic: "/scan"
+      enabled: True
+
 lifecycle_manager_navigation:
   ros__parameters:
     autostart: true
@@ -175,3 +216,4 @@ lifecycle_manager_navigation:
       - planner_server
       - behavior_server
       - bt_navigator
+      - collision_monitor
