@@ -1,6 +1,35 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- navigation.launch.xml — stub, scaffolded in A0. Filled in during A1 (wrap existing nodes) /
-     later feature phases per docs/navigation-architecture.md. Intentionally empty for now:
-     colcon build/test only needs this file to be valid+installable, not functional. -->
+<!-- navigation.launch.xml — Nav2 bringup (F4, ippolit-nav systemd group, blast-radius group 3 of 4).
+     Uses slam_toolbox's live /map + map->odom (no amcl, no map_server). RPP controller. Velocity
+     goes out on /cmd_vel_nav -> twist_mux (prio 10) -> cmd_vel_bridge -> Valetudo REST; Nav2 NEVER
+     touches REST directly (D2, single-actuation-node rule). See config/nav2.yaml.
+
+     STAGE 1 (this): stack comes up + activates + plans, but sends NO goals -> NO motion until a
+     NavigateToPose goal is issued (supervised). controller_server + behavior_server publish `cmd_vel`
+     which we remap to /cmd_vel_nav. -->
 <launch>
+  <let name="params" value="$(find-pkg-share ippolit_bringup)/config/nav2.yaml"/>
+
+  <node pkg="nav2_controller" exec="controller_server" name="controller_server" output="both">
+    <param from="$(var params)"/>
+    <remap from="cmd_vel" to="/cmd_vel_nav"/>
+  </node>
+
+  <node pkg="nav2_planner" exec="planner_server" name="planner_server" output="both">
+    <param from="$(var params)"/>
+  </node>
+
+  <node pkg="nav2_behaviors" exec="behavior_server" name="behavior_server" output="both">
+    <param from="$(var params)"/>
+    <remap from="cmd_vel" to="/cmd_vel_nav"/>
+  </node>
+
+  <node pkg="nav2_bt_navigator" exec="bt_navigator" name="bt_navigator" output="both">
+    <param from="$(var params)"/>
+  </node>
+
+  <node pkg="nav2_lifecycle_manager" exec="lifecycle_manager" name="lifecycle_manager_navigation"
+        output="both">
+    <param from="$(var params)"/>
+  </node>
 </launch>

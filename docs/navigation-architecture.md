@@ -382,7 +382,25 @@ A2 (param-driven nav tuning) and ideally A3/A4.
 - **F4 — Nav2 bringup** (`ippolit_navigation` + nav group unit): params per §2.3; controller RPP with
   `max_vel_x` = calibrated m/s equivalent of Valetudo 0.4; `/cmd_vel`→`/cmd_vel_nav` remap (Nav2 NEVER
   touches REST); expect a laggy local costmap at 5 Hz scan — keep speeds low, reactive layers cover.
-  ✅ Repeatable A→B ±0.15 m, masks honored (watch costmap overlays).
+  🔶 STAGE 1 DONE (2026-07-14, software scaffold, no motion): wrote `config/nav2.yaml` +
+  `navigation.launch.xml` — RPP controller (not the default MPPI; lighter for the Q6A), NavFn planner,
+  circular footprint r=0.175 (A4), odom `/odometry/filtered`, costmap obstacle source `/scan`, global
+  static layer off slam_toolbox's `/map` (NO amcl, NO map_server — slam provides map + map->odom).
+  `/cmd_vel`→`/cmd_vel_nav` remap wired (twist_mux prio 10 → cmd_vel_bridge). Verified live: the whole
+  stack **builds, launches, and the lifecycle activates** (`controller_server` = `active`, RPP loaded),
+  and **`/cmd_vel_nav` is `geometry_msgs/msg/Twist`** — the G23-class TwistStamped trap is avoided
+  (Jazzy Nav2 defaults to plain Twist here). No goals sent → no motion. Chose slam_toolbox-for-
+  localization over amcl since we're mapping online.
+  **STAGE 2 (pending, needs the turret spinning = supervised driving):** costmap population and
+  planning CANNOT be verified with the turret parked — slam publishes no fresh `map->odom` and `/scan`
+  goes stale, so the costmaps sit on "extrapolation into the past" and `map->base_link` won't resolve.
+  This is inherent to the LiDAR-gate design (turret only spins in active/manual_control modes; cleaning
+  that would spin it is blocked by work_mode 17). So stage 2 = drive to keep the turret spinning, then
+  confirm costmaps populate + `ComputePathToPose` plans (still no autonomous motion needed for the plan
+  check), then a first supervised `NavigateToPose` goal + RPP tuning. Also still deferred: velocity
+  calibration (G24) feeding a real `max_vel_x`, KeepoutFilter/SpeedFilter masks, `virtual_cliff_scan`
+  (F5), and a `collision_monitor`.
+  ✅ Repeatable A→B ±0.15 m, masks honored (watch costmap overlays). [stage-2 acceptance, not yet run]
 - **F5 — cliff-aware navigation**: `cliff_scan` virtual-obstacle node (FloorDrop → short-range synthetic
   LaserScan, latched ≥10 s, cleared only on >15° heading change per G9). Supervised test triple: goal
   across speed zone (slows), goal inside keepout (refused), hand-placed aimed at hole off-mask (virtual

@@ -7,6 +7,37 @@ current active roadmap)**.
 
 ---
 
+## 2026-07-14 — F4 stage 1: Nav2 bringup scaffold (software, no motion)
+
+After confirming AVA's native autonomy is fully locked by work_mode 17 (start/goto/home all return
+HTTP 400 — tested live), the companion has to provide autonomy, so started the Nav2 stack (F4).
+
+Stage 1 (software scaffold, no driving): wrote `ippolit_bringup/config/nav2.yaml` +
+`navigation.launch.xml`. Design: RPP controller (not the default MPPI — lighter for the Q6A and fits
+this robot: drives straight, turns in place, no reverse), NavFn planner, circular footprint r=0.175
+(A4 URDF), odom `/odometry/filtered` (the wheel+IMU EKF), costmap obstacle source `/scan`, global
+static layer from slam_toolbox's latched `/map`. NO amcl, NO map_server — slam_toolbox already
+provides `/map` + `map->odom` (online SLAM localization). Velocity out on `/cmd_vel_nav` → twist_mux
+(prio 10) → cmd_vel_bridge → Valetudo REST (Nav2 never touches REST directly, per D2). Added the
+nav2 exec deps to `ippolit_bringup/package.xml`.
+
+**Verified live:** stack builds, launches, and the lifecycle **activates** (`controller_server`
+`active`, RPP plugin loaded, all nav nodes up); **`/cmd_vel_nav` is `geometry_msgs/msg/Twist`** — the
+G23-class TwistStamped mismatch is avoided (Jazzy Nav2 defaults to plain Twist here). No goals issued
+→ robot did not move.
+
+**Stage 2 (pending, needs the turret spinning = supervised driving):** costmaps + planning can't be
+verified with the turret parked — no fresh `map->odom`/`/scan`, so `map->base_link` won't resolve and
+the costmaps sit on "extrapolation into the past." Inherent to the LiDAR-gate design (turret only
+spins in active modes; cleaning is work_mode-17-blocked). Stage 2 = drive to keep the turret spinning,
+confirm costmaps populate + `ComputePathToPose` plans (plan check needs no motion), then a first
+supervised `NavigateToPose` + RPP tuning. Still deferred: G24 velocity calibration for a real
+`max_vel_x`, keepout/speed filter masks, `virtual_cliff_scan` (F5), `collision_monitor`.
+
+`ippolit-nav` systemd service left inactive (launched manually for the test, then stopped clean).
+
+---
+
 ## 2026-07-13 — Retire q6a_laser_odom (reverses D3)
 
 Retired the custom ICP laser odometry node, following the G30 finding that its point-to-point ICP
