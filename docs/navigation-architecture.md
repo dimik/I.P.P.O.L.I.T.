@@ -415,13 +415,18 @@ A2 (param-driven nav tuning) and ideally A3/A4.
   ("transform base_link→map did not become available") and the lifecycle_manager **aborts the whole
   bringup** (no auto-retry). Correct bringup order: spin the turret (teleop/active mode) FIRST, then
   launch Nav2. Documented in §9.
-  **STAGE 3 REMAINING (needs supervised autonomous driving):** first `NavigateToPose` goal + RPP
-  tuning — the actual "robot drives itself to a goal" step + F4 acceptance below. Open coordination
-  problem to solve there: the turret must stay spinning through the teleop→RPP handoff (teleop prio 50
-  > nav 10, so a turret-keepalive teleop *blocks* RPP; stopping it must hand to RPP within the ~0.4 s
-  watchdog or the turret parks and Nav2 goes blind). Still deferred: G24 velocity calibration for a
-  real `max_vel_x`; KeepoutFilter/SpeedFilter masks; `virtual_cliff_scan` (F5).
-  ✅ Repeatable A→B ±0.15 m, masks honored (watch costmap overlays). [stage-3 acceptance, not yet run]
+  **STAGE 3 — first `NavigateToPose` ATTEMPTED, FAILED (2026-07-14, see G32):** goal accepted, RPP
+  produced commands, but the drive never happened and the goal aborted (nav error 102, TF
+  extrapolation). Root cause was NOT the planner: the "teleop-keepalive + ssh handoff" scheme failed
+  — the handoff ssh command dropped before its `pkill`, so the turret-keepalive teleop kept running,
+  spun the robot in place uncommanded (until manually e-stopped), and (being prio 50 > nav 10) blocked
+  RPP the whole time. Safety incident + lessons in **G32**: cmd_vel_bridge's watchdog does NOT catch a
+  runaway publisher, and ssh-orchestrated motion is unsafe. **The keepalive+handoff approach is
+  abandoned.** Prerequisites before re-attempting: (a) fix the turret/localization coupling (G31:
+  slam-continuous `map->odom` or a turret-alive mode) so RPP can be the SOLE self-sustaining driver
+  (no teleop keepalive fighting it); (b) a proper controller/e-stop that isn't shell-orchestrated;
+  (c) G24 velocity calibration; then KeepoutFilter/SpeedFilter masks + `virtual_cliff_scan` (F5).
+  ✅ Repeatable A→B ±0.15 m, masks honored (watch costmap overlays). [stage-3 acceptance, not yet met]
 - **F5 — cliff-aware navigation**: `cliff_scan` virtual-obstacle node (FloorDrop → short-range synthetic
   LaserScan, latched ≥10 s, cleared only on >15° heading change per G9). Supervised test triple: goal
   across speed zone (slows), goal inside keepout (refused), hand-placed aimed at hole off-mask (virtual
@@ -465,7 +470,7 @@ envelope (1.0 fails), MiDaS edge calibration table (65→5 cm), thermal enclosur
 worker. Battery telemetry via `/battery` (Valetudo charging flag broken on this model). IR floor sensors
 conclusively useless for early warning (co-fire with wheel-drop).
 
-## 9. Gotchas (G1–G31) — G1-G12 unchanged from rev 1, G13-G31 found live during A0/A1/F1/A5/F0/F4; MUST READ
+## 9. Gotchas (G1–G32) — G1-G12 unchanged from rev 1, G13-G32 found live during A0/A1/F1/A5/F0/F4; MUST READ
 
 - **G1** Valetudo holds the last velocity — stopping requires actively sending zero; a silent watchdog is
   not a stop.
@@ -770,6 +775,24 @@ conclusively useless for early warning (co-fire with wheel-drop).
   within cmd_vel_bridge's ~0.4 s watchdog or the turret parks and Nav2 goes blind). A durable fix
   worth considering: make slam_toolbox publish `map->odom` continuously (last-known) so Nav2 can
   activate independent of live scans, and/or a dedicated "keep turret spinning" companion mode.
+- **G32** (SAFETY, found live during the first NavigateToPose attempt, 2026-07-14) — **orchestrating
+  robot motion via ad-hoc background publishers over ssh left the robot in a RUNAWAY state.** The
+  drive plan was: a background teleop rotation keeps the turret alive, then a "handoff" ssh command
+  kills that teleop so RPP takes over. The handoff ssh command **dropped (exit 255) before its
+  `pkill` ran**, so the `timeout 100 ros2 topic pub … angular.z 0.3` keepalive kept publishing —
+  spinning the robot in place uncommanded until it was manually noticed and e-stopped. It also
+  explains the nav abort: the still-running teleop (prio 50) outranked RPP (prio 10) the whole time,
+  so RPP never actually drove and the goal aborted on stale TF. Two hard lessons: (1) **cmd_vel_bridge's
+  watchdog is NOT an e-stop against a runaway publisher** — it only forces zero on command *absence*;
+  a live unwanted publisher keeps the robot moving. (2) **Never drive the robot via hand-orchestrated
+  background pubs over ssh** — a dropped connection or missed kill = uncommanded motion. Autonomous
+  motion must come from a self-contained controller node with its own supervised lifecycle + a real
+  e-stop, not shell-orchestrated `ros2 topic pub`/`kill` sequences. **Reliable emergency stop that
+  worked:** `PUT HighResolutionManualControlCapability {"action":"disable"}` — halts at Valetudo,
+  source-level, independent of the ROS command graph; keep it as the go-to e-stop. Consequence for
+  F4 stage 3: the whole "teleop keepalive + ssh handoff" scheme is abandoned — solve the
+  turret/localization coupling properly (G31's slam-continuous-TF or turret-alive mode) so RPP can be
+  the sole, self-sustaining driver, before any further autonomous-drive attempt.
 - **G26** (found live, F0(b)'s camera calibration, 2026-07-13) an eyeballed/paced two-point bearing
   calibration produced a physically implausible result — placing a chair "about 1m away" then "about
   1m to the left" and solving the code's linear `bearing = bear_sign*offset_frac*hfov + cam_yaw` model

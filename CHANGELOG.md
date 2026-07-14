@@ -7,6 +7,39 @@ current active roadmap)**.
 
 ---
 
+## 2026-07-14 — F4 stage 3: first autonomous-drive attempt FAILED (safety incident, G32)
+
+Attempted the first `NavigateToPose` autonomous drive (goal 0.8 m away, low speed, supervised). It
+**failed**, and turned into a safety incident worth recording plainly:
+
+- Plan: a background teleop rotation keeps the LiDAR turret spinning (needed for Nav2 to localize;
+  G31), then a "handoff" ssh command kills that teleop so RPP takes over as the sole driver.
+- What happened: the **handoff ssh command dropped (exit 255) before its `pkill` executed**, so the
+  `timeout 100 ros2 topic pub … angular.z 0.3` keepalive kept running. The robot **spun in place
+  uncommanded** until the user noticed and I e-stopped it. Because that teleop (twist_mux prio 50)
+  outranks nav (prio 10), it also blocked RPP the entire time, so the goal never made progress and
+  aborted (nav error 102, TF extrapolation).
+- Robot was stopped cleanly via `PUT HighResolutionManualControlCapability {"action":"disable"}`
+  (source-level halt at Valetudo) + killing the stray publisher; verified idle/stable, no publishers,
+  `/cmd_vel` silent. No collision or damage — the robot only rotated in place.
+
+**Lessons (recorded as G32):** (1) `cmd_vel_bridge`'s watchdog is NOT an e-stop against a runaway
+publisher — it only forces zero on command *absence*, so a live unwanted publisher keeps the robot
+moving. (2) Orchestrating robot motion via ad-hoc background `ros2 topic pub` + `kill` over ssh is
+unsafe — a dropped connection = uncommanded motion. Autonomous motion needs a self-contained
+controller node with a supervised lifecycle + a real e-stop, not shell orchestration.
+
+**Decision (user's call): stop live autonomous-drive attempts; do the robust fix next session.** The
+"teleop-keepalive + ssh handoff" scheme is abandoned. Before re-attempting stage 3: fix the
+turret/localization coupling (G31 — slam-continuous `map->odom` or a turret-alive mode) so RPP is the
+SOLE self-sustaining driver, add a proper non-shell e-stop, and finish the G24 velocity calibration.
+The Nav2 stack itself (planning, costmaps, collision_monitor) is verified sound from stages 1-2; the
+gap is purely safe, self-sustaining *execution* on this LiDAR-gated robot.
+
+Cleaned up: Nav2 stopped, fanoff gate daemon running, robot idle/undocked (battery 77%).
+
+---
+
 ## 2026-07-14 — F4 stage-3 prep: collision_monitor + ippolit-nav unit; Nav2-needs-turret finding (G31)
 
 Prepping the first autonomous drive:
