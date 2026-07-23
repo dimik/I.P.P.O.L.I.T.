@@ -13,7 +13,7 @@ Consolidated handoff for the Radxa Dragon Q6A (QCS6490) companion work. Deep det
 | **Q6A** (QCS6490, aarch64, Radxa OS / Ubuntu 24.04, kernel 6.18 qcom) | companion; **powered ON / in use** (LLM daemon + IMX296 camera active) |
 | **Wired link Odyssey↔Q6A** | direct cable, static `192.168.20.0/24` (Odyssey `.1` / Q6A `.2`), NM profiles `q6a-lan`/`odyssey-lan`, `never-default`. Gigabit, ~1.7 ms, ~107 MB/s. |
 | **Q6A WiFi** | `radxa-dragon-q6a.local` on home LAN (DHCP ~192.168.1.243); mDNS was flaky — prefer the wired IP |
-| **SSH** | from Odyssey: **`ssh ippolit-lan`** (wired, key `~/.ssh/id_ed25519_ippolit`) or `ssh ippolit` (wifi/mDNS fallback) |
+| **SSH** | from Odyssey: **`ssh q6a-ippolit-lan`** (wired, key `~/.ssh/id_ed25519_q6a`) or `ssh q6a-ippolit` (wifi/mDNS fallback) |
 | **Auto-services on Q6A** (autostart at boot) | `q6a-llmd` (LLM daemon), `llama-prewarm`, `docker`, wired link |
 
 Robot (Dreame D10s Pro) was OFFLINE this whole session — no live robot tests done.
@@ -107,7 +107,7 @@ CAM2 live-verified; CAM3 overlay committed + validated. Setup: `scripts/companio
 
 ## 9. Command cheat-sheet
 ```
-ssh ippolit-lan                      # Odyssey -> Q6A (wired)
+ssh q6a-ippolit-lan                      # Odyssey -> Q6A (wired)
 q6a-llm  "one sentence: ..."         # fast local LLM (Genie/NPU adaptive libGenie), no tools
 systemctl status q6a-llmd            # the LLM daemon (from-source adaptive libGenie, poll:true, cool)
 # thermal:  for z in /sys/class/thermal/thermal_zone*; do echo $(cat $z/type)=$(($(cat $z/temp)/1000))C; done

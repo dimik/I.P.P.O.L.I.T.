@@ -117,13 +117,13 @@ consider dropping GNOME/gdm entirely later.
 on; `5K`/5GHz saved as a **manual fallback**, autoconnect off). Currently DHCP `192.168.1.243` on the
 home LAN — use the mDNS name since the IP can change. **Any host on the LAN reaches it** (incl. the
 **Seeed Odyssey**): `ssh radxa@radxa-dragon-q6a.local` (pw `radxa`), then append that host's *public*
-key to `~radxa/.ssh/authorized_keys`. **✅ Done for the Odyssey** (`odyssey-x86j4125`: `ssh ippolit`, key `~/.ssh/id_ed25519_ippolit`, installed 2026-07-02, passwordless verified). (2.4 GHz chosen over 5 GHz for compartment penetration + same
+key to `~radxa/.ssh/authorized_keys`. **✅ Done for the Odyssey** (`odyssey-x86j4125`: `ssh q6a-ippolit`, key `~/.ssh/id_ed25519_q6a`, installed 2026-07-02, passwordless verified). (2.4 GHz chosen over 5 GHz for compartment penetration + same
 band as the robot.)
 - **Direct wired link to the Odyssey (preferred, added 2026-07-02):** point-to-point cable Odyssey
   `enp2s0` ↔ Q6A `enp1s0`, static **`192.168.20.0/24`** (Odyssey `.1`, Q6A `.2`). NM profiles
   `q6a-lan` (Odyssey) / `odyssey-lan` (Q6A), both `ipv4.never-default yes` so the link never touches
-  either box's internet routing (Q6A still defaults out via WiFi). From the Odyssey: **`ssh ippolit-lan`**
-  (→ `192.168.20.2`, ~1.8 ms, key-only, autoconnect survives reboot). The WiFi/mDNS path `ssh ippolit`
+  either box's internet routing (Q6A still defaults out via WiFi). From the Odyssey: **`ssh q6a-ippolit-lan`**
+  (→ `192.168.20.2`, ~1.8 ms, key-only, autoconnect survives reboot). The WiFi/mDNS path `ssh q6a-ippolit`
   stays as a fallback (note: Odyssey mDNS for `*.local` was flaky — the static wired IP is more reliable).
 - **Legacy bring-up link (only if WiFi is down):** macOS **Internet Sharing** (Wi-Fi `en0` → AX88179A
   USB-Ethernet `en7`, direct Mac↔Q6A cable; bridge `192.168.2.1`, leases in `/var/db/dhcpd_leases`)
@@ -139,7 +139,7 @@ v1.5.0), loader `flat_build/flat_build/spinor/dragon-q6a/prog_firehose_ddr.elf`,
 `flat_build_wp_260120` (≥20251230, needed for `r2` images), image `*.output_512.img(.xz)` (sha512
 `c96977…88aaf`), and `flash.sh {detect|firmware|os|reset}`.
 
-**Next steps / TODO:** (1) ✅ Wi-Fi on the Q6A working + the Odyssey reaches it Mac-independently (`ssh ippolit`, done 2026-07-02);
+**Next steps / TODO:** (1) ✅ Wi-Fi on the Q6A working + the Odyssey reaches it Mac-independently (`ssh q6a-ippolit`, done 2026-07-02);
 (2) ✅ ROS 2 Jazzy installed 2026-07-02 (`ros-base` + Nav2) — next: relocate `valetudo_bridge.py`
 here (`--host http://<robot-ip>`) + nav2 bringup consuming `/map`+TF (companion role: vision/nav/audio
 per the Architecture section); (3) integrate into robot 12V power; (4) change default password.
